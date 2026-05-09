@@ -13,57 +13,63 @@
   <aside class="sidebar">
     <div class="sidebar-logo">
       <span class="icon">📊</span>
-      <h1>商业分析助手<span>Business Analyst Agent</span></h1>
+      <h1>
+        <span data-i18n="app.title">商业分析助手</span>
+        <span data-i18n="app.subtitle">Business Analyst Agent</span>
+      </h1>
     </div>
 
     <!-- Data source -->
     <div>
-      <div class="sec-label">数据源</div>
+      <div class="sec-label" data-i18n="sidebar.datasource">数据源</div>
       <div class="source-card">
         <div class="source-dot" id="src-dot"></div>
         <div>
-          <div class="source-name" id="src-name">未连接</div>
-          <div class="source-hint" id="src-hint">请上传文件或连接数据库</div>
+          <div class="source-name" id="src-name" data-i18n="sidebar.disconnected">未连接</div>
+          <div class="source-hint" id="src-hint" data-i18n="sidebar.hint.noconn">请上传文件或连接数据库</div>
         </div>
       </div>
       <div class="btn-group" style="margin-top:9px;">
-        <button class="btn btn-ghost" onclick="openOverlay('ov-excel')">📂 上传 Excel / CSV</button>
-        <button class="btn btn-ghost" onclick="openOverlay('ov-db')">🗄️ 连接 SQL 数据库</button>
-        <button class="btn btn-danger-sm" id="btn-disc" style="display:none" onclick="disconnectSrc()">断开连接</button>
+        <button class="btn btn-ghost" onclick="openOverlay('ov-excel')" data-i18n="sidebar.upload">📂 上传 Excel / CSV</button>
+        <button class="btn btn-ghost" onclick="openOverlay('ov-db')" data-i18n="sidebar.connect_db">🗄️ 连接 SQL 数据库</button>
+        <button class="btn btn-danger-sm" id="btn-disc" style="display:none" onclick="disconnectSrc()" data-i18n="sidebar.disconnect">断开连接</button>
       </div>
     </div>
 
     <!-- Model selector -->
     <div>
-      <div class="sec-label">模型</div>
+      <div class="sec-label" data-i18n="sidebar.model">模型</div>
       <div class="model-row">
         <select class="model-select" id="model-sel" onchange="onModelChange()">
-          <option value="">— 选择模型 —</option>
+          <option value="" data-i18n="sidebar.model_placeholder">— 选择模型 —</option>
         </select>
-        <button class="btn-icon" title="模型设置" onclick="openOverlay('ov-settings')">⚙</button>
+        <button class="btn-icon" data-i18n-title="modal.settings.title" title="模型设置" onclick="openOverlay('ov-settings')">⚙</button>
       </div>
     </div>
 
     <!-- New chat / Save -->
     <div style="display:flex;gap:6px;">
-      <button class="btn btn-ghost" style="flex:1" onclick="newChat()">✦ 新对话</button>
-      <button class="btn btn-ghost" style="flex:1" onclick="openSaveDialog()" title="保存当前对话">💾 保存</button>
+      <button class="btn btn-ghost" style="flex:1" onclick="newChat()" data-i18n="sidebar.new_chat">✦ 新对话</button>
+      <button class="btn btn-ghost" style="flex:1" onclick="openSaveDialog()" data-i18n="sidebar.save" title="保存当前对话">💾 保存</button>
     </div>
 
     <!-- Saved sessions -->
     <div>
       <div class="sec-label" style="display:flex;align-items:center;justify-content:space-between;">
-        <span>已保存对话</span>
-        <span style="cursor:pointer;font-size:11px;color:#475569" onclick="loadSavedList()">↻ 刷新</span>
+        <span data-i18n="sidebar.saved_sessions">已保存对话</span>
+        <span style="cursor:pointer;font-size:11px;color:#475569" onclick="loadSavedList()" data-i18n="sidebar.refresh">↻ 刷新</span>
       </div>
       <div id="saved-list" style="display:flex;flex-direction:column;gap:5px;max-height:240px;overflow-y:auto;">
-        <div style="font-size:12px;color:#334155;padding:4px 0">加载中…</div>
+        <div style="font-size:12px;color:#334155;padding:4px 0" data-i18n="sidebar.loading">加载中…</div>
       </div>
     </div>
 
     <div class="sidebar-footer">
-      <span style="color:#475569;">v1.0 Author: Zafer_Liu</span>
-      <button class="btn-update" onclick="openOverlay('ov-update')" title="从 GitHub 拉取最新版本">🔄 检查更新</button>
+      <span style="color:#475569;">v1.2 Author: Zafer_Liu</span>
+      <div style="display:flex;gap:6px;align-items:center;">
+        <button class="btn-lang" id="lang-toggle" onclick="setLang(getLang()==='zh'?'en':'zh')">EN</button>
+        <button class="btn-update" onclick="openOverlay('ov-update')" data-i18n="sidebar.check_update">🔄 检查更新</button>
+      </div>
     </div>
   </aside>
 
@@ -71,27 +77,29 @@
   <div class="main">
     <div class="chat-header">
       <div>
-        <div class="chat-header-title">💬 对话分析</div>
-        <div class="chat-header-sub" id="hdr-sub">连接数据源开始分析</div>
+        <div class="chat-header-title" data-i18n="header.title">💬 对话分析</div>
+        <div class="chat-header-sub" id="hdr-sub" data-i18n="header.subtitle">连接数据源开始分析</div>
       </div>
       <div class="header-btns">
-        <button class="hdr-btn" id="btn-schema" style="display:none" onclick="openSchemaView()">🗂 数据结构</button>
+        <button class="hdr-btn" id="btn-schema" style="display:none" onclick="openSchemaView()" data-i18n="header.schema">🗂 数据结构</button>
       </div>
     </div>
 
     <div class="messages" id="messages">
       <div class="welcome" id="welcome">
         <div class="big-icon">🔍</div>
-        <h2>开始您的数据分析</h2>
-        <p>连接数据库或上传 Excel，用自然语言提问，AI 会自动查询、分析并生成图表。<br>
+        <h2 data-i18n="welcome.title">开始您的数据分析</h2>
+        <p data-i18n-html="welcome.desc">连接数据库或上传 Excel，用自然语言提问，AI 会自动查询、分析并生成图表。<br>
            输入 <strong>/</strong> 可快速选择专属命令。</p>
         <div class="hint-chips">
           <div class="hint-chip" onclick="fillHint(this)">各品类的销售额是多少？</div>
           <div class="hint-chip" onclick="fillHint(this)">近12个月的销售趋势如何？</div>
           <div class="hint-chip" onclick="fillHint(this)">哪些客户贡献了最多收入？</div>
           <div class="hint-chip" onclick="fillHint(this)">/chart 各地区业绩对比柱状图</div>
-          <div class="hint-chip" onclick="fillHint(this)">/analyze Data_Decile_Analysis 对销售额做十分位分析</div>
-          <div class="hint-chip" onclick="fillHint(this)">/analyze K_Means 对客户做聚类分析，K=3</div>
+          <div class="hint-chip" onclick="fillHint(this)">/decile 对销售额做十分位分析</div>
+          <div class="hint-chip" onclick="fillHint(this)">/tree 用 C4.5 决策树预测客户流失</div>
+          <div class="hint-chip" onclick="fillHint(this)">/kmeans 对客户做聚类分析，K=3</div>
+          <div class="hint-chip" onclick="fillHint(this)">/data 查看数据概况和分布</div>
         </div>
       </div>
     </div>
@@ -100,8 +108,10 @@
     <div class="input-area">
       <!-- Slash command popup (above input) -->
       <div class="slash-popup" id="slash-popup">
-        <div class="slash-pop-header">斜杠命令</div>
-        <!-- items injected by JS -->
+        <div class="slash-pop-header" data-i18n="slash.header">斜杠命令  ·  输入字母快速筛选</div>
+        <div class="slash-popup-scroll" id="slash-popup-scroll">
+          <!-- items injected by JS -->
+        </div>
       </div>
 
       <!-- Token usage bar -->
@@ -114,6 +124,7 @@
 
       <div class="input-wrap">
         <textarea id="msg-input" rows="1"
+          data-i18n-ph="input.placeholder"
           placeholder="输入问题，或键入 / 选择命令…"
           oninput="onInput(event)" onkeydown="onKeyDown(event)"></textarea>
         <div class="input-actions">
@@ -121,7 +132,8 @@
             <span id="cmd-badge-text"></span>
             <span class="x">×</span>
           </div>
-          <button class="send-btn" id="send-btn" onclick="onSendOrStop()" title="发送 (Enter)">↑</button>
+          <button class="send-btn" id="send-btn" onclick="onSendOrStop()"
+            data-i18n-title="send.title" title="发送 (Enter)">↑</button>
         </div>
       </div>
     </div>
@@ -133,17 +145,17 @@
 <!-- Excel upload -->
 <div class="overlay" id="ov-excel" onclick="closeOutside(event,'ov-excel')">
   <div class="modal">
-    <div class="modal-title">📂 上传 Excel / CSV 文件</div>
+    <div class="modal-title" data-i18n="modal.excel.title">📂 上传 Excel / CSV 文件</div>
     <div class="f-row">
-      <label>选择文件</label>
+      <label data-i18n="modal.excel.label">选择文件</label>
       <input type="file" id="xl-file" accept=".xlsx,.xls,.csv" onchange="onXlFile()">
-      <div class="f-hint">支持 .xlsx / .xls / .csv，超 5000 行图表自动截断</div>
+      <div class="f-hint" data-i18n="modal.excel.hint">支持 .xlsx / .xls / .csv</div>
     </div>
     <pre class="schema-box" id="xl-schema" style="display:none"></pre>
     <div class="msg-err" id="xl-err"></div>
     <div class="modal-footer">
-      <button class="btn-sm btn-sm-ghost" onclick="closeOverlay('ov-excel')">取消</button>
-      <button class="btn-sm btn-sm-primary" id="xl-btn" onclick="uploadXl()" disabled>上传</button>
+      <button class="btn-sm btn-sm-ghost" onclick="closeOverlay('ov-excel')" data-i18n="modal.cancel">取消</button>
+      <button class="btn-sm btn-sm-primary" id="xl-btn" onclick="uploadXl()" disabled data-i18n="modal.upload">上传</button>
     </div>
   </div>
 </div>
@@ -151,21 +163,24 @@
 <!-- DB connect -->
 <div class="overlay" id="ov-db" onclick="closeOutside(event,'ov-db')">
   <div class="modal">
-    <div class="modal-title">🗄️ 连接 SQL 数据库</div>
+    <div class="modal-title" data-i18n="modal.db.title">🗄️ 连接 SQL 数据库</div>
     <div class="f-row">
-      <label>显示名称（可选）</label>
-      <input type="text" id="db-name" placeholder="例如：生产数据库">
+      <label data-i18n="modal.db.name_label">显示名称（可选）</label>
+      <input type="text" id="db-name" data-i18n-ph="modal.db.name_ph" placeholder="例如：生产数据库">
     </div>
     <div class="f-row">
-      <label>连接字符串 <span style="color:#ef4444">*</span></label>
+      <label>
+        <span data-i18n="modal.db.conn_label">连接字符串</span>
+        <span style="color:#ef4444"> *</span>
+      </label>
       <textarea id="db-conn" placeholder="示例：&#10;mysql+pymysql://user:pass@host:3306/dbname&#10;postgresql://user:pass@host:5432/dbname&#10;sqlite:///./data.db"></textarea>
-      <div class="f-hint">支持 MySQL、PostgreSQL、SQLite、SQL Server 等 SQLAlchemy 数据库</div>
+      <div class="f-hint" data-i18n="modal.db.hint">支持 MySQL、PostgreSQL、SQLite、SQL Server 等 SQLAlchemy 数据库</div>
     </div>
     <pre class="schema-box" id="db-schema" style="display:none"></pre>
     <div class="msg-err" id="db-err"></div>
     <div class="modal-footer">
-      <button class="btn-sm btn-sm-ghost" onclick="closeOverlay('ov-db')">取消</button>
-      <button class="btn-sm btn-sm-primary" onclick="connectDB()">连接</button>
+      <button class="btn-sm btn-sm-ghost" onclick="closeOverlay('ov-db')" data-i18n="modal.cancel">取消</button>
+      <button class="btn-sm btn-sm-primary" onclick="connectDB()" data-i18n="modal.connect">连接</button>
     </div>
   </div>
 </div>
@@ -173,14 +188,14 @@
 <!-- Data preview modal -->
 <div class="overlay" id="ov-schema" onclick="closeOutside(event,'ov-schema')">
   <div class="modal preview-modal">
-    <div class="modal-title" id="preview-title">🗂 数据预览</div>
+    <div class="modal-title" id="preview-title" data-i18n="modal.preview.title">🗂 数据预览</div>
     <div class="preview-tabs" id="preview-tabs"></div>
     <div class="preview-table-wrap" id="preview-table-wrap">
-      <div class="preview-loading">加载中…</div>
+      <div class="preview-loading" data-i18n="preview.loading">加载中…</div>
     </div>
     <div class="preview-footer" id="preview-footer"></div>
     <div class="modal-footer">
-      <button class="btn-sm btn-sm-ghost" onclick="closeOverlay('ov-schema')">关闭</button>
+      <button class="btn-sm btn-sm-ghost" onclick="closeOverlay('ov-schema')" data-i18n="modal.close">关闭</button>
     </div>
   </div>
 </div>
@@ -188,44 +203,45 @@
 <!-- Settings modal -->
 <div class="overlay" id="ov-settings" onclick="closeOutside(event,'ov-settings')">
   <div class="modal">
-    <div class="modal-title">⚙ 模型设置</div>
+    <div class="modal-title" data-i18n="modal.settings.title">⚙ 模型设置</div>
 
     <!-- Built-in providers -->
     <div class="settings-sec">
-      <div class="settings-sec-title">内置模型提供商</div>
+      <div class="settings-sec-title" data-i18n="modal.settings.builtin">内置模型提供商</div>
       <div id="builtin-providers"><!-- injected by JS --></div>
     </div>
 
     <!-- Custom models -->
     <div class="settings-sec">
-      <div class="settings-sec-title">自定义模型</div>
+      <div class="settings-sec-title" data-i18n="modal.settings.custom">自定义模型</div>
       <div class="custom-list" id="custom-list"><!-- injected by JS --></div>
 
-      <div class="add-custom-toggle" onclick="toggleAddCustom()">＋ 添加自定义模型</div>
+      <div class="add-custom-toggle" onclick="toggleAddCustom()" data-i18n="modal.settings.add_custom">＋ 添加自定义模型</div>
 
       <div class="add-custom-form" id="add-custom-form">
-        <input type="text"     id="ac-name"    placeholder="模型名称（显示用）">
-        <input type="text"     id="ac-url"     placeholder="API Base URL，例如 https://api.deepseek.com">
-        <input type="text"     id="ac-model"   placeholder="Model ID，例如 deepseek-chat">
-        <input type="password" id="ac-key"     placeholder="API Key">
+        <input type="text"     id="ac-name"   data-i18n-ph="add_custom.name_ph"  placeholder="模型名称（显示用）">
+        <input type="text"     id="ac-url"    data-i18n-ph="add_custom.url_ph"   placeholder="API Base URL，例如 https://api.deepseek.com">
+        <input type="text"     id="ac-model"  data-i18n-ph="add_custom.model_ph" placeholder="Model ID，例如 deepseek-chat">
+        <input type="password" id="ac-key"    data-i18n-ph="add_custom.key_ph"   placeholder="API Key">
         <div style="display:flex;gap:8px;">
-          <input type="number" id="ac-ctx"    placeholder="上下文窗口（tokens，选填）" style="flex:1">
-          <input type="number" id="ac-output" placeholder="最大输出（tokens，选填）"   style="flex:1">
+          <input type="number" id="ac-ctx"    data-i18n-ph="add_custom.ctx_ph"   placeholder="上下文窗口（tokens，选填）" style="flex:1">
+          <input type="number" id="ac-output" data-i18n-ph="add_custom.out_ph"   placeholder="最大输出（tokens，选填）"   style="flex:1">
         </div>
         <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#475569;cursor:pointer;padding:2px 0">
-          <input type="checkbox" id="ac-think"> 启用思考模式
+          <input type="checkbox" id="ac-think">
+          <span data-i18n="add_custom.think">启用思考模式</span>
         </label>
         <div class="msg-err" id="ac-err"></div>
         <div class="msg-ok"  id="ac-ok"></div>
         <div style="display:flex;gap:7px;justify-content:flex-end;">
-          <button class="btn-sm btn-sm-ghost" onclick="toggleAddCustom()">取消</button>
-          <button class="btn-sm btn-sm-primary" onclick="addCustomModel()">保存</button>
+          <button class="btn-sm btn-sm-ghost"   onclick="toggleAddCustom()" data-i18n="modal.cancel">取消</button>
+          <button class="btn-sm btn-sm-primary" onclick="addCustomModel()"  data-i18n="modal.save_btn">保存</button>
         </div>
       </div>
     </div>
 
     <div class="modal-footer">
-      <button class="btn-sm btn-sm-ghost" onclick="closeOverlay('ov-settings')">关闭</button>
+      <button class="btn-sm btn-sm-ghost" onclick="closeOverlay('ov-settings')" data-i18n="modal.close">关闭</button>
     </div>
   </div>
 </div>
@@ -233,15 +249,16 @@
 <!-- Save session dialog -->
 <div class="overlay" id="ov-save" onclick="closeOutside(event,'ov-save')">
   <div class="modal" style="width:400px">
-    <div class="modal-title">💾 保存对话</div>
+    <div class="modal-title" data-i18n="modal.save.title">💾 保存对话</div>
     <div class="f-row">
-      <label>对话名称</label>
-      <input type="text" id="save-name" placeholder="留空则自动生成时间戳名称" maxlength="60">
+      <label data-i18n="modal.save.label">对话名称</label>
+      <input type="text" id="save-name" data-i18n-ph="modal.save.ph"
+        placeholder="留空则自动生成时间戳名称" maxlength="60">
     </div>
     <div class="msg-err" id="save-err"></div>
     <div class="modal-footer">
-      <button class="btn-sm btn-sm-ghost" onclick="closeOverlay('ov-save')">取消</button>
-      <button class="btn-sm btn-sm-primary" onclick="saveSession()">保存</button>
+      <button class="btn-sm btn-sm-ghost"   onclick="closeOverlay('ov-save')" data-i18n="modal.cancel">取消</button>
+      <button class="btn-sm btn-sm-primary" onclick="saveSession()"           data-i18n="modal.save_btn">保存</button>
     </div>
   </div>
 </div>
@@ -249,28 +266,30 @@
 <!-- Update modal -->
 <div class="overlay" id="ov-update" onclick="closeOutside(event,'ov-update')">
   <div class="modal" style="width:540px">
-    <div class="modal-title">🔄 检查更新</div>
+    <div class="modal-title" data-i18n="modal.update.title">🔄 检查更新</div>
     <div class="update-repo-hint">
       来源：<a href="https://github.com/Zafer-Liu/Data-Analysis-Agent" target="_blank" rel="noopener">github.com/Zafer-Liu/Data-Analysis-Agent</a>
       &nbsp;·&nbsp; 方式：下载 <code>main.zip</code> 并覆盖代码文件（用户数据不受影响）
     </div>
     <div id="update-state" class="update-state update-idle">
       <span class="update-state-icon">💡</span>
-      <span class="update-state-text">点击"拉取更新"从 GitHub 获取最新代码</span>
+      <span class="update-state-text" data-i18n="modal.update.idle">点击"拉取更新"从 GitHub 获取最新代码</span>
     </div>
     <pre class="update-output" id="update-output" style="display:none"></pre>
-    <div class="update-restart-hint" id="update-restart-hint" style="display:none">
+    <div class="update-restart-hint" id="update-restart-hint" style="display:none"
+         data-i18n="modal.update.restart">
       ⚠️ 代码已更新，请重启服务（Ctrl+C → python app.py）使改动生效。
     </div>
     <div class="modal-footer">
-      <button class="btn-sm btn-sm-ghost" onclick="closeOverlay('ov-update')">关闭</button>
-      <button class="btn-sm btn-sm-primary" id="update-btn" onclick="runUpdate()">⬇ 拉取更新</button>
+      <button class="btn-sm btn-sm-ghost"   onclick="closeOverlay('ov-update')" data-i18n="modal.close">关闭</button>
+      <button class="btn-sm btn-sm-primary" id="update-btn" onclick="runUpdate()" data-i18n="modal.update.btn">⬇ 拉取更新</button>
     </div>
   </div>
 </div>
 
 <div class="toast" id="toast"></div>
 
+<script src="{{ url_for('static', filename='js/i18n.js') }}"></script>
 <script src="{{ url_for('static', filename='js/agent_chat.js') }}"></script>
 </body>
 </html>

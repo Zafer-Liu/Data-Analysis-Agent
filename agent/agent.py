@@ -201,6 +201,93 @@ AGENT_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "profile_data",
+            "description": (
+                "Profile a data table: per-column missing value %, dtype, "
+                "and for numeric columns: mean/std/min/max/quartiles. "
+                "Also generates distribution histogram charts automatically. "
+                "Call this for the /data command."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "table_name": {
+                        "type": "string",
+                        "description": "Table to profile. Leave empty to use the first available table.",
+                    },
+                    "columns": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional list of columns to limit profiling to.",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "clean_data",
+            "description": (
+                "Clean data in-place and store result as 'cleaned_data' table. "
+                "Supports three operations:\n"
+                "  fill_na   — fill NaN with zero / mean / median\n"
+                "  winsorize — cap values at lower/upper percentiles\n"
+                "  trimming  — remove rows outside [min_val, max_val] on one column"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "operation": {
+                        "type": "string",
+                        "description": "One of: fill_na | winsorize | trimming",
+                    },
+                    "table_name": {
+                        "type": "string",
+                        "description": "Source table name. Leave empty to use the first available raw table.",
+                    },
+                    "columns": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Columns to process (fill_na / winsorize). None = all numeric columns.",
+                    },
+                    "fill_method": {
+                        "type": "string",
+                        "description": "For fill_na: 'zero' | 'mean' | 'median'",
+                    },
+                    "lower_pct": {
+                        "type": "number",
+                        "description": "For winsorize: lower percentile, 0–100 (e.g. 1 for 1st percentile)",
+                    },
+                    "upper_pct": {
+                        "type": "number",
+                        "description": "For winsorize: upper percentile, 0–100 (e.g. 99 for 99th percentile)",
+                    },
+                    "trim_column": {
+                        "type": "string",
+                        "description": "For trimming: the column to filter on",
+                    },
+                    "min_val": {
+                        "type": "number",
+                        "description": "For trimming: minimum value to keep (inclusive)",
+                    },
+                    "max_val": {
+                        "type": "number",
+                        "description": "For trimming: maximum value to keep (inclusive)",
+                    },
+                    "output_table": {
+                        "type": "string",
+                        "description": "Name for the result table (default: 'cleaned_data')",
+                    },
+                },
+                "required": ["operation"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "export_excel",
             "description": (
                 "Export data tables to an Excel (.xlsx) file. "
@@ -564,6 +651,86 @@ class BusinessAgent:
             return {"error": result["error"]}
         return {"html": result.get("html", ""), "chart_type": chart_type}
 
+    def _get_first_raw_table(self) -> str:
+        """Return the first non-analysis table name, or first table if all are analysis."""
+        tables = self._discover_all_tables()
+        raw = [t for t in tables if not t.startswith("analysis_") and t != "cleaned_data"]
+        return raw[0] if raw else (tables[0] if tables else "")
+
+    def _tool_profile_data(self, table_name: str = "", columns: list = None) -> dict:
+        """Returns {"text": markdown, "charts": [html, ...]}."""
+        if not self.data_source:
+            return {"text": "❌ 请先连接数据源。", "charts": []}
+
+        tname = table_name or self._get_first_raw_table()
+        if not tname:
+            return {"text": "❌ 数据源中没有可用的表格。", "charts": []}
+
+        df, err = self.data_source.execute_query(f'SELECT * FROM "{tname}"')
+        if err or df is None or df.empty:
+            return {"text": f"❌ 读取表 '{tname}' 失败：{err}", "charts": []}
+
+        try:
+            from Function.Clean.data_profile import profile
+            text, charts = profile(df, columns or None)
+            return {"text": f"### 数据概况 · `{tname}`\n\n" + text, "charts": charts}
+        except Exception as exc:
+            return {"text": f"❌ 数据概况生成失败：{exc}", "charts": []}
+
+    def _tool_clean_data(
+        self,
+        operation: str,
+        table_name: str = "",
+        columns=None,
+        fill_method: str = "mean",
+        lower_pct: float = 1.0,
+        upper_pct: float = 99.0,
+        trim_column: str = "",
+        min_val=None,
+        max_val=None,
+        output_table: str = "cleaned_data",
+    ) -> str:
+        if not self.data_source:
+            return "❌ 请先连接数据源。"
+
+        tname = table_name or self._get_first_raw_table()
+        if not tname:
+            return "❌ 数据源中没有可用的表格。"
+
+        df, err = self.data_source.execute_query(f'SELECT * FROM "{tname}"')
+        if err or df is None or df.empty:
+            return f"❌ 读取表 '{tname}' 失败：{err}"
+
+        try:
+            if operation == "fill_na":
+                from Function.Clean.missing_handler import fill_missing
+                cleaned_df, summary = fill_missing(df, fill_method, columns)
+            elif operation == "winsorize":
+                from Function.Clean.winsorize import winsorize
+                cleaned_df, summary = winsorize(df, lower_pct, upper_pct, columns)
+            elif operation == "trimming":
+                if not trim_column:
+                    return "❌ trimming 操作需要指定 trim_column。"
+                if min_val is None or max_val is None:
+                    return "❌ trimming 操作需要同时指定 min_val 和 max_val。"
+                from Function.Clean.trimming import trim
+                cleaned_df, summary = trim(df, trim_column, float(min_val), float(max_val))
+            else:
+                return f"❌ 未知操作 '{operation}'，支持：fill_na / winsorize / trimming"
+        except Exception as exc:
+            return f"❌ 清洗失败：{exc}"
+
+        try:
+            self._write_analysis_df(cleaned_df, output_table)
+            self._schema_cache = None
+        except Exception as exc:
+            return summary + f"\n\n⚠️ 结果表写入失败：{exc}"
+
+        return (
+            summary
+            + f"\n\n✅ 清洗结果已保存为表 `{output_table}`，可直接用于后续分析和图表生成。"
+        )
+
     def _discover_all_tables(self) -> list:
         """Return every table name currently available in the data source."""
         if not self.data_source:
@@ -656,41 +823,93 @@ class BusinessAgent:
             "The user issued the /sql command. Execute the SQL they described and show "
             "the results clearly formatted as a table, then provide a short insight."
         ),
-        "analyze": (
-            "The user issued the /analyze command, optionally followed by an analysis name "
-            "(e.g. 'Data_Decile_Analysis') and a description of what to analyse.\n"
+        "decile": (
+            "The user issued the /decile command for Data_Decile_Analysis (十分位分析).\n"
             "Workflow:\n"
-            "1. Call get_schema to understand the data structure.\n"
-            "2. Identify the analysis name from the user message (default: Data_Decile_Analysis).\n"
-            "3. Choose the most appropriate numeric target_column from the schema.\n"
-            "   If the user mentioned a column or metric, use that; otherwise pick the most "
-            "   business-relevant numeric column (e.g. revenue, amount, score).\n"
-            "4. Optionally choose a groupby_column if the user asked for a breakdown by category.\n"
-            "5. Call run_analysis with the chosen parameters.\n"
-            "6. After run_analysis, generate charts from the result tables:\n"
-            "   For Data_Decile_Analysis:\n"
-            "     a) Bar_Chart(analysis_result): x=decile, y=sum  (value by bucket)\n"
-            "     b) Line_Chart(analysis_result): x=decile, y=cumulative_pct  (Pareto curve)\n"
-            "   For Decision_Tree — ALWAYS generate all three charts:\n"
-            "     a) Bar_Chart(analysis_result): x=feature, y=importance_pct  (feature importance)\n"
-            "     b) Heatmap(analysis_breakdown): x=predicted, y=actual, z=count  (confusion matrix)\n"
-            "     c) Line_Chart(analysis_roc): x=fpr, y=tpr, series=class  (ROC curve, one line per class)\n"
-            "        The Line_Chart title should include AUC values for each class.\n"
-            "   For K_Means — ALWAYS generate all three charts:\n"
-            "     a) Bar_Chart(analysis_result): x=cluster, y=count  (cluster sizes)\n"
-            "     b) Scatter_Plot(analysis_breakdown): x=<feat1>, y=<feat2>, color=cluster\n"
-            "        (pick the 2 most business-relevant numeric columns for x and y axes)\n"
-            "     c) Line_Chart(analysis_elbow): x=k, y=inertia  (elbow curve)\n"
-            "   K_Means SQL rules:\n"
-            "     - SELECT the numeric features to cluster on.\n"
-            "     - Set n_deciles = K (number of clusters).\n"
-            "     - groupby_column can be a categorical label column for cluster purity.\n"
-            "     - A bonus table 'cluster_labels' is auto-created with ALL original columns\n"
-            "       + the cluster assignment for every row — use it for follow-up analysis:\n"
-            "       e.g. SELECT cluster, AVG(revenue) FROM cluster_labels GROUP BY cluster\n"
-            "            SELECT * FROM cluster_labels WHERE cluster = 0 LIMIT 20\n"
-            "   If analysis_breakdown is available for other analyses, generate a Heatmap.\n"
-            "7. Conclude with a concise business interpretation (2-4 sentences)."
+            "1. Call get_schema ONCE to understand the data.\n"
+            "2. Choose the most relevant numeric target_column "
+            "(revenue / amount / score — whatever the user mentioned, or the most business-relevant).\n"
+            "3. Optionally set groupby_column if the user wants a category breakdown.\n"
+            "4. Call run_analysis(analysis_name='Data_Decile_Analysis', sql=..., target_column=...).\n"
+            "   SQL: SELECT <target_col>[, <groupby_col>] FROM <table>\n"
+            "5. Generate BOTH charts from analysis_result:\n"
+            "   a) Bar_Chart: x=decile, y=sum  — value distribution by bucket\n"
+            "   b) Line_Chart: x=decile, y=cumulative_pct  — Pareto cumulative curve\n"
+            "6. Conclude with a 2-4 sentence business interpretation."
+        ),
+        "tree": (
+            "The user issued the /tree command for Decision_Tree analysis.\n"
+            "Workflow:\n"
+            "1. Call get_schema ONCE.\n"
+            "2. target_column = the classification label column.\n"
+            "3. groupby_column = algorithm choice: 'ID3' | 'C4.5' | 'CART' "
+            "(default 'C4.5'; infer from user message if mentioned).\n"
+            "4. n_deciles = max_depth (0 = unlimited; default 0).\n"
+            "5. Call run_analysis(analysis_name='Decision_Tree', sql=..., target_column=..., "
+            "groupby_column=<algorithm>).\n"
+            "   SQL: SELECT <feature_cols>, <target_col> FROM <table>\n"
+            "6. Generate ALL THREE charts:\n"
+            "   a) Bar_Chart(analysis_result): x=feature, y=importance_pct  — feature importance\n"
+            "   b) Heatmap(analysis_breakdown): x=predicted, y=actual, z=count  — confusion matrix\n"
+            "   c) Line_Chart(analysis_roc): x=fpr, y=tpr, series=class  — ROC curve\n"
+            "      Include AUC values in the chart title.\n"
+            "7. Conclude with a 2-4 sentence business interpretation."
+        ),
+        "kmeans": (
+            "The user issued the /kmeans command for K-Means clustering.\n"
+            "Workflow:\n"
+            "1. Call get_schema ONCE.\n"
+            "2. SELECT the numeric feature columns to cluster on.\n"
+            "3. n_deciles = K (number of clusters; default 3, or as specified by the user).\n"
+            "4. groupby_column = optional categorical label column for cluster purity analysis.\n"
+            "5. Call run_analysis(analysis_name='K_Means', sql=..., target_column=<main_numeric_col>, "
+            "n_deciles=<K>).\n"
+            "   SQL: SELECT <numeric_feature_cols>[, <label_col>] FROM <table>\n"
+            "6. Generate ALL THREE charts:\n"
+            "   a) Bar_Chart(analysis_result): x=cluster, y=count  — cluster sizes\n"
+            "   b) Scatter_Plot(analysis_breakdown): x=<feat1>, y=<feat2>, color=cluster\n"
+            "      — pick the 2 most business-relevant numeric columns for x/y\n"
+            "   c) Line_Chart(analysis_elbow): x=k, y=inertia  — elbow curve\n"
+            "7. A bonus table 'cluster_labels' (all original columns + cluster) is auto-created:\n"
+            "   SELECT cluster, AVG(revenue) FROM cluster_labels GROUP BY cluster\n"
+            "8. Conclude with a 2-4 sentence business interpretation."
+        ),
+        "data": (
+            "The user issued the /data command to profile their data.\n"
+            "Call profile_data immediately as your FIRST and ONLY tool call.\n"
+            "Pass table_name if the user specified one; otherwise leave it empty.\n"
+            "Do NOT call get_schema, query_data, or any other tool first.\n"
+            "After profile_data returns, present the stats summary to the user — "
+            "the distribution charts are automatically included."
+        ),
+        "inset": (
+            "The user issued the /inset command to handle missing values.\n"
+            "Call clean_data(operation='fill_na', fill_method=<method>) immediately.\n"
+            "Determine fill_method from the user's message:\n"
+            "  • '0' / 'zero' / '补0' → fill_method='zero'\n"
+            "  • 'mean' / '均值' → fill_method='mean'\n"
+            "  • 'median' / '中位数' → fill_method='median'\n"
+            "  Default to 'mean' if the user did not specify.\n"
+            "Pass table_name if mentioned; otherwise leave empty (auto-detects first table).\n"
+            "Do NOT call any other data tools before clean_data.\n"
+            "After the call, tell the user the cleaned table is saved as 'cleaned_data'."
+        ),
+        "winsorize": (
+            "The user issued the /winsorize command to cap extreme values.\n"
+            "Call clean_data(operation='winsorize', lower_pct=<N>, upper_pct=<M>) immediately.\n"
+            "Extract lower_pct and upper_pct from the user's message (e.g. '1 99' → lower=1, upper=99).\n"
+            "Default: lower_pct=1, upper_pct=99 if not specified.\n"
+            "Do NOT call any other data tools before clean_data.\n"
+            "After the call, tell the user the result is saved as 'cleaned_data'."
+        ),
+        "trimming": (
+            "The user issued the /trimming command to remove rows outside a value range.\n"
+            "Call clean_data(operation='trimming', trim_column=<col>, min_val=<N>, max_val=<M>) immediately.\n"
+            "Extract trim_column, min_val, and max_val from the user's message.\n"
+            "If trim_column is unclear, call get_schema ONCE first to see numeric columns, "
+            "then immediately call clean_data.\n"
+            "Do NOT call query_data or any analysis tool.\n"
+            "After the call, tell the user the result is saved as 'cleaned_data'."
         ),
         "export": (
             "The user issued the /export command to export data to Excel.\n"
@@ -848,6 +1067,8 @@ class BusinessAgent:
                         "query_data":            f"执行查询: {args.get('sql', '')[:60]}...",
                         "run_analysis":          f"运行分析: {args.get('analysis_name', '?')} · 目标列: {args.get('target_column', '?')}...",
                         "generate_chart":        f"生成 {args.get('chart_type', '?')} 图表...",
+                        "profile_data":          f"分析数据概况: {args.get('table_name', '自动检测')}...",
+                        "clean_data":            f"数据清洗 [{args.get('operation', '?')}]: {args.get('table_name', '自动检测')}...",
                         "export_excel":          f"导出 Excel → {', '.join(args.get('tables', []))[:50]}...",
                         "export_report":         f"生成 Word 报告: {args.get('title', '?')[:40]}...",
                     }
@@ -895,6 +1116,31 @@ class BusinessAgent:
                                 )
                             else:
                                 tool_result = f"Chart failed: {chart.get('error', 'unknown')}"
+                        elif name == "profile_data":
+                            result = self._tool_profile_data(
+                                table_name=args.get("table_name", ""),
+                                columns=args.get("columns", []),
+                            )
+                            for html in result.get("charts", []):
+                                pending_charts.append(html)
+                                yield {
+                                    "type": "chart_placeholder",
+                                    "index": len(pending_charts) - 1,
+                                }
+                            tool_result = result.get("text", "数据概况生成失败。")
+                        elif name == "clean_data":
+                            tool_result = self._tool_clean_data(
+                                operation=args.get("operation", ""),
+                                table_name=args.get("table_name", ""),
+                                columns=args.get("columns"),
+                                fill_method=args.get("fill_method", "mean"),
+                                lower_pct=float(args.get("lower_pct", 1)),
+                                upper_pct=float(args.get("upper_pct", 99)),
+                                trim_column=args.get("trim_column", ""),
+                                min_val=args.get("min_val"),
+                                max_val=args.get("max_val"),
+                                output_table=args.get("output_table", "cleaned_data"),
+                            )
                         elif name == "export_excel":
                             tool_result = self._tool_export_excel(
                                 tables=args.get("tables", []),
