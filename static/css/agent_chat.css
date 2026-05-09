@@ -434,3 +434,53 @@ html, body { height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Sego
   padding: 6px 12px; font-size: 12px; color: #64748b; cursor: pointer;
   display: flex; align-items: center; gap: 5px; transition: all .15s; }
 .hdr-btn:hover { border-color: #3b82f6; color: #3b82f6; }
+
+/* ── Sidebar footer + update button ──────────────────────────────── */
+.sidebar-footer {
+  margin-top: auto; padding-top: 10px;
+  border-top: 1px solid #2d2d4e;
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px;
+}
+.btn-update {
+  border: 1px solid #2d2d4e; background: transparent; color: #64748b;
+  border-radius: 6px; padding: 5px 10px; font-size: 11px; cursor: pointer;
+  white-space: nowrap; transition: all .15s;
+}
+.btn-update:hover { border-color: #3b82f6; color: #60a5fa; background: #0f172a; }
+
+/* ── Update modal ─────────────────────────────────────────────────── */
+.update-repo-hint {
+  font-size: 12px; color: #94a3b8; margin: -10px 0 16px;
+}
+.update-repo-hint a { color: #60a5fa; text-decoration: none; }
+.update-repo-hint a:hover { text-decoration: underline; }
+.update-repo-hint code { background: #f1f5f9; color: #475569;
+  border-radius: 4px; padding: 1px 5px; font-size: 11px; }
+.update-state {
+  display: flex; align-items: center; gap: 10px;
+  border-radius: 9px; padding: 12px 14px; margin-bottom: 14px;
+  font-size: 13px; font-weight: 500;
+}
+.update-idle  { background: #f8fafc; color: #64748b; border: 1px solid #e2e8f0; }
+.update-loading { background: #eff6ff; color: #3b82f6; border: 1px solid #bfdbfe; }
+.update-ok    { background: #f0fdf4; color: #15803d; border: 1px solid #bbf7d0; }
+.update-err   { background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; }
+.update-state-icon { font-size: 18px; line-height: 1; flex-shrink: 0; }
+.update-state-text { flex: 1; }
+.update-spinner {
+  width: 16px; height: 16px; border-radius: 50%; flex-shrink: 0;
+  border: 2px solid #bfdbfe; border-top-color: #3b82f6;
+  animation: spin .7s linear infinite;
+}
+.update-output {
+  background: #0f172a; color: #94a3b8; border-radius: 8px;
+  padding: 12px 14px; font-size: 12px; font-family: monospace;
+  max-height: 240px; overflow-y: auto; white-space: pre-wrap;
+  word-break: break-all; margin-bottom: 10px;
+}
+.update-restart-hint {
+  font-size: 12px; color: #92400e; background: #fffbeb;
+  border: 1px solid #fde68a; border-radius: 8px;
+  padding: 9px 13px; margin-bottom: 4px;
+}

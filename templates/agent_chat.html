@@ -61,7 +61,10 @@
       </div>
     </div>
 
-    <div class="sidebar-footer" style="color:#fff;">v1.0_beta</div>
+    <div class="sidebar-footer">
+      <span style="color:#475569;">v1.0_beta</span>
+      <button class="btn-update" onclick="openOverlay('ov-update')" title="从 GitHub 拉取最新版本">🔄 检查更新</button>
+    </div>
   </aside>
 
   <!-- ── Main ───────────────────────────────────────────────────── -->
@@ -237,6 +240,29 @@
     <div class="modal-footer">
       <button class="btn-sm btn-sm-ghost" onclick="closeOverlay('ov-save')">取消</button>
       <button class="btn-sm btn-sm-primary" onclick="saveSession()">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- Update modal -->
+<div class="overlay" id="ov-update" onclick="closeOutside(event,'ov-update')">
+  <div class="modal" style="width:540px">
+    <div class="modal-title">🔄 检查更新</div>
+    <div class="update-repo-hint">
+      仓库：<a href="https://github.com/Zafer-Liu/VizPilot_AI" target="_blank" rel="noopener">github.com/Zafer-Liu/VizPilot_AI</a>
+      &nbsp;·&nbsp; 分支：<code>main</code>
+    </div>
+    <div id="update-state" class="update-state update-idle">
+      <span class="update-state-icon">💡</span>
+      <span class="update-state-text">点击"拉取更新"从 GitHub 获取最新代码</span>
+    </div>
+    <pre class="update-output" id="update-output" style="display:none"></pre>
+    <div class="update-restart-hint" id="update-restart-hint" style="display:none">
+      ⚠️ 代码已更新，请重启服务（Ctrl+C → python app.py）使改动生效。
+    </div>
+    <div class="modal-footer">
+      <button class="btn-sm btn-sm-ghost" onclick="closeOverlay('ov-update')">关闭</button>
+      <button class="btn-sm btn-sm-primary" id="update-btn" onclick="runUpdate()">⬇ 拉取更新</button>
     </div>
   </div>
 </div>

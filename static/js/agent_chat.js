@@ -836,6 +836,47 @@ async function deleteSavedSession(filename, name) {
   await loadSavedList();
 }
 
+// ── System update ─────────────────────────────────────────────────
+async function runUpdate() {
+  const btn     = document.getElementById("update-btn");
+  const stateEl = document.getElementById("update-state");
+  const outEl   = document.getElementById("update-output");
+  const hintEl  = document.getElementById("update-restart-hint");
+
+  // Reset to loading state
+  btn.disabled = true;
+  outEl.style.display = "none";
+  outEl.textContent   = "";
+  hintEl.style.display = "none";
+  stateEl.className   = "update-state update-loading";
+  stateEl.innerHTML   = '<span class="update-spinner"></span><span class="update-state-text">正在连接 GitHub，拉取更新中…</span>';
+
+  try {
+    const r = await fetch("/api/system/update", { method: "POST" });
+    const d = await r.json();
+
+    outEl.textContent  = d.output || "(无输出)";
+    outEl.style.display = "block";
+
+    if (d.ok && d.already_up_to_date) {
+      stateEl.className = "update-state update-ok";
+      stateEl.innerHTML = '<span class="update-state-icon">✅</span><span class="update-state-text">已是最新版本，无需更新。</span>';
+    } else if (d.ok) {
+      stateEl.className = "update-state update-ok";
+      stateEl.innerHTML = '<span class="update-state-icon">✅</span><span class="update-state-text">更新成功！</span>';
+      hintEl.style.display = "block";
+    } else {
+      stateEl.className = "update-state update-err";
+      stateEl.innerHTML = '<span class="update-state-icon">❌</span><span class="update-state-text">更新失败，请查看下方输出。</span>';
+    }
+  } catch (e) {
+    stateEl.className = "update-state update-err";
+    stateEl.innerHTML = '<span class="update-state-icon">❌</span><span class="update-state-text">请求失败：' + esc(String(e)) + '</span>';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 // ── Markdown (lightweight) ─────────────────────────────────────────
 function esc(s) {
   return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
