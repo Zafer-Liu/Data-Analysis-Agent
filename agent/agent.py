@@ -947,13 +947,13 @@ class BusinessAgent:
         """
         Yields event dicts consumed by the Flask SSE stream:
           {"type": "tool_start",  "tool": str, "display": str}
-          {"type": "chart_ready", "chart_id": str}
-          {"type": "text",        "content": str}
+          {"type": "text_delta",  "content": str}   — incremental text chunk (streaming only)
+          {"type": "chart_html",  "html": str}
+          {"type": "text",        "content": str}   — full final text (triggers markdown render)
+          {"type": "usage",       ...}
+          {"type": "reasoning",   "content": str}
           {"type": "done"}
           {"type": "error",       "message": str}
-
-        Charts are stored in the `pending_charts` list and passed back via
-        the "chart_ready" event so the Flask layer can persist them.
         """
         if not self.data_source:
             yield {
@@ -967,7 +967,6 @@ class BusinessAgent:
             return
 
         # Guard: export commands require the word "导出" in the message.
-        # This prevents accidental exports triggered by ambiguous phrasing.
         if command in ("export", "report") and "导出" not in user_message:
             hint = (
                 "`/export 导出 分析结果到 Excel`" if command == "export"
@@ -993,49 +992,133 @@ class BusinessAgent:
             {"role": "user", "content": user_message},
         ]
 
-        pending_charts: List[dict] = []  # filled by generate_chart tool calls
-        all_reasoning: List[str] = []   # accumulated across all loop iterations
+        pending_charts: List[dict] = []
+        all_reasoning: List[str] = []
 
         for _ in range(self.MAX_ITERATIONS):
-            try:
-                call_kwargs: Dict[str, Any] = dict(
-                    model=self.model,
-                    messages=messages,
-                    tools=AGENT_TOOLS,
-                    tool_choice="auto",
-                    temperature=0.1,
-                    max_tokens=2048,
-                )
-                if self.enable_thinking and self.model.startswith("claude"):
-                    # Extended thinking requires temperature=1 and no tool_choice override
-                    call_kwargs["temperature"] = 1
-                    call_kwargs["extra_body"] = {
-                        "thinking": {"type": "enabled", "budget_tokens": 8000}
-                    }
-                resp = self.client.chat.completions.create(**call_kwargs)
-            except Exception as exc:
-                yield {"type": "error", "message": f"LLM 调用失败: {exc}"}
-                yield {"type": "done"}
-                return
-
-            # Emit token usage after every LLM call
-            if resp.usage:
-                yield {
-                    "type": "usage",
-                    "prompt_tokens": resp.usage.prompt_tokens,
-                    "completion_tokens": resp.usage.completion_tokens,
-                    "total_tokens": resp.usage.total_tokens,
+            call_kwargs: Dict[str, Any] = dict(
+                model=self.model,
+                messages=messages,
+                tools=AGENT_TOOLS,
+                tool_choice="auto",
+                temperature=0.1,
+                max_tokens=2048,
+            )
+            # Extended thinking (Claude): disable streaming — response format differs
+            use_stream = True
+            if self.enable_thinking and self.model.startswith("claude"):
+                use_stream = False
+                call_kwargs["temperature"] = 1
+                call_kwargs["extra_body"] = {
+                    "thinking": {"type": "enabled", "budget_tokens": 8000}
                 }
 
-            choice = resp.choices[0]
-            msg = choice.message
+            # ── Streaming path ─────────────────────────────────────────────
+            if use_stream:
+                call_kwargs["stream"] = True
+                call_kwargs["stream_options"] = {"include_usage": True}
+                try:
+                    stream = self.client.chat.completions.create(**call_kwargs)
+                except Exception as exc:
+                    yield {"type": "error", "message": f"LLM 调用失败: {exc}"}
+                    yield {"type": "done"}
+                    return
 
-            if choice.finish_reason == "tool_calls" and msg.tool_calls:
-                # Append assistant turn with tool calls.
-                # DeepSeek thinking mode requires reasoning_content to be echoed back.
+                tc_acc: Dict[int, Dict[str, str]] = {}  # idx → {id, name, args}
+                content_parts: List[str] = []
+                reasoning_parts: List[str] = []
+                usage_data = None
+                finish_reason = None
+
+                for chunk in stream:
+                    if getattr(chunk, "usage", None):
+                        usage_data = chunk.usage
+                    if not chunk.choices:
+                        continue
+                    choice = chunk.choices[0]
+                    if choice.finish_reason:
+                        finish_reason = choice.finish_reason
+                    delta = choice.delta
+
+                    if delta.content:
+                        content_parts.append(delta.content)
+                        yield {"type": "text_delta", "content": delta.content}
+
+                    # DeepSeek thinking mode surfaces reasoning_content in deltas
+                    rc = getattr(delta, "reasoning_content", None)
+                    if rc:
+                        reasoning_parts.append(rc)
+
+                    if delta.tool_calls:
+                        for tcd in delta.tool_calls:
+                            idx = tcd.index
+                            if idx not in tc_acc:
+                                tc_acc[idx] = {"id": "", "name": "", "args": ""}
+                            if tcd.id:
+                                tc_acc[idx]["id"] = tcd.id
+                            if tcd.function:
+                                if tcd.function.name:
+                                    tc_acc[idx]["name"] += tcd.function.name
+                                if tcd.function.arguments:
+                                    tc_acc[idx]["args"] += tcd.function.arguments
+
+                full_content = "".join(content_parts)
+                has_tool_calls = bool(tc_acc) and finish_reason == "tool_calls"
+                reasoning_content = "".join(reasoning_parts) or None
+
+                if usage_data:
+                    yield {
+                        "type": "usage",
+                        "prompt_tokens": usage_data.prompt_tokens,
+                        "completion_tokens": usage_data.completion_tokens,
+                        "total_tokens": usage_data.total_tokens,
+                    }
+
+                # Build lightweight TC objects matching the non-streaming interface
+                class _F:
+                    def __init__(self, name, arguments):
+                        self.name = name
+                        self.arguments = arguments
+
+                class _TC:
+                    def __init__(self, id_, name, arguments):
+                        self.id = id_
+                        self.function = _F(name, arguments)
+
+                tc_objects = [
+                    _TC(v["id"], v["name"], v["args"])
+                    for _, v in sorted(tc_acc.items())
+                ]
+
+            # ── Non-streaming path (thinking mode) ─────────────────────────
+            else:
+                try:
+                    resp = self.client.chat.completions.create(**call_kwargs)
+                except Exception as exc:
+                    yield {"type": "error", "message": f"LLM 调用失败: {exc}"}
+                    yield {"type": "done"}
+                    return
+
+                if resp.usage:
+                    yield {
+                        "type": "usage",
+                        "prompt_tokens": resp.usage.prompt_tokens,
+                        "completion_tokens": resp.usage.completion_tokens,
+                        "total_tokens": resp.usage.total_tokens,
+                    }
+
+                choice = resp.choices[0]
+                msg = choice.message
+                full_content = msg.content or ""
+                tc_objects = msg.tool_calls or []
+                has_tool_calls = bool(tc_objects) and choice.finish_reason == "tool_calls"
+                reasoning_content = getattr(msg, "reasoning_content", None)
+
+            # ── Common: dispatch tool calls ────────────────────────────────
+            if has_tool_calls:
                 asst_entry: Dict[str, Any] = {
                     "role": "assistant",
-                    "content": msg.content or "",
+                    "content": full_content,
                     "tool_calls": [
                         {
                             "id": tc.id,
@@ -1045,16 +1128,15 @@ class BusinessAgent:
                                 "arguments": tc.function.arguments,
                             },
                         }
-                        for tc in msg.tool_calls
+                        for tc in tc_objects
                     ],
                 }
-                reasoning = getattr(msg, "reasoning_content", None)
-                if reasoning:
-                    asst_entry["reasoning_content"] = reasoning
-                    all_reasoning.append(reasoning)
+                if reasoning_content:
+                    asst_entry["reasoning_content"] = reasoning_content
+                    all_reasoning.append(reasoning_content)
                 messages.append(asst_entry)
 
-                for tc in msg.tool_calls:
+                for tc in tc_objects:
                     name = tc.function.name
                     try:
                         args: Dict[str, Any] = json.loads(tc.function.arguments or "{}")
@@ -1105,7 +1187,6 @@ class BusinessAgent:
                             )
                             if "html" in chart:
                                 pending_charts.append(chart["html"])
-                                # Signal that a chart placeholder should be inserted
                                 yield {
                                     "type": "chart_placeholder",
                                     "index": len(pending_charts) - 1,
@@ -1160,19 +1241,20 @@ class BusinessAgent:
                         {"role": "tool", "tool_call_id": tc.id, "content": str(tool_result)}
                     )
 
+            # ── Common: final text response ────────────────────────────────
             else:
-                # Collect final-response reasoning and emit all accumulated reasoning
-                reasoning = getattr(msg, "reasoning_content", None)
-                if reasoning:
-                    all_reasoning.append(reasoning)
+                if reasoning_content:
+                    all_reasoning.append(reasoning_content)
                 if all_reasoning:
                     yield {"type": "reasoning", "content": "\n\n---\n\n".join(all_reasoning)}
 
-                # Final text response — emit any charts first
                 for html in pending_charts:
                     yield {"type": "chart_html", "html": html}
 
-                yield {"type": "text", "content": msg.content or ""}
+                # Always emit the full text event — triggers markdown re-render.
+                # For streaming responses, text_delta events were already emitted
+                # incrementally; this final event re-renders the bubble as markdown.
+                yield {"type": "text", "content": full_content}
                 yield {"type": "done"}
                 return
 

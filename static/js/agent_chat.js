@@ -733,8 +733,13 @@ function handleEvent(ev, stepsEl, bubbleEl, typing) {
     bubbleEl.before(wrap);
     scrollBottom();
   }
+  else if (ev.type === "text_delta") {
+    if (typing.parentNode) typing.remove();
+    bubbleEl.insertAdjacentText("beforeend", ev.content || "");
+    scrollBottom();
+  }
   else if (ev.type === "reasoning") {
-    typing.remove();
+    if (typing.parentNode) typing.remove();
     const block = document.createElement("div");
     block.className = "reasoning-block";
     const toggle = document.createElement("div");
@@ -753,7 +758,7 @@ function handleEvent(ev, stepsEl, bubbleEl, typing) {
     scrollBottom();
   }
   else if (ev.type === "text") {
-    typing.remove();
+    if (typing.parentNode) typing.remove();
     stepsEl.querySelectorAll(".tool-step:not(.done)").forEach(s => {
       s.className = "tool-step done";
       const spinEl = s.querySelector(".spin");
@@ -770,11 +775,11 @@ function handleEvent(ev, stepsEl, bubbleEl, typing) {
     updateTokenBar();
   }
   else if (ev.type === "error") {
-    typing.remove();
+    if (typing.parentNode) typing.remove();
     bubbleEl.innerHTML = `<span style="color:#ef4444">⚠ ${esc(ev.message)}</span>`;
   }
   else if (ev.type === "stopped") {
-    typing.remove();
+    if (typing.parentNode) typing.remove();
     stepsEl.querySelectorAll(".tool-step:not(.done)").forEach(s => {
       s.className = "tool-step done";
       const spinEl = s.querySelector(".spin");
