@@ -1,10 +1,10 @@
 # Business Analyst Agent
 
-<div align="right">
+<p align="center">
+  <img src="./Images/Banner.png" alt="Business Analyst Agent Banner" width="100%" />
+</p>
 
-[中文](./README.md)
-
-</div>
+<p align="right"><a href="./README.md">中文</a></p>
 
 ![Python](https://img.shields.io/badge/Python-3.8%2B-blue.svg)
 ![Flask](https://img.shields.io/badge/Backend-Flask-black.svg)
