@@ -408,9 +408,78 @@ async function connectDB() {
   sysMsg(`已连接「${d.source_name}」，可以开始提问了。`);
 }
 
+let _previewData = null;
+
 function openSchemaView() {
-  document.getElementById("schema-view").textContent = schemaText || "(无数据)";
   openOverlay("ov-schema");
+  _loadPreview();
+}
+
+async function _loadPreview() {
+  const wrap  = document.getElementById("preview-table-wrap");
+  const tabs  = document.getElementById("preview-tabs");
+  const foot  = document.getElementById("preview-footer");
+  const title = document.getElementById("preview-title");
+  wrap.innerHTML   = '<div class="preview-loading">加载中…</div>';
+  tabs.innerHTML   = "";
+  foot.textContent = "";
+
+  const r = await fetch(`/api/session/${SID}/preview`);
+  if (!r.ok) {
+    wrap.innerHTML = '<div class="preview-loading" style="color:#ef4444">加载失败，请确认数据源已连接</div>';
+    return;
+  }
+  _previewData = await r.json();
+  title.textContent = `🗂 数据预览 · ${_previewData.source_name}`;
+
+  const tables = _previewData.tables || [];
+  if (!tables.length) {
+    wrap.innerHTML = '<div class="preview-loading">无可预览的数据</div>';
+    return;
+  }
+
+  tables.forEach((t, i) => {
+    const tab = document.createElement("div");
+    tab.className = "preview-tab" + (i === 0 ? " active" : "");
+    tab.textContent = t.name;
+    tab.onclick = () => _switchPreviewTab(i);
+    tabs.appendChild(tab);
+  });
+
+  _renderPreviewTable(tables[0]);
+}
+
+function _switchPreviewTab(idx) {
+  document.querySelectorAll(".preview-tab").forEach((t, i) =>
+    t.classList.toggle("active", i === idx));
+  _renderPreviewTable(_previewData.tables[idx]);
+}
+
+function _renderPreviewTable(table) {
+  const wrap = document.getElementById("preview-table-wrap");
+  const foot = document.getElementById("preview-footer");
+  const shown = table.rows.length;
+  const total = table.total_rows ?? shown;
+
+  let html = '<table class="preview-table"><thead><tr>';
+  html += '<th class="preview-rn">#</th>';
+  html += table.columns.map(c => `<th title="${esc(c)}">${esc(c)}</th>`).join("");
+  html += "</tr></thead><tbody>";
+  table.rows.forEach((row, i) => {
+    html += `<tr><td class="preview-rn">${i + 1}</td>`;
+    html += row.map(cell => {
+      const s = esc(String(cell));
+      return `<td title="${s}">${s}</td>`;
+    }).join("");
+    html += "</tr>";
+  });
+  html += "</tbody></table>";
+  wrap.innerHTML = html;
+
+  const totalTip = total > shown
+    ? ` / 共 ${total.toLocaleString()} 行（显示前 ${shown} 行）`
+    : ` · 共 ${total.toLocaleString()} 行`;
+  foot.textContent = `${table.columns.length} 列${totalTip}`;
 }
 
 // ── Chat ───────────────────────────────────────────────────────────

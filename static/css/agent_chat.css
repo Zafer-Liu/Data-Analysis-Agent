@@ -241,6 +241,75 @@ html, body { height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Sego
   border-radius: 4px; padding: 1px 6px; font-size: 10px; color: #94a3b8;
   font-weight: 600; vertical-align: middle; }
 
+/* ── Data preview modal ───────────────────────────────────────── */
+.preview-modal {
+  width: min(94vw, 1100px);
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 0;
+}
+.preview-modal .modal-title { flex-shrink: 0; }
+.preview-tabs {
+  display: flex; gap: 4px; flex-wrap: wrap;
+  flex-shrink: 0; margin-bottom: 10px;
+  max-height: 72px; overflow-y: auto;
+}
+.preview-tab {
+  padding: 4px 11px; border-radius: 5px; font-size: 12px;
+  cursor: pointer; border: 1px solid #e2e8f0;
+  background: #f1f5f9; color: #475569; white-space: nowrap;
+  transition: all .12s;
+}
+.preview-tab:hover { background: #e2e8f0; }
+.preview-tab.active { background: #1e293b; color: #f1f5f9; border-color: #1e293b; }
+.preview-table-wrap {
+  flex: 1; overflow: auto;
+  border: 1px solid #e2e8f0; border-radius: 8px;
+  min-height: 160px;
+}
+.preview-loading {
+  padding: 40px; text-align: center;
+  font-size: 13px; color: #94a3b8;
+}
+.preview-table {
+  border-collapse: collapse;
+  width: max-content; min-width: 100%;
+  font-size: 12.5px;
+}
+.preview-table thead { position: sticky; top: 0; z-index: 2; }
+.preview-table th {
+  background: #1e293b; color: #e2e8f0;
+  padding: 7px 14px; text-align: left;
+  font-weight: 600; white-space: nowrap;
+  border-right: 1px solid #334155;
+  max-width: 220px; overflow: hidden; text-overflow: ellipsis;
+}
+.preview-table td {
+  padding: 5px 14px; border-bottom: 1px solid #f1f5f9;
+  border-right: 1px solid #f1f5f9;
+  white-space: nowrap; max-width: 220px;
+  overflow: hidden; text-overflow: ellipsis; color: #334155;
+}
+.preview-table tbody tr:nth-child(even) td { background: #f8fafc; }
+.preview-table tbody tr:hover td { background: #eff6ff; }
+.preview-rn {
+  background: #f8fafc !important; color: #94a3b8 !important;
+  font-size: 11px; text-align: right !important;
+  padding: 5px 8px !important; min-width: 38px;
+  border-right: 2px solid #e2e8f0 !important;
+  user-select: none; position: sticky; left: 0; z-index: 1;
+}
+.preview-table thead .preview-rn {
+  background: #0f172a !important; color: #475569 !important;
+  z-index: 3;
+}
+.preview-footer {
+  flex-shrink: 0; font-size: 11px; color: #94a3b8;
+  padding: 6px 2px 0; text-align: right;
+}
+.preview-modal .modal-footer { flex-shrink: 0; }
+
 /* ── Modals ───────────────────────────────────────────────────── */
 .overlay { position: fixed; inset: 0; background: #00000055; z-index: 100;
   display: flex; align-items: center; justify-content: center;
