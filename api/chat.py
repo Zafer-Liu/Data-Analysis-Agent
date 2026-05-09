@@ -22,6 +22,8 @@ def _build_agent(sess) -> BusinessAgent:
     return BusinessAgent(
         client=client, model=cfg.model, data_source=sess.data_source,
         enable_thinking=cfg.enable_thinking,
+        chart_store=chart_store,
+        session_chart_ids=list(sess.chart_ids),
     )
 
 
@@ -108,6 +110,7 @@ def chat_stream(sid: str):
                 if etype == "chart_html":
                     cid = uuid.uuid4().hex
                     chart_store[cid] = event["html"]
+                    sess.chart_ids.append(cid)   # persist for export
                     yield _sse({"type": "chart_ref", "chart_id": cid})
                 elif etype == "chart_placeholder":
                     pass   # internal signal, not forwarded

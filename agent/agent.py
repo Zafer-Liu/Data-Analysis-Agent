@@ -198,6 +198,75 @@ AGENT_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "export_excel",
+            "description": (
+                "Export one or more data tables to an Excel (.xlsx) file. "
+                "Call this ONLY when the user explicitly asked to export data. "
+                "Each table becomes a separate sheet."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tables": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "List of table names to export, e.g. "
+                            "['analysis_result', 'Sheet1']. "
+                            "Use get_schema to discover available table names."
+                        ),
+                    },
+                    "filename": {
+                        "type": "string",
+                        "description": "Base filename without extension (optional, auto-generated if omitted).",
+                    },
+                },
+                "required": ["tables"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "export_report",
+            "description": (
+                "Generate a Word document (.docx) analysis report. "
+                "Call this ONLY when the user explicitly asked to export a report. "
+                "Query the data first, then compose sections."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Report title.",
+                    },
+                    "sections": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "heading": {"type": "string"},
+                                "content": {
+                                    "type": "string",
+                                    "description": "Section body text (plain text or markdown-style).",
+                                },
+                            },
+                            "required": ["heading", "content"],
+                        },
+                        "description": (
+                            "Ordered list of report sections. Typical structure: "
+                            "Executive Summary → Key Findings → Data Analysis → Recommendations."
+                        ),
+                    },
+                },
+                "required": ["title", "sections"],
+            },
+        },
+    },
 ]
 
 SYSTEM_PROMPT = f"""You are a professional business analyst assistant embedded in a data analytics platform.
@@ -231,6 +300,8 @@ Behaviour rules:
          Bar_Chart(analysis_result, x=cluster, y=count)                — cluster sizes
          Scatter_Plot(analysis_breakdown, x=<feat1>, y=<feat2>, color=cluster) — cluster view
          Line_Chart(analysis_elbow, x=k, y=inertia)                    — elbow curve
+         cluster_labels — ALL original columns + cluster label; use for any follow-up
+           analysis, e.g. GROUP BY cluster, filter by cluster, join with other tables
 
 Complete chart type list (use the exact chart_id shown):
 {_CHART_GUIDE}
@@ -249,12 +320,23 @@ field_mapping key rules (use the required_roles from each chart's description):
 class BusinessAgent:
     MAX_ITERATIONS = 100
 
-    def __init__(self, client, model: str, data_source=None, enable_thinking: bool = False):
+    def __init__(
+        self,
+        client,
+        model: str,
+        data_source=None,
+        enable_thinking: bool = False,
+        chart_store: Optional[dict] = None,
+        session_chart_ids: Optional[List[str]] = None,
+    ):
         self.client = client
         self.model = model
         self.data_source = data_source
         self.enable_thinking = enable_thinking
         self._schema_cache: Optional[str] = None
+        # Chart context for /report export
+        self._chart_store: dict = chart_store if chart_store is not None else {}
+        self._session_chart_ids: List[str] = session_chart_ids if session_chart_ids is not None else []
 
     def set_data_source(self, source):
         self.data_source = source
@@ -402,7 +484,62 @@ class BusinessAgent:
                 "分析计算已完成，但结果无法存为可查询表格，请联系开发者。"
             )
 
+        # 4. K_Means 专属：创建 cluster_labels（全量原始列 + cluster 标签）
+        #    策略：将 SQL 的列列表替换为 SELECT *，重跑同一个查询，
+        #    行顺序不变（相同的 FROM/WHERE/ORDER），按位置合并 cluster 列。
+        #    失败时静默跳过，不影响主流程。
+        if analysis_name == "K_Means" and "cluster" in breakdown_df.columns:
+            markdown += self._kmeans_build_labeled(sql, breakdown_df)
+
         return markdown
+
+    def _kmeans_build_labeled(self, sql: str, breakdown_df) -> str:
+        """
+        创建 cluster_labels 表（全量原始列 + cluster）。
+        将 SELECT <cols> FROM ... 替换为 SELECT * FROM ...，重新查询一次；
+        若行数与 breakdown_df 吻合则按位置合并 cluster 列并写表。
+        返回追加到 markdown 末尾的说明文字（可为空串）。
+        """
+        import re
+        try:
+            # 把 SELECT ... FROM 替换成 SELECT * FROM（保留 WHERE/ORDER/LIMIT 等）
+            labeled_sql = re.sub(
+                r"(?is)\bSELECT\b.+?\bFROM\b",
+                "SELECT *\nFROM",
+                sql,
+                count=1,
+            )
+            full_df, err = self.data_source.execute_query(labeled_sql)
+            if err or full_df.empty:
+                return ""
+            if len(full_df) != len(breakdown_df):
+                # 行数不匹配（含聚合/distinct 等），跳过
+                return ""
+
+            labeled_df = full_df.copy().reset_index(drop=True)
+            labeled_df["cluster"] = breakdown_df["cluster"].values
+            self._write_analysis_df(labeled_df, "cluster_labels")
+            self._schema_cache = None
+
+            cols_preview = ", ".join(str(c) for c in labeled_df.columns[:8])
+            if len(labeled_df.columns) > 8:
+                cols_preview += ", ..."
+            return (
+                "\n\n---\n"
+                "### 📌 数据标签表 `cluster_labels`\n"
+                f"已将聚类结果（cluster 列）回写到原始数据，"
+                f"生成包含所有原始字段的标签表：\n\n"
+                f"**列：** `{cols_preview}`\n\n"
+                "可直接用于后续分析，例如：\n"
+                "```sql\n"
+                "-- 查看各簇的详细记录\n"
+                "SELECT * FROM cluster_labels WHERE cluster = 0 LIMIT 20\n\n"
+                "-- 统计各簇某字段的均值\n"
+                "SELECT cluster, AVG(target_col) AS avg_val FROM cluster_labels GROUP BY cluster\n"
+                "```"
+            )
+        except Exception:
+            return ""   # 非关键步骤，失败时静默跳过
 
     def _tool_generate_chart(
         self, chart_type: str, sql: str, field_mapping: dict, title: str = ""
@@ -423,6 +560,67 @@ class BusinessAgent:
         if "error" in result:
             return {"error": result["error"]}
         return {"html": result.get("html", ""), "chart_type": chart_type}
+
+    def _tool_export_excel(self, tables: list, filename: str = "") -> str:
+        import datetime
+        from Function.Output.excel_export import export_to_excel
+
+        if not tables:
+            return "❌ 请指定要导出的表名列表。"
+
+        if not filename:
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"export_{ts}"
+        safe_name = filename.replace(" ", "_").rstrip(".xlsx") + ".xlsx"
+
+        export_dir = os.path.join(_PROJ_ROOT, "outputs", "exports")
+        os.makedirs(export_dir, exist_ok=True)
+        filepath = os.path.join(export_dir, safe_name)
+
+        try:
+            export_to_excel(self.data_source, tables, filepath)
+        except Exception as exc:
+            return f"❌ 导出失败：{exc}"
+
+        return (
+            f"✅ Excel 文件已生成，包含 {len(tables)} 张表：{', '.join(tables)}。\n\n"
+            f"[📥 点击下载 {safe_name}](/api/export/{safe_name})"
+        )
+
+    def _tool_export_report(self, title: str, sections: list) -> str:
+        import datetime
+        from Function.Output.report_export import export_to_report
+
+        if not sections:
+            return "❌ 报告内容为空，请提供至少一个章节。"
+
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        base_name = f"report_{ts}"
+
+        export_dir = os.path.join(_PROJ_ROOT, "outputs", "exports")
+        os.makedirs(export_dir, exist_ok=True)
+        filepath = os.path.join(export_dir, f"{base_name}.docx")
+
+        # Collect chart HTMLs from this session (may be empty if no charts generated)
+        chart_htmls = [
+            self._chart_store[cid]
+            for cid in self._session_chart_ids
+            if cid in self._chart_store
+        ]
+
+        try:
+            result_path, download_name = export_to_report(
+                title, sections, filepath, chart_htmls=chart_htmls
+            )
+        except Exception as exc:
+            return f"❌ 报告生成失败：{exc}"
+
+        n_charts = len(chart_htmls)
+        chart_note = f"（含 {n_charts} 张图表）" if n_charts else ""
+        return (
+            f"✅ 报告已生成，共 {len(sections)} 个章节{chart_note}。\n\n"
+            f"[📥 点击下载 {download_name}](/api/export/{download_name})"
+        )
 
     # ── Agent loop ─────────────────────────────────────────────────────────
 
@@ -462,15 +660,47 @@ class BusinessAgent:
             "     b) Scatter_Plot(analysis_breakdown): x=<feat1>, y=<feat2>, color=cluster\n"
             "        (pick the 2 most business-relevant numeric columns for x and y axes)\n"
             "     c) Line_Chart(analysis_elbow): x=k, y=inertia  (elbow curve)\n"
-            "   K_Means SQL tip: SELECT the numeric features to cluster on directly,\n"
-            "   e.g. SELECT age, income, spending FROM customers. Set n_deciles = K.\n"
+            "   K_Means SQL rules:\n"
+            "     - SELECT the numeric features to cluster on.\n"
+            "     - Set n_deciles = K (number of clusters).\n"
+            "     - groupby_column can be a categorical label column for cluster purity.\n"
+            "     - A bonus table 'cluster_labels' is auto-created with ALL original columns\n"
+            "       + the cluster assignment for every row — use it for follow-up analysis:\n"
+            "       e.g. SELECT cluster, AVG(revenue) FROM cluster_labels GROUP BY cluster\n"
+            "            SELECT * FROM cluster_labels WHERE cluster = 0 LIMIT 20\n"
             "   If analysis_breakdown is available for other analyses, generate a Heatmap.\n"
             "7. Conclude with a concise business interpretation (2-4 sentences)."
         ),
+        "export": (
+            "The user issued the /export command to export data tables to Excel.\n"
+            "Allowed tools this turn: get_schema (once, to discover table names), export_excel.\n"
+            "FORBIDDEN this turn: query_data, run_analysis, generate_chart, create_analysis_table.\n"
+            "Workflow:\n"
+            "1. Call get_schema ONCE to list all available tables.\n"
+            "2. Select which tables to export based on the user's message "
+            "(default: every analysis_* table; if no analysis tables, use the first raw data table).\n"
+            "3. Call export_excel immediately with the chosen table names.\n"
+            "4. Return the download link from the tool result — do NOT add commentary."
+        ),
         "report": (
-            "The user issued the /report command. Structure your response as a formal "
-            "analysis report with: Executive Summary, Key Findings (with data), "
-            "Visualizations, and Recommendations."
+            "The user issued the /report command to generate a Word document report.\n"
+            "CRITICAL: The conversation history already contains all data, insights, and charts.\n"
+            "FORBIDDEN this turn: get_schema, query_data, create_analysis_table, run_analysis, generate_chart.\n"
+            "You MUST call export_report as your VERY FIRST tool call — no data tools first.\n"
+            "Workflow:\n"
+            "1. Read the conversation history provided in the messages above.\n"
+            "2. Compose the report entirely from what is already in the conversation:\n"
+            "   - title: a concise, descriptive title\n"
+            "   - sections (Heading 1 level each):\n"
+            "       • Executive Summary — 2-3 sentence overview of what was analysed\n"
+            "       • Key Findings — bullet-style insights extracted from the conversation\n"
+            "       • Detailed Analysis — paste/summarise the numbered results, tables, or "
+            "analysis markdown that appeared earlier in the conversation\n"
+            "       • Recommendations — actionable next steps based on findings\n"
+            "   Each section's content must be plain text summarising what is already known.\n"
+            "3. Call export_report with the composed title and sections.\n"
+            "4. Return the download link from the tool result.\n"
+            "Do NOT re-query or re-analyse data. Summarise the conversation — that is all."
         ),
     }
 
@@ -492,6 +722,23 @@ class BusinessAgent:
                 "content": (
                     "请先连接数据源（上传 Excel 文件或连接 SQL 数据库），然后再开始分析。\n\n"
                     "Please connect a data source (upload Excel or connect to a SQL database) first."
+                ),
+            }
+            yield {"type": "done"}
+            return
+
+        # Guard: export commands require the word "导出" in the message.
+        # This prevents accidental exports triggered by ambiguous phrasing.
+        if command in ("export", "report") and "导出" not in user_message:
+            hint = (
+                "`/export 导出 分析结果到 Excel`" if command == "export"
+                else "`/report 导出 分析报告`"
+            )
+            yield {
+                "type": "text",
+                "content": (
+                    f"⚠️ `/{command}` 命令需要您在消息中明确写「**导出**」才会执行。\n\n"
+                    f"示例：{hint}"
                 ),
             }
             yield {"type": "done"}
@@ -581,6 +828,8 @@ class BusinessAgent:
                         "query_data":            f"执行查询: {args.get('sql', '')[:60]}...",
                         "run_analysis":          f"运行分析: {args.get('analysis_name', '?')} · 目标列: {args.get('target_column', '?')}...",
                         "generate_chart":        f"生成 {args.get('chart_type', '?')} 图表...",
+                        "export_excel":          f"导出 Excel → {', '.join(args.get('tables', []))[:50]}...",
+                        "export_report":         f"生成 Word 报告: {args.get('title', '?')[:40]}...",
                     }
                     yield {
                         "type": "tool_start",
@@ -626,6 +875,16 @@ class BusinessAgent:
                                 )
                             else:
                                 tool_result = f"Chart failed: {chart.get('error', 'unknown')}"
+                        elif name == "export_excel":
+                            tool_result = self._tool_export_excel(
+                                tables=args.get("tables", []),
+                                filename=args.get("filename", ""),
+                            )
+                        elif name == "export_report":
+                            tool_result = self._tool_export_report(
+                                title=args.get("title", "分析报告"),
+                                sections=args.get("sections", []),
+                            )
                         else:
                             tool_result = f"Unknown tool: {name}"
                     except Exception as exc:

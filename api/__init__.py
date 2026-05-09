@@ -21,12 +21,14 @@ def create_app() -> Flask:
     from .chat            import bp as chat_bp
     from .saved_sessions  import bp as saved_sessions_bp
     from .system          import bp as system_bp
+    from .output          import bp as output_bp
 
     app.register_blueprint(models_bp)
     app.register_blueprint(datasource_bp)
     app.register_blueprint(chat_bp)
     app.register_blueprint(saved_sessions_bp)
     app.register_blueprint(system_bp)
+    app.register_blueprint(output_bp)
 
     @app.get("/")
     def index():

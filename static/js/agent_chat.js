@@ -4,7 +4,8 @@ const COMMANDS = [
   { cmd: "sql",     icon: "🗄️", label: "执行 SQL",    desc: "直接运行 SQL 查询并展示结果",      available: true  },
   { cmd: "status",  icon: "📡", label: "当前状态",     desc: "查看模型、数据源与 Token 用量",    available: true  },
   { cmd: "analyze", icon: "🔬", label: "深度分析",     desc: "Data_Decile_Analysis 等内置分析模板", available: true  },
-  { cmd: "report",  icon: "📄", label: "生成报告",     desc: "结构化分析报告",                  available: false },
+  { cmd: "export",  icon: "📊", label: "导出 Excel",   desc: "将数据表导出为 Excel 文件（需说「导出」）",  available: true  },
+  { cmd: "report",  icon: "📄", label: "导出报告",     desc: "生成 Word 分析报告（需说「导出」）",         available: true  },
 ];
 
 // ── State ─────────────────────────────────────────────────────────
@@ -944,6 +945,9 @@ function esc(s) {
 function renderMd(text) {
   if (!text) return "";
   let s = esc(text);
+  // Markdown links: [label](url) → <a href="url">label</a>
+  s = s.replace(/\[([^\]]+)\]\((\/[^)]+)\)/g, '<a href="$2">$1</a>');
+  s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
   s = s.replace(/```(\w*)\n?([\s\S]*?)```/g, (_,_l,c) => `<pre><code>${c}</code></pre>`);
   s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
   s = s.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
