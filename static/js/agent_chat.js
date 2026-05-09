@@ -3,7 +3,7 @@ const COMMANDS = [
   { cmd: "chart",   icon: "📊", label: "生成图表",     desc: "用自然语言描述想要的图表",        available: true  },
   { cmd: "sql",     icon: "🗄️", label: "执行 SQL",    desc: "直接运行 SQL 查询并展示结果",      available: true  },
   { cmd: "status",  icon: "📡", label: "当前状态",     desc: "查看模型、数据源与 Token 用量",    available: true  },
-  { cmd: "analyze", icon: "🔬", label: "深度分析",     desc: "趋势、异常与业务洞察",             available: false },
+  { cmd: "analyze", icon: "🔬", label: "深度分析",     desc: "Data_Decile_Analysis 等内置分析模板", available: true  },
   { cmd: "report",  icon: "📄", label: "生成报告",     desc: "结构化分析报告",                  available: false },
 ];
 
@@ -849,7 +849,7 @@ async function runUpdate() {
   outEl.textContent   = "";
   hintEl.style.display = "none";
   stateEl.className   = "update-state update-loading";
-  stateEl.innerHTML   = '<span class="update-spinner"></span><span class="update-state-text">正在连接 GitHub，拉取更新中…</span>';
+  stateEl.innerHTML   = '<span class="update-spinner"></span><span class="update-state-text">正在从 GitHub 下载更新包，请稍候（约 10–60 秒）…</span>';
 
   try {
     const r = await fetch("/api/system/update", { method: "POST" });

@@ -11,6 +11,16 @@ _CHARTS_GEN = os.path.join(_PROJ_ROOT, "Function", "Charts_generation")
 sys.path.insert(0, _PROJ_ROOT)
 sys.path.insert(0, _CHARTS_GEN)
 
+# ── Analyze registry (lazy-loaded, best-effort) ───────────────────────────
+def _build_analyze_guide() -> str:
+    try:
+        from Function.Analyze.registry import build_agent_desc
+        return build_agent_desc()
+    except Exception:
+        return "  Data_Decile_Analysis — 十分位分析（Decile Analysis）"
+
+_ANALYZE_GUIDE = _build_analyze_guide()
+
 
 def _build_chart_guide() -> tuple[str, str]:
     """Return (system_prompt_guide, tool_type_list) built from the registry.
@@ -108,6 +118,50 @@ AGENT_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "run_analysis",
+            "description": (
+                "Run a built-in statistical analysis template on the data.\n"
+                "Steps: (1) call get_schema to know the tables/columns, "
+                "(2) call run_analysis with the appropriate parameters, "
+                "(3) the result is stored as queryable tables — call generate_chart on them.\n\n"
+                "Available analyses:\n"
+                f"{_ANALYZE_GUIDE}"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "analysis_name": {
+                        "type": "string",
+                        "description": "Analysis ID, e.g. 'Data_Decile_Analysis'.",
+                    },
+                    "sql": {
+                        "type": "string",
+                        "description": (
+                            "SQL SELECT to fetch the raw data for analysis. "
+                            "Include the target column and any optional groupby column. "
+                            "Example: SELECT revenue, region FROM sales_data"
+                        ),
+                    },
+                    "target_column": {
+                        "type": "string",
+                        "description": "The numeric column to analyse (must exist in the SQL result).",
+                    },
+                    "groupby_column": {
+                        "type": "string",
+                        "description": "(Optional) A categorical column for additional breakdown.",
+                    },
+                    "n_deciles": {
+                        "type": "integer",
+                        "description": "Number of buckets (default 10). Use 5 for quintiles, 4 for quartiles.",
+                    },
+                },
+                "required": ["analysis_name", "sql", "target_column"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "generate_chart",
             "description": (
                 "Create a data visualization chart displayed to the user. "
@@ -159,6 +213,12 @@ Behaviour rules:
 7. Use create_analysis_table when it genuinely helps: multi-step aggregations, joining sheets,
    or reshaping data before charting. For simple single-table queries with few columns, write
    the SQL directly in generate_chart instead — avoid unnecessary extra round-trips.
+8. When the user invokes /analyze <AnalysisName>, use run_analysis with the named template.
+   After run_analysis succeeds, ALWAYS generate at least one chart from the result tables
+   (decile_result for the main summary, decile_breakdown if a groupby was used).
+   Recommended charts for Data_Decile_Analysis:
+     - Bar_Chart on decile_result: x=decile, y=sum (shows value by bucket)
+     - Line_Chart on decile_result: x=decile, y=cumulative_pct (Pareto curve)
 
 Complete chart type list (use the exact chart_id shown):
 {_CHART_GUIDE}
@@ -213,6 +273,69 @@ class BusinessAgent:
         self._schema_cache = None
         return result
 
+    def _tool_run_analysis(
+        self,
+        analysis_name: str,
+        sql: str,
+        target_column: str,
+        groupby_column: str = "",
+        n_deciles: int = 10,
+    ) -> str:
+        """
+        Run a registered analysis template.
+        Returns a markdown summary; also materialises result tables
+        into the data source for subsequent generate_chart calls.
+        """
+        if not self.data_source:
+            return "No data source connected."
+
+        # 1. Fetch raw data
+        df, error = self.data_source.execute_query(sql)
+        if error:
+            return f"SQL Error while fetching data: {error}"
+        if df.empty:
+            return "Query returned no rows — cannot run analysis."
+
+        # 2. Dispatch to analysis module
+        try:
+            from Function.Analyze.registry import get as get_analysis
+            entry = get_analysis(analysis_name)
+        except KeyError as exc:
+            return str(exc)
+        except Exception as exc:
+            return f"Failed to load analysis module '{analysis_name}': {exc}"
+
+        run_fn = entry.get("run")
+        if run_fn is None:
+            return f"Analysis module '{analysis_name}' failed to load."
+
+        try:
+            result_df, breakdown_df, markdown = run_fn(
+                df=df,
+                target_column=target_column,
+                groupby_column=groupby_column or None,
+                n_deciles=n_deciles,
+            )
+        except Exception as exc:
+            return f"Analysis error: {exc}"
+
+        # 3. Materialise result tables so LLM can query/chart them
+        self.data_source.create_analysis_table(
+            sql=None,          # bypass SQL — write df directly
+            table_name="decile_result",
+            _df=result_df,     # see connector patch below
+        )
+        self._schema_cache = None  # refresh schema
+
+        if not breakdown_df.empty:
+            self.data_source.create_analysis_table(
+                sql=None,
+                table_name="decile_breakdown",
+                _df=breakdown_df,
+            )
+
+        return markdown
+
     def _tool_generate_chart(
         self, chart_type: str, sql: str, field_mapping: dict, title: str = ""
     ) -> dict:
@@ -247,8 +370,21 @@ class BusinessAgent:
             "the results clearly formatted as a table, then provide a short insight."
         ),
         "analyze": (
-            "The user issued the /analyze command. Perform a thorough statistical analysis: "
-            "descriptive stats, trends, outliers, and actionable business recommendations."
+            "The user issued the /analyze command, optionally followed by an analysis name "
+            "(e.g. 'Data_Decile_Analysis') and a description of what to analyse.\n"
+            "Workflow:\n"
+            "1. Call get_schema to understand the data structure.\n"
+            "2. Identify the analysis name from the user message (default: Data_Decile_Analysis).\n"
+            "3. Choose the most appropriate numeric target_column from the schema.\n"
+            "   If the user mentioned a column or metric, use that; otherwise pick the most "
+            "   business-relevant numeric column (e.g. revenue, amount, score).\n"
+            "4. Optionally choose a groupby_column if the user asked for a breakdown by category.\n"
+            "5. Call run_analysis with the chosen parameters.\n"
+            "6. After run_analysis, ALWAYS generate these charts from decile_result:\n"
+            "   a) Bar_Chart: x=decile, y=sum  (value distribution by bucket)\n"
+            "   b) Line_Chart: x=decile, y=cumulative_pct  (Pareto cumulative curve)\n"
+            "   If groupby was used, also generate a Stacked_Bar_Chart from decile_breakdown.\n"
+            "7. Conclude with a concise business interpretation (2-4 sentences)."
         ),
         "report": (
             "The user issued the /report command. Structure your response as a formal "
@@ -362,6 +498,7 @@ class BusinessAgent:
                         "get_schema":            "读取数据结构...",
                         "create_analysis_table": f"提取字段 → {args.get('table_name', 'analysis_data')}...",
                         "query_data":            f"执行查询: {args.get('sql', '')[:60]}...",
+                        "run_analysis":          f"运行分析: {args.get('analysis_name', '?')} · 目标列: {args.get('target_column', '?')}...",
                         "generate_chart":        f"生成 {args.get('chart_type', '?')} 图表...",
                     }
                     yield {
@@ -379,6 +516,14 @@ class BusinessAgent:
                         )
                     elif name == "query_data":
                         tool_result = self._tool_query_data(args.get("sql", ""))
+                    elif name == "run_analysis":
+                        tool_result = self._tool_run_analysis(
+                            analysis_name=args.get("analysis_name", ""),
+                            sql=args.get("sql", ""),
+                            target_column=args.get("target_column", ""),
+                            groupby_column=args.get("groupby_column", ""),
+                            n_deciles=int(args.get("n_deciles", 10)),
+                        )
                     elif name == "generate_chart":
                         chart = self._tool_generate_chart(
                             chart_type=args.get("chart_type", "Bar_Chart"),
