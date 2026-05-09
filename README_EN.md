@@ -124,12 +124,10 @@ Also supports any **OpenAI SDK compatible API** via custom:
 
 ### Option 1: One-click Install + Run (Recommended)
 
-> Replace `<your-username-or-org>` with your GitHub username/organization.
-
 #### Windows (PowerShell)
 
 ```powershell
-iwr -useb https://raw.githubusercontent.com/<your-username-or-org>/VizPilot_AI/main/install.ps1 | iex
+iwr -useb https://raw.githubusercontent.com/Zafer-Liu/VizPilot_AI/main/install.ps1 | iex
 ```
 
 After installation, you can start the app in either way:
@@ -148,7 +146,7 @@ After installation, you can start the app in either way:
 #### macOS / Linux (Shell)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<your-username-or-org>/VizPilot_AI/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Zafer-Liu/VizPilot_AI/main/install.sh | sh
 ```
 
 Start after installation:

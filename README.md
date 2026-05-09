@@ -183,12 +183,10 @@ Business Analyst Agent 是一个对话式商业数据分析系统，目标是让
 
 ### 方式 1：一键安装 + 启动（推荐）
 
-> 将下面命令中的 `<你的用户名或组织名>` 替换为你的 GitHub 用户名/组织名。
-
 #### Windows（PowerShell）
 
 ```powershell
-iwr -useb https://raw.githubusercontent.com/<你的用户名或组织名>/VizPilot_AI/main/install.ps1 | iex
+iwr -useb https://raw.githubusercontent.com/Zafer-Liu/VizPilot_AI/main/install.ps1 | iex
 ```
 
 安装完成后可用以下方式启动：
@@ -207,7 +205,7 @@ iwr -useb https://raw.githubusercontent.com/<你的用户名或组织名>/VizPil
 #### macOS / Linux（Shell）
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<你的用户名或组织名>/VizPilot_AI/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Zafer-Liu/VizPilot_AI/main/install.sh | sh
 ```
 
 安装完成后启动：
