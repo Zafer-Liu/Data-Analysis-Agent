@@ -285,6 +285,50 @@ class BusinessAgent:
         self._schema_cache = None
         return result
 
+    # ── DataFrame → DataSource writer (backward-compatible) ───────────────
+
+    def _write_analysis_df(self, df, table_name: str) -> None:
+        """
+        Write *df* into the connected data source as a queryable table.
+
+        Strategy (two-tier for backward compatibility):
+        1. Try the new connector API: create_analysis_table(sql=None, _df=df, ...)
+        2. If the connector is an older version that lacks the *_df* parameter,
+           fall back to writing directly to the underlying SQLite connection:
+           - ExcelDataSource / CSVDataSource → self._conn  (in-memory SQLite)
+           - SQLDataSource                  → self._cache_conn (local SQLite cache)
+        This ensures the result tables are queryable even on older installs
+        without requiring users to manually update connector.py.
+        """
+        import sqlite3
+
+        ds = self.data_source
+
+        # ── Attempt new API ────────────────────────────────────────────────
+        try:
+            ds.create_analysis_table(sql=None, table_name=table_name, _df=df)
+            self._schema_cache = None
+            return
+        except TypeError:
+            pass   # old connector — fall through to direct SQLite write
+
+        # ── Fallback: direct SQLite write ──────────────────────────────────
+        # ExcelDataSource / CSVDataSource store data in self._conn
+        conn = getattr(ds, "_conn", None)
+
+        if conn is None:
+            # SQLDataSource: create/reuse local cache connection
+            if getattr(ds, "_cache_conn", None) is None:
+                ds._cache_conn = sqlite3.connect(":memory:", check_same_thread=False)
+                ds._cache_tables = set()
+            conn = ds._cache_conn
+            ds._cache_tables.add(table_name)
+
+        df.to_sql(table_name, conn, if_exists="replace", index=False)
+        self._schema_cache = None
+
+    # ── Analysis tool ──────────────────────────────────────────────────────
+
     def _tool_run_analysis(
         self,
         analysis_name: str,
@@ -339,28 +383,23 @@ class BusinessAgent:
             extra_df = None
 
         # 3. Materialise result tables so LLM can query/chart them
-        self.data_source.create_analysis_table(
-            sql=None,               # bypass SQL — write df directly
-            table_name="analysis_result",
-            _df=result_df,
-        )
-        self._schema_cache = None   # refresh schema
+        try:
+            self._write_analysis_df(result_df, "analysis_result")
 
-        if not breakdown_df.empty:
-            self.data_source.create_analysis_table(
-                sql=None,
-                table_name="analysis_breakdown",
-                _df=breakdown_df,
-            )
+            if not breakdown_df.empty:
+                self._write_analysis_df(breakdown_df, "analysis_breakdown")
 
-        if extra_df is not None and not extra_df.empty:
-            # 从模块 OUTPUT_TABLES[2] 读取第三张表的名称（各模块可自定义）
-            _out_tbls = entry.get("output_tables", [])
-            extra_table_name = _out_tbls[2] if len(_out_tbls) > 2 else "analysis_roc"
-            self.data_source.create_analysis_table(
-                sql=None,
-                table_name=extra_table_name,
-                _df=extra_df,
+            if extra_df is not None and not extra_df.empty:
+                # 从模块 OUTPUT_TABLES[2] 读取第三张表的名称（各模块可自定义）
+                _out_tbls = entry.get("output_tables", [])
+                extra_table_name = _out_tbls[2] if len(_out_tbls) > 2 else "analysis_roc"
+                self._write_analysis_df(extra_df, extra_table_name)
+
+        except Exception as exc:
+            return (
+                markdown
+                + f"\n\n⚠️ **结果表写入失败**：{exc}\n"
+                "分析计算已完成，但结果无法存为可查询表格，请联系开发者。"
             )
 
         return markdown
@@ -549,48 +588,51 @@ class BusinessAgent:
                         "display": display_map.get(name, name),
                     }
 
-                    if name == "get_schema":
-                        tool_result = self._tool_get_schema()
-                    elif name == "create_analysis_table":
-                        tool_result = self._tool_create_analysis_table(
-                            sql=args.get("sql", ""),
-                            table_name=args.get("table_name", "analysis_data"),
-                        )
-                    elif name == "query_data":
-                        tool_result = self._tool_query_data(args.get("sql", ""))
-                    elif name == "run_analysis":
-                        tool_result = self._tool_run_analysis(
-                            analysis_name=args.get("analysis_name", ""),
-                            sql=args.get("sql", ""),
-                            target_column=args.get("target_column", ""),
-                            groupby_column=args.get("groupby_column", ""),
-                            n_deciles=int(args.get("n_deciles", 10)),
-                        )
-                    elif name == "generate_chart":
-                        chart = self._tool_generate_chart(
-                            chart_type=args.get("chart_type", "Bar_Chart"),
-                            sql=args.get("sql", ""),
-                            field_mapping=args.get("field_mapping", {}),
-                            title=args.get("title", ""),
-                        )
-                        if "html" in chart:
-                            pending_charts.append(chart["html"])
-                            # Signal that a chart placeholder should be inserted
-                            yield {
-                                "type": "chart_placeholder",
-                                "index": len(pending_charts) - 1,
-                            }
-                            tool_result = (
-                                f"Chart generated ({args.get('chart_type')}). "
-                                "It is displayed to the user."
+                    try:
+                        if name == "get_schema":
+                            tool_result = self._tool_get_schema()
+                        elif name == "create_analysis_table":
+                            tool_result = self._tool_create_analysis_table(
+                                sql=args.get("sql", ""),
+                                table_name=args.get("table_name", "analysis_data"),
                             )
+                        elif name == "query_data":
+                            tool_result = self._tool_query_data(args.get("sql", ""))
+                        elif name == "run_analysis":
+                            tool_result = self._tool_run_analysis(
+                                analysis_name=args.get("analysis_name", ""),
+                                sql=args.get("sql", ""),
+                                target_column=args.get("target_column", ""),
+                                groupby_column=args.get("groupby_column", ""),
+                                n_deciles=int(args.get("n_deciles", 10)),
+                            )
+                        elif name == "generate_chart":
+                            chart = self._tool_generate_chart(
+                                chart_type=args.get("chart_type", "Bar_Chart"),
+                                sql=args.get("sql", ""),
+                                field_mapping=args.get("field_mapping", {}),
+                                title=args.get("title", ""),
+                            )
+                            if "html" in chart:
+                                pending_charts.append(chart["html"])
+                                # Signal that a chart placeholder should be inserted
+                                yield {
+                                    "type": "chart_placeholder",
+                                    "index": len(pending_charts) - 1,
+                                }
+                                tool_result = (
+                                    f"Chart generated ({args.get('chart_type')}). "
+                                    "It is displayed to the user."
+                                )
+                            else:
+                                tool_result = f"Chart failed: {chart.get('error', 'unknown')}"
                         else:
-                            tool_result = f"Chart failed: {chart.get('error', 'unknown')}"
-                    else:
-                        tool_result = f"Unknown tool: {name}"
+                            tool_result = f"Unknown tool: {name}"
+                    except Exception as exc:
+                        tool_result = f"工具执行错误 [{name}]: {exc}"
 
                     messages.append(
-                        {"role": "tool", "tool_call_id": tc.id, "content": tool_result}
+                        {"role": "tool", "tool_call_id": tc.id, "content": str(tool_result)}
                     )
 
             else:

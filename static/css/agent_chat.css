@@ -213,6 +213,13 @@ html, body { height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Sego
   transition: background .15s; }
 .send-btn:hover { background: #2563eb; }
 .send-btn:disabled { background: #cbd5e1; cursor: not-allowed; }
+/* Stop state — red square button shown while agent is running */
+.send-btn.stopping { background: #ef4444; font-size: 11px; }
+.send-btn.stopping:hover { background: #dc2626; }
+/* Stopped note shown in message bubble */
+.stop-note { display: inline-flex; align-items: center; gap: 5px;
+  font-size: 12px; color: #94a3b8; padding: 3px 0 6px;
+  user-select: none; }
 .cmd-badge { background: #dbeafe; border: 1px solid #93c5fd; color: #1d4ed8;
   border-radius: 5px; font-size: 12px; padding: 2px 8px; font-weight: 600;
   display: none; align-items: center; gap: 4px; cursor: pointer; }

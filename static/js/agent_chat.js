@@ -17,6 +17,7 @@ let activeCommand = "";
 let slashPopupIndex = 0;
 let tokenState = { promptTokens: 0, totalInput: 0, totalOutput: 0, contextWindow: null };
 let modelConfigs = {};
+let _streamReader = null;   // current SSE ReadableStreamDefaultReader
 
 // ── Bootstrap ─────────────────────────────────────────────────────
 (async () => {
@@ -87,6 +88,13 @@ function onInput(e) {
   autoResize(e.target);
   const v = e.target.value;
   if (v === "/") { openSlashPopup(); return; }
+  // /stop while streaming — trigger immediately without going through slash popup
+  if (v === "/stop" && isStreaming) {
+    e.target.value = "";
+    autoResize(e.target);
+    stopStreaming();
+    return;
+  }
   const m = v.match(/^\/(\w+)\s?/);
   if (m) {
     const found = COMMANDS.find(c => c.cmd === m[1] && c.available);
@@ -500,6 +508,39 @@ function fillHint(el) {
   sendMessage();
 }
 
+// ── Send / Stop toggle ─────────────────────────────────────────────
+function onSendOrStop() {
+  if (isStreaming) stopStreaming();
+  else sendMessage();
+}
+
+async function stopStreaming() {
+  if (!isStreaming || !SID) return;
+  try {
+    await fetch(`/api/session/${SID}/stop`, { method: "POST" });
+  } catch (_) {}
+  // Also cancel the local reader so the SSE loop exits immediately
+  // even if the server hasn't responded to the stop request yet.
+  if (_streamReader) {
+    try { _streamReader.cancel(); } catch (_) {}
+  }
+}
+
+function _setSendBtnStopping(stopping) {
+  const btn = document.getElementById("send-btn");
+  if (stopping) {
+    btn.textContent = "⬛";
+    btn.classList.add("stopping");
+    btn.title = "停止生成";
+    btn.disabled = false;   // keep clickable so user can stop
+  } else {
+    btn.textContent = "↑";
+    btn.classList.remove("stopping");
+    btn.title = "发送 (Enter)";
+    btn.disabled = false;
+  }
+}
+
 async function sendMessage() {
   if (isStreaming) return;
   const input = document.getElementById("msg-input");
@@ -529,7 +570,7 @@ async function sendMessage() {
   bubbleEl.appendChild(typing);
 
   isStreaming = true;
-  document.getElementById("send-btn").disabled = true;
+  _setSendBtnStopping(true);
 
   const payload = { message: text };
   if (activeCommand) payload.command = activeCommand;
@@ -541,24 +582,30 @@ async function sendMessage() {
   });
 
   const reader = resp.body.getReader();
+  _streamReader = reader;
   const dec = new TextDecoder();
   let buf = "";
 
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    const lines = buf.split("\n"); buf = lines.pop();
-    for (const line of lines) {
-      if (!line.startsWith("data: ")) continue;
-      try { handleEvent(JSON.parse(line.slice(6)), stepsEl, bubbleEl, typing); }
-      catch (_) {}
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const lines = buf.split("\n"); buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        try { handleEvent(JSON.parse(line.slice(6)), stepsEl, bubbleEl, typing); }
+        catch (_) {}
+      }
     }
+  } catch (_) {
+    // reader.cancel() throws — that's expected when stopStreaming() is called
+  } finally {
+    _streamReader = null;
+    isStreaming = false;
+    _setSendBtnStopping(false);
+    scrollBottom();
   }
-
-  isStreaming = false;
-  document.getElementById("send-btn").disabled = false;
-  scrollBottom();
 }
 
 function handleEvent(ev, stepsEl, bubbleEl, typing) {
@@ -622,6 +669,19 @@ function handleEvent(ev, stepsEl, bubbleEl, typing) {
   else if (ev.type === "error") {
     typing.remove();
     bubbleEl.innerHTML = `<span style="color:#ef4444">⚠ ${esc(ev.message)}</span>`;
+  }
+  else if (ev.type === "stopped") {
+    typing.remove();
+    stepsEl.querySelectorAll(".tool-step:not(.done)").forEach(s => {
+      s.className = "tool-step done";
+      const spinEl = s.querySelector(".spin");
+      if (spinEl) { spinEl.classList.remove("spin"); spinEl.textContent = "✓"; }
+    });
+    const stopNote = document.createElement("div");
+    stopNote.className = "stop-note";
+    stopNote.textContent = "⬛ 已停止";
+    bubbleEl.before(stopNote);
+    if (!bubbleEl.textContent.trim()) bubbleEl.remove();
   }
 }
 

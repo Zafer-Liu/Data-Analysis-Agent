@@ -22,11 +22,14 @@ class DataSource:
         """Returns (dataframe, error_string). error_string is empty on success."""
         raise NotImplementedError
 
-    def create_analysis_table(self, sql: str, table_name: str = "analysis_data") -> str:
+    def create_analysis_table(
+        self, sql: str, table_name: str = "analysis_data", _df=None
+    ) -> str:
         """
-        Run *sql* against the data source, materialise the result as a new
-        SQLite table called *table_name* (default 'analysis_data'), and
-        return a human-readable confirmation string with the schema.
+        Materialise a result as a new SQLite table called *table_name*.
+        Either run *sql* against the data source, OR pass a pre-computed
+        DataFrame via *_df* (used by run_analysis to bypass SQL).
+        Returns a human-readable schema string.
         Subsequent calls to execute_query can SELECT from *table_name*.
         """
         raise NotImplementedError
@@ -143,10 +146,13 @@ class ExcelDataSource(DataSource):
         except Exception as exc:
             return pd.DataFrame(), str(exc)
 
-    def create_analysis_table(self, sql: str, table_name: str = "analysis_data") -> str:
-        df, err = self.execute_query(sql)
-        if err:
-            return f"Error building analysis table: {err}"
+    def create_analysis_table(self, sql: str, table_name: str = "analysis_data", _df=None) -> str:
+        if _df is not None:
+            df = _df
+        else:
+            df, err = self.execute_query(sql)
+            if err:
+                return f"Error building analysis table: {err}"
         df.to_sql(table_name, self._conn, if_exists="replace", index=False)
         return _table_schema_str(self._conn, table_name, len(df))
 
@@ -197,10 +203,13 @@ class CSVDataSource(DataSource):
         except Exception as exc:
             return pd.DataFrame(), str(exc)
 
-    def create_analysis_table(self, sql: str, table_name: str = "analysis_data") -> str:
-        df, err = self.execute_query(sql)
-        if err:
-            return f"Error building analysis table: {err}"
+    def create_analysis_table(self, sql: str, table_name: str = "analysis_data", _df=None) -> str:
+        if _df is not None:
+            df = _df
+        else:
+            df, err = self.execute_query(sql)
+            if err:
+                return f"Error building analysis table: {err}"
         df.to_sql(table_name, self._conn, if_exists="replace", index=False)
         return _table_schema_str(self._conn, table_name, len(df))
 
@@ -277,11 +286,14 @@ class SQLDataSource(DataSource):
         except Exception as exc:
             return pd.DataFrame(), str(exc)
 
-    def create_analysis_table(self, sql: str, table_name: str = "analysis_data") -> str:
+    def create_analysis_table(self, sql: str, table_name: str = "analysis_data", _df=None) -> str:
         # Fetch from external DB (or local cache) into pandas, then store locally
-        df, err = self.execute_query(sql)
-        if err:
-            return f"Error building analysis table: {err}"
+        if _df is not None:
+            df = _df
+        else:
+            df, err = self.execute_query(sql)
+            if err:
+                return f"Error building analysis table: {err}"
         if self._cache_conn is None:
             self._cache_conn = sqlite3.connect(":memory:", check_same_thread=False)
         df.to_sql(table_name, self._cache_conn, if_exists="replace", index=False)
