@@ -122,23 +122,23 @@ Also supports any **OpenAI SDK compatible API** via custom:
 
 ## Installation
 
-### Option 1: One-click Install + Run (Recommended)
+### Option 1: One-Click Install + Launch (Recommended)
 
 #### Windows (PowerShell)
 
 ```powershell
-iwr -useb https://raw.githubusercontent.com/Zafer-Liu/VizPilot_AI/main/install.ps1 | iex
+iwr -useb https://raw.githubusercontent.com/Zafer-Liu/Data-Analysis-Agent/main/install.ps1 | iex
 ```
 
-After installation, you can start the app in either way:
+After installation, you can start it in either of the following ways:
 
 - Double-click to run (Windows):
   ```bat
-  %USERPROFILE%\vizpilot-ai.bat
+  %USERPROFILE%\data-analysis-agent.bat
   ```
-- Or start it manually from the project directory:
+- Or start manually from the project directory:
   ```powershell
-  cd $env:USERPROFILE\.vizpilot-ai\VizPilot_AI
+  cd $env:USERPROFILE\.data-analysis-agent\Data-Analysis-Agent
   .\.venv\Scripts\activate
   python app.py
   ```
@@ -146,13 +146,13 @@ After installation, you can start the app in either way:
 #### macOS / Linux (Shell)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Zafer-Liu/VizPilot_AI/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Zafer-Liu/Data-Analysis-Agent/main/install.sh | sh
 ```
 
-Start after installation:
+After installation, launch with:
 
 ```bash
-vizpilot-ai
+data-analysis-agent
 ```
 
 If you see `command not found`, add `~/.local/bin` to your PATH (in `~/.bashrc` or `~/.zshrc`):
@@ -160,6 +160,7 @@ If you see `command not found`, add `~/.local/bin` to your PATH (in `~/.bashrc` 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
+
 
 ---
 

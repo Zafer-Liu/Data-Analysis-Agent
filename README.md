@@ -187,18 +187,18 @@ Business Analyst Agent 是一个对话式商业数据分析系统，目标是让
 #### Windows（PowerShell）
 
 ```powershell
-iwr -useb https://raw.githubusercontent.com/Zafer-Liu/VizPilot_AI/main/install.ps1 | iex
+iwr -useb https://raw.githubusercontent.com/Zafer-Liu/Data-Analysis-Agent/main/install.ps1 | iex
 ```
 
 安装完成后可用以下方式启动：
 
 - 双击运行（Windows）：
   ```bat
-  %USERPROFILE%\vizpilot-ai.bat
+  %USERPROFILE%\data-analysis-agent.bat
   ```
 - 或进入目录手动启动：
   ```powershell
-  cd $env:USERPROFILE\.vizpilot-ai\VizPilot_AI
+  cd $env:USERPROFILE\.data-analysis-agent\Data-Analysis-Agent
   .\.venv\Scripts\activate
   python app.py
   ```
@@ -206,13 +206,13 @@ iwr -useb https://raw.githubusercontent.com/Zafer-Liu/VizPilot_AI/main/install.p
 #### macOS / Linux（Shell）
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Zafer-Liu/VizPilot_AI/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Zafer-Liu/Data-Analysis-Agent/main/install.sh | sh
 ```
 
 安装完成后启动：
 
 ```bash
-vizpilot-ai
+data-analysis-agent
 ```
 
 如果提示 `command not found`，请先把 `~/.local/bin` 加入 PATH（写入 `~/.bashrc` 或 `~/.zshrc`）：
