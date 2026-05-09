@@ -1,16 +1,10 @@
 # 智能商业分析 Agent
 
-<div align="right">
-
 <p align="center">
-  <img src="Images/Banner.png">
+  <img src="./Images/Banner.png" alt="智能商业分析 Agent Banner" width="100%" />
 </p>
 
-<div align="right">
-
-[English](./README_EN.md)
-
-</div>
+<p align="right"><a href="./README_EN.md">English</a></p>
 
 ![Python](https://img.shields.io/badge/Python-3.8%2B-blue.svg)
 ![Flask](https://img.shields.io/badge/Backend-Flask-black.svg)
@@ -28,6 +22,7 @@
 > - 业务洞察分析
 
 ---
+
 
 # ✨ 项目亮点
 
