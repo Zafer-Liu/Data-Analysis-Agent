@@ -203,9 +203,11 @@ AGENT_TOOLS = [
         "function": {
             "name": "export_excel",
             "description": (
-                "Export one or more data tables to an Excel (.xlsx) file. "
+                "Export data tables to an Excel (.xlsx) file. "
                 "Call this ONLY when the user explicitly asked to export data. "
-                "Each table becomes a separate sheet."
+                "Each table becomes a separate sheet. "
+                "Pass tables=[\"*\"] to export ALL available tables automatically — "
+                "this is the default behaviour unless the user asks for specific tables."
             ),
             "parameters": {
                 "type": "object",
@@ -214,9 +216,10 @@ AGENT_TOOLS = [
                         "type": "array",
                         "items": {"type": "string"},
                         "description": (
-                            "List of table names to export, e.g. "
-                            "['analysis_result', 'Sheet1']. "
-                            "Use get_schema to discover available table names."
+                            "Table names to export. "
+                            "Use [\"*\"] to auto-export every table in the data source "
+                            "(raw data + analysis results). "
+                            "Only specify exact names if the user asked for specific tables."
                         ),
                     },
                     "filename": {
@@ -561,12 +564,30 @@ class BusinessAgent:
             return {"error": result["error"]}
         return {"html": result.get("html", ""), "chart_type": chart_type}
 
+    def _discover_all_tables(self) -> list:
+        """Return every table name currently available in the data source."""
+        if not self.data_source:
+            return []
+        # Works for ExcelDataSource / CSVDataSource (SQLite in-memory)
+        df, err = self.data_source.execute_query(
+            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY rowid"
+        )
+        if not err and not df.empty:
+            return df["name"].tolist()
+        # Fallback: parse schema string (covers SQLDataSource cache tables too)
+        import re
+        schema = self._tool_get_schema()
+        return re.findall(r"^Table:\s+(\S+)", schema, re.MULTILINE)
+
     def _tool_export_excel(self, tables: list, filename: str = "") -> str:
         import datetime
         from Function.Output.excel_export import export_to_excel
 
-        if not tables:
-            return "❌ 请指定要导出的表名列表。"
+        # ["*"] or empty → auto-discover all tables in the data source
+        if not tables or tables == ["*"]:
+            tables = self._discover_all_tables()
+            if not tables:
+                return "❌ 数据源中没有可用的表格，请先上传数据或运行分析。"
 
         if not filename:
             ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -583,7 +604,7 @@ class BusinessAgent:
             return f"❌ 导出失败：{exc}"
 
         return (
-            f"✅ Excel 文件已生成，包含 {len(tables)} 张表：{', '.join(tables)}。\n\n"
+            f"✅ Excel 文件已生成，共 {len(tables)} 张表：{', '.join(tables)}。\n\n"
             f"[📥 点击下载 {safe_name}](/api/export/{safe_name})"
         )
 
@@ -672,15 +693,14 @@ class BusinessAgent:
             "7. Conclude with a concise business interpretation (2-4 sentences)."
         ),
         "export": (
-            "The user issued the /export command to export data tables to Excel.\n"
-            "Allowed tools this turn: get_schema (once, to discover table names), export_excel.\n"
-            "FORBIDDEN this turn: query_data, run_analysis, generate_chart, create_analysis_table.\n"
+            "The user issued the /export command to export data to Excel.\n"
+            "Allowed tools this turn: export_excel ONLY.\n"
+            "FORBIDDEN this turn: get_schema, query_data, run_analysis, generate_chart, create_analysis_table.\n"
             "Workflow:\n"
-            "1. Call get_schema ONCE to list all available tables.\n"
-            "2. Select which tables to export based on the user's message "
-            "(default: every analysis_* table; if no analysis tables, use the first raw data table).\n"
-            "3. Call export_excel immediately with the chosen table names.\n"
-            "4. Return the download link from the tool result — do NOT add commentary."
+            "1. Call export_excel(tables=[\"*\"]) immediately — this auto-exports ALL tables "
+            "(raw data sheets + any analysis result tables) without needing to list them.\n"
+            "   Only pass specific table names if the user explicitly asked for certain tables.\n"
+            "2. Return the download link from the tool result — do NOT add extra commentary."
         ),
         "report": (
             "The user issued the /report command to generate a Word document report.\n"
