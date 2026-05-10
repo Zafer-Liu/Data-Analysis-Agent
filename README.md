@@ -333,6 +333,10 @@ registry.py
 
 # 🗺️ Roadmap
 
+## Version Development Log
+- [View changelog](Version_Update_Log.md)
+- [View changelog](Version_Update_Log_EN.md)
+
 ## Phase 1（当前）
 
 - ✅ 对话式数据分析
