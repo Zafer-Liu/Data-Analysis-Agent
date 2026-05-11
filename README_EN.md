@@ -161,6 +161,40 @@ start.bat
 >   xattr -d com.apple.quarantine start.command
 >   ```
 
+#### 2) Extract and Run via Command Line (Backup Method)
+
+**① Windows:**
+Navigate to the project directory (or hold Shift + right-click inside the project folder to open PowerShell):
+```bash
+cd Data-Analysis-Agent
+```
+
+Install dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+Start the service:
+```bash
+python app.py
+```
+
+**② Mac:**
+Navigate to the project directory:
+```bash
+cd Data-Analysis-Agent
+```
+
+Install dependencies:
+```bash
+pip3 install -r requirements.txt
+```
+
+Start the service:
+```bash
+python3 app.py
+```
+
 #### 3) Open `http://localhost:5001` in your browser
 
 This is a local address and will not leak any information. Please use it with confidence.

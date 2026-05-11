@@ -188,7 +188,44 @@ start.bat
    ```
 ③ 双击 `start.command` 即可运行
 > 注：首次运行可能会被 macOS 安全策略阻止，解决方法： 右键点击 start.command → 选择“打开” → 再次确认“打开” 或在终端执行：xattr -d com.apple.quarantine start.command
----
+
+
+#### 2) 解压缩，命令行运行（备份方法）
+**① Windows：**
+
+进入项目目录（也可以直接在项目目录按住Shift右键打开Powershell
+```bash
+cd Data-Analysis-Agent
+```
+
+安装依赖
+
+```bash
+pip install -r requirements.txt
+```
+
+启动服务
+
+```bash
+python app.py
+```
+
+**② Mac**
+
+进入项目目录
+```bash
+cd Data-Analysis-Agent
+```
+
+安装依赖
+```bash
+pip3 install -r requirements.txt
+```
+
+启动服务
+```bash
+python3 app.py
+```
 
 
 #### 3) 浏览器打开`http://localhost:5001`
