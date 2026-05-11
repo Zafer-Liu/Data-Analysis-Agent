@@ -195,7 +195,7 @@ start.bat
 #### 2) 解压缩，命令行运行（备份方法）
 **① Windows：**
 
-进入项目目录（也可以直接在项目目录按住Shift右键打开Powershell
+进入项目目录（也可以直接在项目目录按住Shift右键打开Powershell）
 ```bash
 cd Data-Analysis-Agent
 ```
