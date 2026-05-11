@@ -90,20 +90,19 @@ Business Analyst Agent 是一个对话式商业数据分析系统，目标是让
 
 ## 📊 智能图表系统
 
-当前内置 **43 种图表类型**，覆盖：
-
-| 分类 | 示例 |
+| 分类 | 图表类型 |
 |---|---|
-| 对比分析 | 柱状图、条形图 |
-| 时间趋势 | 折线图、面积图 |
-| 分布分析 | 直方图、箱线图 |
-| 关系分析 | 散点图、气泡图 |
-| 占比分析 | 饼图、环形图 |
-| 地理分析 | 地图类图表 |
+| **对比类** COMPARING | Marimekko_ABS（马里美科-绝对值）、Marimekko_PCT（马里美科-百分比）、Bar_Chart（柱状图）、Grouped_Bar_Chart（分组柱状图）、Stacked_Bar_Chart（堆叠柱状图）、Diverging_Bar_Chart（对比条形图）、Dot_Plot（点图）、Waffle（华夫格）、Bullet_Chart（靶心图）、Sankey_Chart（桑基图）、Heatmap（热力图）、Waterfall（瀑布图） |
+| **时间趋势类** TIME | Line_Chart（折线图）、Circular_Line_Chart（圆形折线图）、Slope_Chart（斜率图）、Sparkline（迷你图）、Bump_Chart（凹凸图）、Cycle_Chart（周期图）、Area_Chart（面积图）、Stacked_Area_Chart（堆叠面积图）、Horizon_Chart（地平线图）、Connected_Scatter（连线散点图） |
+| **分布类** DISTRIBUTION | Histogram_Pareto_chart（直方图与帕累托图）、Pyramid_Chart（金字塔图）、Error_Bar_Chart（误差条形图）、Box-and-Whisker_Plot（箱线图）、Violin_Chart（小提琴图）、Ridgeline_Plot（山脊线图）、Beeswarm_Plot（分簇散点图）、stem_leaf（茎叶图） |
+| **地理类** GEOSPATIAL | Flow_Map（动态流向图）、Dot_Density_Map（点密度地图）、Choropleth_Map（面量图） |
+| **关系类** RELATIONSHIP | Scatter_Plot（散点图）、Bubble_Plot（气泡图）、Radar_Charts（雷达图）、Chord_Diagram（弦图）、Arc_Chart（弧图）、Network_Diagram（网络图）、Parallel_Coordinates_Plot（平行坐标图） |
+| **占比类** PART-TO-WHOLE | Treemap（矩形树图）、Sunburst_Diagram（旭日图）、Nightingale_Chart（南丁格尔玫瑰图）、Pie_Chart（饼图） |
 
 系统会根据查询结果自动推荐最合适的图表。
 
 ---
+
 
 ## ⚡ SSE 流式分析体验
 
@@ -335,24 +334,6 @@ Model
 ```
 
 即可切换模型。
-
----
-
-## 新增图表类型
-
-在：
-
-```text
-Function/Charts_generation/charts/
-```
-
-新增图表目录，并在：
-
-```python
-registry.py
-```
-
-中注册即可。
 
 ---
 

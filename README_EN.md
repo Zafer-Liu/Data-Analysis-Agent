@@ -67,15 +67,17 @@ Planned:
 - DuckDB
 - Spark
 
-### 📊 Smart Chart Recommendation (43 Types)
-Built-in support for **43 chart types**, covering:
+### 📊 Smart Chart Recommendation
 
-- Comparing
-- Time / Trend
-- Distribution
-- Relationship
-- Part-to-Whole
-- Geospatial
+| Category | Chart Type |
+|---|---|
+| **对比类** COMPARING | Marimekko_ABS（马里美科-绝对值）、Marimekko_PCT（马里美科-百分比）、Bar_Chart（柱状图）、Grouped_Bar_Chart（分组柱状图）、Stacked_Bar_Chart（堆叠柱状图）、Diverging_Bar_Chart（对比条形图）、Dot_Plot（点图）、Waffle（华夫格）、Bullet_Chart（靶心图）、Sankey_Chart（桑基图）、Heatmap（热力图）、Waterfall（瀑布图） |
+| **时间趋势类** TIME | Line_Chart（折线图）、Circular_Line_Chart（圆形折线图）、Slope_Chart（斜率图）、Sparkline（迷你图）、Bump_Chart（凹凸图）、Cycle_Chart（周期图）、Area_Chart（面积图）、Stacked_Area_Chart（堆叠面积图）、Horizon_Chart（地平线图）、Connected_Scatter（连线散点图） |
+| **分布类** DISTRIBUTION | Histogram_Pareto_chart（直方图与帕累托图）、Pyramid_Chart（金字塔图）、Error_Bar_Chart（误差条形图）、Box-and-Whisker_Plot（箱线图）、Violin_Chart（小提琴图）、Ridgeline_Plot（山脊线图）、Beeswarm_Plot（分簇散点图）、stem_leaf（茎叶图） |
+| **地理类** GEOSPATIAL | Flow_Map（动态流向图）、Dot_Density_Map（点密度地图）、Choropleth_Map（面量图） |
+| **关系类** RELATIONSHIP | Scatter_Plot（散点图）、Bubble_Plot（气泡图）、Radar_Charts（雷达图）、Chord_Diagram（弦图）、Arc_Chart（弧图）、Network_Diagram（网络图）、Parallel_Coordinates_Plot（平行坐标图） |
+| **占比类** PART-TO-WHOLE | Treemap（矩形树图）、Sunburst_Diagram（旭日图）、Nightingale_Chart（南丁格尔玫瑰图）、Pie_Chart（饼图） |
+
 
 The agent selects charts automatically based on the query result.
 
@@ -221,19 +223,19 @@ http://localhost:5001
 
 | Command | Status | Description |
 |---|---|---|
-| `/chart` | ✅ | 强制优先生成图表 |
-| `/sql` | ✅ | 直接执行 SQL |
-| `/analyze` | ✅ | 深度统计分析 |
-| `/tree` | ✅ | 决策树分析 |
-| `/kmeans` | ✅ | K-Means 聚类分析 |
-| `/data` | ✅ | 数据探查与预览 |
-| `/inset` | ✅ | 缺失值插补处理 |
-| `/winsorize` | ✅ | 缩尾处理（极值替换） |
-| `/trimming` | ✅ | 截尾处理（极值剔除） |
-| `/export` | ✅ | 导出数据文件 |
-| `/report` | ✅ | 导出 Word/PDF 报告 |
-| `/ppt` | ✅ | 导出 PPT 演示文稿 |
-| `/status` | ✅ | 查看任务状态 |
+| `/chart` | ✅ | Force priority chart generation |
+| `/sql` | ✅ | Execute SQL directly |
+| `/analyze` | ✅ | In-depth statistical analysis |
+| `/tree` | ✅ | Decision tree analysis |
+| `/kmeans` | ✅ | K-Means clustering analysis |
+| `/data` | ✅ | Data profiling and preview |
+| `/inset` | ✅ | Missing value imputation |
+| `/winsorize` | ✅ | Winsorization (outlier replacement) |
+| `/trimming` | ✅ | Trimming (outlier removal) |
+| `/export` | ✅ | Export data file |
+| `/report` | ✅ | Export Word/PDF report |
+| `/ppt` | ✅ | Export PowerPoint presentation |
+| `/status` | ✅ | View task status |
 ---
 
 ## 📁 Suggested Project Structure
@@ -269,17 +271,6 @@ If you see “LLM not configured”, open the sidebar ⚙ and fill in:
 - Model
 
 Save to apply.
-
-### Adding New Chart Types
-1. Add a new chart folder under:
-   ```text
-   Function/Charts_generation/charts/
-   ```
-2. Register it in:
-   ```python
-   Function/Charts_generation/registry.py
-   ```
-3. Restart the app.
 
 ---
 
