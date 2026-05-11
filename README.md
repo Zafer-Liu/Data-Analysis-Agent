@@ -49,9 +49,9 @@ Business Analyst Agent 是一个对话式商业数据分析系统，目标是让
 
 ---
 
-# 🚀 核心能力
+# 🧠 核心能力
 
-## 🧠 自然语言数据分析
+## 1️⃣ 自然语言数据分析
 
 无需编写 SQL。
 
@@ -70,25 +70,17 @@ Business Analyst Agent 是一个对话式商业数据分析系统，目标是让
 
 ---
 
-## 🔌 多数据源支持
+## 2️⃣ 多数据源支持
 
-支持：
+支持上传和连接多种数据源：
 
-- Excel
-- CSV
-- SQLite
-- MySQL
-- PostgreSQL
-- SQL Server
-
-未来计划：
-
-- DuckDB
-- Spark
+- 文件：Excel / CSV
+- 数据库：SQLite、MySQL、PostgreSQL、SQL Server
+- 未来计划：DuckDB、Spark
 
 ---
 
-## 📊 智能图表系统
+## 3️⃣ 智能图表系统
 
 | 分类 | 图表类型 |
 |---|---|
@@ -104,7 +96,7 @@ Business Analyst Agent 是一个对话式商业数据分析系统，目标是让
 ---
 
 
-## ⚡ SSE 流式分析体验
+## 4️⃣ SSE 流式分析体验
 
 分析过程实时可见：
 
@@ -119,7 +111,7 @@ Business Analyst Agent 是一个对话式商业数据分析系统，目标是让
 
 ---
 
-## 🤖 多模型兼容
+## 5️⃣ 多模型兼容
 
 支持：
 
@@ -160,7 +152,7 @@ Business Analyst Agent 是一个对话式商业数据分析系统，目标是让
 
 ---
 
-## 安装方式
+## ⚙️安装方式
 
 
 
@@ -232,9 +224,19 @@ python3 app.py
 
 #### 3) 浏览器打开`http://localhost:5001`
 
-此地址为本地地址，不会泄露信息，请放心使用
+注：此地址为本机地址，不会泄露信息，请放心使用
 
 ![Download installation package2](Images/package2.png)
+
+#### 4) 配置API key
+
+![Configure the API3](Images/Deepseek3.png)
+
+#### 5) 后续更新
+
+![Update](Images/Update.png)
+
+注：更新前请先刷新页面
 
 ---
 ### 方式 2：一键安装 + 启动（还在测试，不稳定）
@@ -258,7 +260,7 @@ iwr -useb https://raw.githubusercontent.com/Zafer-Liu/Data-Analysis-Agent/main/i
   python app.py
   ```
 
-#### 2) macOS / Linux（Shell）
+#### 1) macOS / Linux（Shell）
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Zafer-Liu/Data-Analysis-Agent/main/install.sh | sh
@@ -275,6 +277,12 @@ data-analysis-agent
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
+
+#### 2) 浏览器打开（同方式 1）
+
+#### 3) 配置API key（同方式 1）
+
+#### 4) 后续更新（同方式 1）
 
 
 ---
@@ -304,13 +312,12 @@ pip install -r requirements.txt
 python app.py
 ```
 
----
+#### 5) 浏览器打开（同方式 1）
 
-## 访问地址
+#### 6) 配置API key（同方式 1）
 
-```text
-http://localhost:5001
-```
+#### 7) 后续更新（同方式 1）
+
 ---
 
 # 🛠 斜杠命令 

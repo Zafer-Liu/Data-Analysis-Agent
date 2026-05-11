@@ -47,12 +47,12 @@ It also supports **SSE (Server-Sent Events)** streaming so you can see the analy
 
 ---
 
-## 🚀 Key Features
+## 🧠 Key Features
 
-### 🧠 Natural Language Analytics
+### 1️⃣ Natural Language Analytics
 No need to write SQL manually. The agent turns plain language into SQL + results + insights.
 
-### 🔌 Multiple Data Sources
+### 2️⃣ Multiple Data Sources
 Supported:
 
 - Excel
@@ -67,7 +67,7 @@ Planned:
 - DuckDB
 - Spark
 
-### 📊 Smart Chart Recommendation
+### 3️⃣ Smart Chart Recommendation
 
 | Category | Chart Type |
 |---|---|
@@ -81,7 +81,7 @@ Planned:
 
 The agent selects charts automatically based on the query result.
 
-### ⚡ SSE Real-time Feedback
+### 4️⃣ SSE Real-time Feedback
 Streaming progress like:
 
 ```text
@@ -91,7 +91,7 @@ Streaming progress like:
 [4/4] Creating chart & insights...
 ```
 
-### 🤖 Configurable LLM Providers
+### 5️⃣ Configurable LLM Providers
 Built-in support:
 
 - **DeepSeek** (default: `deepseek-chat`)
@@ -195,11 +195,21 @@ Start the service:
 python3 app.py
 ```
 
-#### 3) Open `http://localhost:5001` in your browser
+#### 3) Open in browser`http://localhost:5001`
 
-This is a local address and will not leak any information. Please use it with confidence.
+Note: This is a local address and will not leak any information. Please use it with confidence.
 
 ![Download installation package2](Images/package2.png)
+
+#### 4) Configure API key
+
+![Configure the API3](Images/Deepseek3.png)
+
+#### 5) Subsequent updates
+
+![Update](Images/Update.png)
+
+Note: Please refresh the page before updating.
 
 ---
 
@@ -242,10 +252,15 @@ If you see `command not found`, add `~/.local/bin` to your PATH (in `~/.bashrc` 
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
+#### Open in browser (Same as Option 1)
+
+#### Configure API key (Same as Option 1)
+
+#### Subsequent updates (Same as Option 1)
+
+Note: Please refresh the page before updating.
 
 ---
-
-
 
 ### Method 3: Install via GitHub (Command Line)
 
@@ -273,13 +288,11 @@ pip install -r requirements.txt
 python app.py
 ```
 
----
+#### Open in browser (Same as Option 1)
 
-## Access URL
+#### Configure API key (Same as Option 1)
 
-```text
-http://localhost:5001
-```
+#### Subsequent updates (Same as Option 1)
 
 ---
 
