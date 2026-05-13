@@ -495,8 +495,12 @@ A: 这里以Deepseek为例，步骤如下：
 
 A: 生成的图表储存在本地内容*\outputs\charts目录下
 
+## Q：如何连接SQL数据库？
 
+A: 请使用下面格式连接 `mysql+pymysql://用户名:密码@主机:端口/数据库名`
 
+报错写法：mysql://user:pass@host:3306/dbname 
+正确写法：mysql+pymysql://user:pass@host:3306/dbname
 ---
 
 # 📄 License
