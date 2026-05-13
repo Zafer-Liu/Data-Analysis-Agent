@@ -3,7 +3,9 @@ import logging
 import traceback
 import uuid
 import os
+import re
 from pathlib import Path
+from urllib.parse import quote
 
 from flask import Blueprint, request, jsonify
 from werkzeug.utils import secure_filename
@@ -27,6 +29,21 @@ ALLOWED_EXTS = {".xlsx", ".xls", ".csv"}
 
 def _allowed(filename: str) -> bool:
     return Path(filename).suffix.lower() in ALLOWED_EXTS
+
+
+def _encode_db_password(conn_str: str) -> str:
+    """对连接字符串中的密码部分做 URL 编码，处理 @ # 等特殊字符。"""
+    # 匹配 scheme://user:password@host 格式，密码可能含多个 @
+    # 贪婪匹配密码部分（.+），确保最后一个 @ 才是 host 分隔符
+    m = re.match(r'^([a-zA-Z][a-zA-Z0-9+\-.]*://[^:@/]+):(.+)@([^@].*)', conn_str)
+    if not m:
+        return conn_str
+    prefix, password, rest = m.group(1), m.group(2), m.group(3)
+    # 若密码已含 % 编码则跳过，避免二次编码
+    if re.search(r'%[0-9A-Fa-f]{2}', password):
+        return conn_str
+    encoded = quote(password, safe='-._~!*')
+    return f"{prefix}:{encoded}@{rest}"
 
 
 @bp.post("/api/session/<sid>/upload")
@@ -77,6 +94,7 @@ def connect_db(sid: str):
         conn_str = (saved or {}).get("connection_string", "")
     if not conn_str:
         return jsonify({"error": "连接字符串不能为空"}), 400
+    conn_str = _encode_db_password(conn_str)
     try:
         source = SQLDataSource(conn_str, display_name)
         sess = session_manager.get_or_create(sid)
