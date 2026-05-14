@@ -66,6 +66,22 @@ class LLMConfigManager:
             "is_custom": False,
             "context_window": 200000,
             "max_output_tokens": 8192,
+        },
+        "astraflow": {
+            "base_url": "https://api-us-ca.umodelverse.ai/v1",
+            "model": "gpt-4o-mini",
+            "env_var": "ASTRAFLOW_API_KEY",
+            "is_custom": False,
+            "context_window": 128000,
+            "max_output_tokens": 16384,
+        },
+        "astraflow_cn": {
+            "base_url": "https://api.modelverse.cn/v1",
+            "model": "gpt-4o-mini",
+            "env_var": "ASTRAFLOW_CN_API_KEY",
+            "is_custom": False,
+            "context_window": 128000,
+            "max_output_tokens": 16384,
         }
     }
 
@@ -278,7 +294,7 @@ class LLMConfigManager:
         ]
 
     def get_default_provider(self) -> Optional[str]:
-        priority = ["deepseek", "openai", "claude"]
+        priority = ["deepseek", "openai", "claude", "astraflow", "astraflow_cn"]
         for provider in priority:
             if provider in self.configs and self.configs[provider].enabled:
                 return provider

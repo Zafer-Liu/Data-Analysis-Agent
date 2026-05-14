@@ -31,5 +31,27 @@
     "context_window": 1000000,
     "max_output_tokens": 384000,
     "enable_thinking": true
+  },
+  "astraflow": {
+    "provider": "astraflow",
+    "api_key": "sk",
+    "base_url": "https://api-us-ca.umodelverse.ai/v1",
+    "model": "gpt-4o-mini",
+    "enabled": false,
+    "is_custom": false,
+    "context_window": 128000,
+    "max_output_tokens": 16384,
+    "enable_thinking": false
+  },
+  "astraflow_cn": {
+    "provider": "astraflow_cn",
+    "api_key": "sk",
+    "base_url": "https://api.modelverse.cn/v1",
+    "model": "gpt-4o-mini",
+    "enabled": false,
+    "is_custom": false,
+    "context_window": 128000,
+    "max_output_tokens": 16384,
+    "enable_thinking": false
   }
 }
