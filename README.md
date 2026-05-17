@@ -32,7 +32,7 @@
 - [⚙️ 配置说明](#⚙️-配置说明)
 - [🗺️ 项目里程碑](#️-项目里程碑)
 - [❓ FAQ](#-faq)
-- [🐱 诚挚寻找Contributor](#寻找一起改变世界的-contributor)
+- [🚀 寻找一起改变世界的 Contributor](#寻找一起改变世界的-contributor)
 - [📄 License](#-license)
 - [⭐ 项目目标](#-项目目标)
 ---
