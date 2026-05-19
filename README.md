@@ -6,7 +6,7 @@
 
 <p align="right"><a href="./README_EN.md">English</a></p>
 
-![Python](https://img.shields.io/badge/Python-3.8%2B-blue.svg)
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)
 ![Flask](https://img.shields.io/badge/Backend-Flask-black.svg)
 ![Plotly](https://img.shields.io/badge/Visualization-Plotly-3F4F75.svg)
 ![LLM](https://img.shields.io/badge/LLM-OpenAI%20Compatible-green.svg)
