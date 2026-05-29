@@ -34,7 +34,26 @@ class _ChartStore:
         return p.read_text(encoding="utf-8") if p.exists() else default
 
 
-_CHARTS_DIR = Path(__file__).parent.parent / "outputs" / "charts"
+def _resolve_writable_dir(preferred: Path) -> Path:
+    """Return *preferred* if writable, otherwise fall back to /tmp equivalent.
+
+    Vercel Serverless (and similar read-only runtimes) mount the deploy
+    directory as read-only.  /tmp is the only writable location there.
+    """
+    try:
+        preferred.mkdir(parents=True, exist_ok=True)
+        # Quick write-test so we don't silently fail later
+        test = preferred / ".write_test"
+        test.write_text("ok")
+        test.unlink()
+        return preferred
+    except OSError:
+        fallback = Path("/tmp") / "baa" / preferred.name
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
+
+
+_CHARTS_DIR = _resolve_writable_dir(Path(__file__).parent.parent / "outputs" / "charts")
 
 session_manager: SessionManager = SessionManager()
 config_manager = get_config_manager()
