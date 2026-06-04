@@ -13,37 +13,13 @@
   },
   "deepseek": {
     "provider": "deepseek",
-    "api_key": "sk-b990f0a4f004408ab44bd7e5343756ce",
+    "api_key": "sk",
     "base_url": "https://api.deepseek.com",
     "model": "deepseek-v4-flash",
     "enabled": true,
     "is_custom": false,
     "context_window": 1000000,
     "max_output_tokens": 384000,
-    "enable_thinking": true,
-    "thinking_budget": 8000
-  },
-  "custom_mimo-v2.5-pro": {
-    "provider": "custom_mimo-v2.5-pro",
-    "api_key": "tp-cwjy4b6daymdohy62nirtzrmsy3ixq1enuf7kijah7ejyrlq",
-    "base_url": "https://token-plan-cn.xiaomimimo.com/v1",
-    "model": "mimo-v2.5-pro",
-    "enabled": true,
-    "is_custom": true,
-    "context_window": 100000,
-    "max_output_tokens": 100000,
-    "enable_thinking": true,
-    "thinking_budget": 8000
-  },
-  "custom_minimax-m2.7": {
-    "provider": "custom_minimax-m2.7",
-    "api_key": "sk-cp-dU1KrVgoc3vDZQOcXcdViricBrZkG95MgaS5AYm8TNYzr7ui2i1HEHIXM9mjw5nDfFr0Axylten828TcQhffQoKZVu-Gyiy9Ie3SuzlSxW6OejCja6_NPmU",
-    "base_url": "https://api.minimaxi.com/v1",
-    "model": "MiniMax-M2.7",
-    "enabled": true,
-    "is_custom": true,
-    "context_window": 100000,
-    "max_output_tokens": 100000,
     "enable_thinking": true,
     "thinking_budget": 8000
   }
