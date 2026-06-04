@@ -46,5 +46,5 @@ if __name__ == "__main__":
     # Vercel 用 PORT，本地默认 5001
     port = int(os.environ.get("PORT") or os.environ.get("AGENT_PORT", 5001))
     print(f"\n  Business Analyst Agent → http://localhost:{port}\n")
-    # 本地 debug=True，Vercel 会自动处理
-    app.run(host="0.0.0.0", port=port, debug=not is_vercel)
+    # use_reloader=False：关闭 Flask watchdog 文件监视器。
+    app.run(host="0.0.0.0", port=port, debug=not is_vercel, use_reloader=False)

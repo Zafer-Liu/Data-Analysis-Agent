@@ -25,11 +25,17 @@ ARCHIVE_URL = "https://github.com/Zafer-Liu/Data-Analysis-Agent/archive/refs/hea
 ZIP_PREFIX = "Data-Analysis-Agent-main/"
 
 # Paths (relative to project root) that must NEVER be overwritten during update
-# — user data, local config, runtime outputs
+# — user data, local config, runtime outputs, local-only documentation
 PROTECTED = {
+    # Runtime data — user uploads / generated outputs
     "uploads",
     "outputs",
+    # User configuration — credentials, API keys, connection strings
     "LLM/llm_config.json",
+    "LLM/mcp_config.json",
+    "data/datasource_config.json",
+    ".env",
+    # VCS / IDE metadata
     ".git",
     "__pycache__",
 }

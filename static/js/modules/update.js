@@ -34,16 +34,15 @@
         stateEl.innerHTML = `<span class="update-state-icon">❌</span><span class="update-state-text">${t('update.fail')}</span>`;
       }
     } catch (e) {
-      // The server may restart mid-update (file overwrite), which aborts the fetch.
-      // That outcome means the update actually succeeded — prompt the user to refresh.
-      if (e.name === "TypeError" || e.name === "AbortError") {
-        stateEl.className = "update-state update-ok";
-        stateEl.innerHTML = `<span class="update-state-icon">✅</span><span class="update-state-text">${t('update.ok_restart')}</span>`;
-        hintEl.style.display = "block";
-      } else {
-        stateEl.className = "update-state update-err";
-        stateEl.innerHTML = `<span class="update-state-icon">❌</span><span class="update-state-text">${t('update.req_fail')}${esc(String(e))}</span>`;
-      }
+      // Network errors (TypeError = connection refused/reset, AbortError = 120s timeout).
+      // The backend does NOT auto-restart, so these always mean the request failed —
+      // NOT a successful update. Show a real error message so the user knows what happened.
+      const isTimeout = e.name === "AbortError";
+      const msg = isTimeout
+        ? (t('update.req_timeout') || "请求超时（超过 120 秒）。可能是网络无法访问 GitHub，请检查网络后重试。")
+        : (t('update.req_fail') || "网络请求失败：") + esc(String(e));
+      stateEl.className = "update-state update-err";
+      stateEl.innerHTML = `<span class="update-state-icon">❌</span><span class="update-state-text">${msg}</span>`;
     } finally {
       btn.disabled = false;
     }
