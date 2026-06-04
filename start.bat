@@ -105,12 +105,9 @@ rem =========================================================
 echo [INFO] Checking and installing dependencies...
 
 if exist "%REQUIREMENTS_FILE%" (
-    %PY_CMD% -m pip install --upgrade pip
-    if errorlevel 1 (
-        echo [WARN] pip upgrade failed, continue anyway...
-    )
-
-    rem 安装缺失或未满足版本的模块
+    rem 只安装缺失或未满足版本要求的包，不强制升级已安装的包
+    rem 避免每次启动把依赖升级到最新版导致兼容性问题
+    %PY_CMD% -m pip install -r "%REQUIREMENTS_FILE%" --no-deps 2>nul
     %PY_CMD% -m pip install -r "%REQUIREMENTS_FILE%"
     if errorlevel 1 (
         echo [WARN] Retry installing dependencies with mirror...
