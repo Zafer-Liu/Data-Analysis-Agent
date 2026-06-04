@@ -72,7 +72,7 @@ Thank you to DolOffer for supporting this project! DolOffer is a platform focuse
 <p align="left">
 Thank you to Atlas Cloud for supporting this project! Atlas Cloud is an all-modal AI inference platform that provides developers with a unified AI API interface, covering video generation, image generation, and large language model APIs. Instead of integrating multiple providers separately, you can connect once and access more than 300 carefully selected all-modal models through a single interface. Check out Atlas Cloud’s newly launched coding plan promotion to get more cost-effective API access.
 </p>
-<a href="https://www.atlascloud.ai/console/coding-plan">Learn more →</a>
+<a href="https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=data-analysis-agent">Learn more →</a>
 </td>
 </tr>
 </table>
