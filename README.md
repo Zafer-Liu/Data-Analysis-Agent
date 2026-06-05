@@ -21,22 +21,38 @@
 > - 图表生成
 > - 业务洞察分析
 
----
-# 目录
 
-- [🙏 赞助商](#-赞助商)
-- [✨ 项目亮点](#-项目亮点)
-- [🧠 核心能力](#-核心能力)
-- [⚙️ 安装方式](#️-安装方式)
-- [🛠 斜杠命令](#-斜杠命令)
-- [📈 使用示例](#-使用示例)
-- [🤖 LLM配置说明](#️-LLM配置说明)
-- [🗺️ 项目里程碑](#️-项目里程碑)
-- [❓ FAQ](#-faq)
-- [🚀 寻找一起改变世界的 Contributor](#-寻找一起改变世界的-contributor)
-- [📄 License](#-license)
-- [⭐ 项目目标](#-项目目标)
+<p align="center">
+  <a href="#features">✨ 项目亮点</a> ·
+  <a href="#install">⚙️ 快速安装</a> ·
+  <a href="#examples">📈 使用示例</a> ·
+  <a href="#llm-config">🤖 模型配置</a> ·
+  <a href="#faq">❓ FAQ</a>
+</p>
+
+<details>
+<summary><strong>📚 完整目录</strong></summary>
+
+<br>
+
+- [赞助商](#sponsors)
+- [项目亮点](#features)
+- [核心能力](#capabilities)
+- [安装方式](#install)
+- [斜杠命令](#commands)
+- [使用示例](#examples)
+- [LLM 配置说明](#llm-config)
+- [项目里程碑](#roadmap)
+- [FAQ](#faq)
+- [Contributor](#contributor)
+- [License](#license)
+- [项目目标](#goal)
+
+</details>
+
 ---
+
+<a id="sponsors"></a>
 
 # 🙏 赞助商
 
@@ -78,6 +94,8 @@
 ---
 
 
+<a id="features"></a>
+
 # ✨ 项目亮点
 
 Business Analyst Agent 是一个对话式商业数据分析系统，目标是让非技术用户也能像“聊天”一样完成数据分析。
@@ -102,6 +120,8 @@ Business Analyst Agent 是一个对话式商业数据分析系统，目标是让
 并通过 **SSE（Server-Sent Events）流式输出**，实时展示分析过程。
 
 ---
+
+<a id="capabilities"></a>
 
 # 🧠 核心能力
 
@@ -226,6 +246,8 @@ Business Analyst Agent 是一个对话式商业数据分析系统，目标是让
 
 ---
 
+
+<a id="install"></a>
 
 # ⚙️ 安装方式
 
@@ -392,6 +414,8 @@ python app.py
 
 ---
 
+<a id="llm-config"></a>
+
 # 🤖 LLM配置说明
 
 ## LLM 配置
@@ -407,6 +431,8 @@ Model
 即可切换模型。
 
 ---
+
+<a id="roadmap"></a>
 
 # 🗺️ 项目里程碑
 
@@ -436,6 +462,8 @@ Model
 - [Version Update Log (English)](Information/Version_Update_Log_EN.md)
 
 ---
+
+<a id="faq"></a>
 
 # ❓ FAQ
 
@@ -608,6 +636,8 @@ outputs/charts
 
 ---
 
+<a id="contributor"></a>
+
 # 🚀 寻找一起改变世界的 Contributor
 
 一个好的开源项目，从来不是一个人的独角戏。  
@@ -640,11 +670,15 @@ outputs/charts
 
 
 
+<a id="license"></a>
+
 # 📄 License
 
 Apache License 2.0
 
 ---
+
+<a id="goal"></a>
 
 # ⭐ 项目目标
 
