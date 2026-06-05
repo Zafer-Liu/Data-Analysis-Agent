@@ -33,7 +33,8 @@ plotly>=5.0.0
 matplotlib>=3.4.0
 
 # HTTP / LLM
-requests>=2.26.0
+requests>=2.31.0
+charset-normalizer>=3.4.0  # requests 的间接依赖，3.4+ 支持 Python 3.14
 openai>=1.0.0
 python-dotenv>=1.0.0
 httpx>=0.27.0

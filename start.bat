@@ -144,6 +144,13 @@ for /f "tokens=5" %%a in ('netstat -ano ^| findstr /r /c:":%PORT% .*LISTENING"')
 rem =========================================================
 rem  Start app and open browser
 rem =========================================================
+
+rem Workaround: Python 3.14 bug — some encodings (e.g. mac_turkish) lack
+rem IncrementalDecoder, causing charset-normalizer to crash on import.
+rem Setting this var tells charset-normalizer to skip encoding-level probing.
+set "PYTHONIOENCODING=utf-8"
+set "PYTHONUTF8=1"
+
 echo [INFO] Starting application...
 echo [INFO] Open: http://127.0.0.1:%PORT%
 

@@ -4,6 +4,7 @@
     "api_key": "sk",
     "base_url": "https://api.openai.com/v1",
     "model": "gpt-4",
+    "name": null,
     "enabled": true,
     "is_custom": false,
     "context_window": null,
@@ -16,6 +17,7 @@
     "api_key": "sk",
     "base_url": "https://api.deepseek.com",
     "model": "deepseek-v4-flash",
+    "name": null,
     "enabled": true,
     "is_custom": false,
     "context_window": 1000000,
@@ -23,15 +25,16 @@
     "enable_thinking": true,
     "thinking_budget": 8000
   },
-  "AtlasCloud": {
-    "provider": "AtlasCloud",
-    "api_key": "",
+  "atlascloud": {
+    "provider": "atlascloud",
+    "api_key": "apikey",
     "base_url": "https://api.atlascloud.ai/v1",
     "model": "deepseek-ai/deepseek-v4-pro",
+    "name": null,
     "enabled": true,
-    "is_custom": true,
-    "context_window": 100000,
-    "max_output_tokens": 100000,
+    "is_custom": false,
+    "context_window": 128000,
+    "max_output_tokens": 16384,
     "enable_thinking": true,
     "thinking_budget": 8000
   }

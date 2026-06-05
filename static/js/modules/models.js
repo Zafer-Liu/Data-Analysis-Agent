@@ -5,9 +5,9 @@
 
   const COMMON_ICON = "/static/Images/icon.png";
   const BUILTIN_META = {
-    deepseek: { label: "DeepSeek",         icon: COMMON_ICON },
-    openai:   { label: "OpenAI / ChatGPT", icon: COMMON_ICON },
-    claude:   { label: "Anthropic Claude", icon: COMMON_ICON },
+    deepseek:   { label: "DeepSeek",         icon: COMMON_ICON },
+    openai:     { label: "OpenAI / ChatGPT", icon: COMMON_ICON },
+    atlascloud: { label: "AtlasCloud",       icon: COMMON_ICON },
   };
 
   // 首次加载标志 — loadModels 第一次运行时为 true，此后为 false。

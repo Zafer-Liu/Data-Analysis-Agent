@@ -8,6 +8,23 @@ import os
 from pathlib import Path
 import sys
 
+# Workaround: Python 3.14 regression — some codec modules (e.g. mac_turkish,
+# mac_roman) are missing IncrementalDecoder, causing charset-normalizer to
+# crash at import time. Patch importlib so broken encodings return a stub that
+# satisfies the hasattr check without raising AttributeError.
+def _patch_broken_encodings():
+    import importlib
+    _real_import = importlib.import_module
+    def _safe_import(name, *args, **kwargs):
+        mod = _real_import(name, *args, **kwargs)
+        if name.startswith("encodings.") and not hasattr(mod, "IncrementalDecoder"):
+            class _StubDecoder:
+                def __init__(self, *a, **k): pass
+            mod.IncrementalDecoder = _StubDecoder
+        return mod
+    importlib.import_module = _safe_import
+_patch_broken_encodings()
+
 # -------------------------------
 # 自动判断运行环境
 # -------------------------------

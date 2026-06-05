@@ -55,7 +55,15 @@ class LLMConfigManager:
             "is_custom": False,
             "context_window": 128000,
             "max_output_tokens": 16384,
-        }
+        },
+        "atlascloud": {
+            "base_url": "https://api.atlascloud.ai/v1",
+            "model": "moonshotai/kimi-k2.6",
+            "env_var": "ATLASCLOUD_API_KEY",
+            "is_custom": False,
+            "context_window": 128000,
+            "max_output_tokens": 16384,
+        },
     }
 
     def __init__(self, load_from_env: bool = False):
@@ -270,7 +278,7 @@ class LLMConfigManager:
         ]
 
     def get_default_provider(self) -> Optional[str]:
-        priority = ["deepseek", "openai", "claude"]
+        priority = ["deepseek", "openai", "atlascloud", "claude"]
         for provider in priority:
             if provider in self.configs and self.configs[provider].enabled:
                 return provider
@@ -361,7 +369,7 @@ def get_llm_client_with_fallback(preferred_provider: Optional[str] = None):
     if preferred_provider:
         candidates.append(preferred_provider)
 
-    priority = ["deepseek", "openai", "claude"]
+    priority = ["deepseek", "openai", "atlascloud", "claude"]
     for p in priority:
         if p not in candidates and p in manager.configs and manager.configs[p].enabled:
             candidates.append(p)
