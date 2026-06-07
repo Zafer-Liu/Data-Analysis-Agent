@@ -24,7 +24,7 @@
 
 <p align="center">
   <a href="#features">✨ 项目亮点</a> ·
-  <a href="#install">⚙️ 安装方式</a> ·
+  <a href="#install">⚙️ 快速安装</a> ·
   <a href="#examples">📈 使用示例</a> ·
   <a href="#llm-config">🤖 LLM配置说明</a> ·
   <a href="#faq">❓ FAQ</a>
@@ -247,7 +247,7 @@
 ---
 
 
-<a id=”install”></a>
+<a id="install"></a>
 
 # ⚙️ 安装方式
 
