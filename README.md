@@ -255,18 +255,13 @@
 
 ### 🖥️ 方式 1：Windows 安装包（最简单，推荐）
 
-无需 Python 环境，下载即用，一路点”下一步”完成安装。
+从 [Releases](https://github.com/Zafer-Liu/Data-Analysis-Agent/Releases) 下载最新版本：
 
-<p align=”center”>
-  <a href=”https://github.com/Zafer-Liu/Data-Analysis-Agent/releases/latest/download/BusinessAnalyticsAgent_Setup.exe”>
-    <img src=”https://img.shields.io/badge/Download-Windows_Installer_v5.1-0078D6?style=for-the-badge&logo=windows&logoColor=white” alt=”Download Windows Installer” />
-  </a>
-</p>
+| 平台 | 文件 |
+|------|------|
+| Windows | `BusinessAnalyticsAgent.exe` |
 
-> 文件：`BusinessAnalyticsAgent_Setup.exe`（44 MB）  
-> 系统：Windows 10 / 11 64 位  
-> 安装后在桌面或开始菜单找到 **BusinessAnalyticsAgent** 图标，双击启动即可。
-
+双击安装包，按提示安装即可。
 ---
 
 ### 方式 2：下载压缩包（推荐新手，跨平台）
@@ -384,6 +379,7 @@ python app.py
 
 ---
 
+<a id="examples"></a>
 # 📈 使用示例
 
 ## 示例 1：趋势分析
