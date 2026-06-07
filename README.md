@@ -255,7 +255,7 @@
 
 ### 🖥️ 方式 1：Windows 安装包（最简单，推荐）
 
-从 [Releases](https://github.com/Zafer-Liu/Data-Analysis-Agent/Releases) 下载最新版本：
+从 [Releases](https://github.com/Zafer-Liu/Data-Analysis-Agent/tree/main/Releases) 下载最新版本：
 
 | 平台 | 文件 |
 |------|------|
