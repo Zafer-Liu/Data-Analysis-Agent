@@ -40,6 +40,7 @@ def ensure_requirements():
         "beautifulsoup4": "bs4",
         "opencv-python": "cv2",
         "psycopg2-binary": "psycopg2",
+        "pyyaml": "yaml",
     }
 
     missing = []
@@ -63,7 +64,9 @@ def ensure_requirements():
                 [sys.executable, "-m", "pip", "install"] + missing,
             )
         except subprocess.CalledProcessError as e:
-            print(f"[WARN] Some packages failed to install: {e}. Continuing anyway...")
+            print(f"[ERROR] Some packages failed to install: {e}")
+            print("[ERROR] Dependency installation is incomplete; the application will not restart.")
+            raise SystemExit(1)
         print("[INFO] Installation complete. Restarting...")
         stamp_file.write_text(str(req_mtime))
         # os.execv 在 Windows 上行为不稳定，改用 subprocess 启动新进程后退出。
@@ -84,7 +87,8 @@ if os.environ.get("VERCEL") != "1":
 # 应用本地兼容性补丁
 # -------------------------------
 try:
-    import local_patches; local_patches.apply()
+    from infrastructure import local_patches
+    local_patches.apply()
 except ImportError:
     pass
 
@@ -103,14 +107,14 @@ sys.path.insert(0, str(Path(__file__).parent))
 # -------------------------------
 # 初始化日志
 # -------------------------------
-from log_setup import setup_logging
+from infrastructure.logging_setup import setup_logging
 setup_logging(level=20)  # logging.INFO
 
 # -------------------------------
 # 启动后台清理（仅本地；Vercel 短生命周期不需要）
 # -------------------------------
 if not is_vercel:
-    from cleanup import setup_cleanup
+    from infrastructure.cleanup import setup_cleanup
     setup_cleanup(Path(__file__).parent)
 
 # -------------------------------
@@ -120,9 +124,60 @@ from api import create_app
 app = create_app()
 
 # -------------------------------
-# 启动配置
+# 启动配置（统一 waitress，开发/生产同一入口）
 # -------------------------------
+def _serve(app, host: str, port: int):
+    """统一 WSGI 入口：本地用 waitress，Linux 私有化可切 gunicorn。
+
+    waitress ≥ 3.0 支持 chunked transfer-encoding，SSE 流式正常。
+    保留 gunicorn 作为 Linux 生产备选（通过环境变量 BAA_WSGI=gunicorn 切换）。
+    """
+    wsgi = os.environ.get("BAA_WSGI", "waitress").lower()
+    if wsgi == "gunicorn":
+        # 仅 Linux 可用；本地 Windows 不走这条路径
+        from gunicorn.app.base import BaseApplication
+
+        class _GunicornApp(BaseApplication):
+            def __init__(self, app, options=None):
+                self.app = app
+                self.options = options or {}
+                super().__init__()
+
+            def load_config(self):
+                for k, v in self.options.items():
+                    self.cfg.set(k.lower(), v)
+
+            def load(self):
+                return self.app
+
+        _GunicornApp(app, {
+            "bind": f"{host}:{port}",
+            "workers": int(os.environ.get("BAA_WORKERS", "1")),
+            "worker_class": "sync",
+            "timeout": 300,        # SSE 长连接
+        }).run()
+    else:
+        try:
+            from waitress import serve as waitress_serve
+        except ImportError:
+            print("[ERROR] waitress 未安装，请运行 pip install waitress>=3.0")
+            print("        或临时回退：BAA_WSGI=flask python app.py")
+            sys.exit(1)
+        waitress_serve(
+            app,
+            host=host,
+            port=port,
+            # SSE 长连接需要足够大的 send_buffer 和无 send_bytes 限制
+            send_bytes=1,            # 每次发送 1 字节边界，让 chunked 立即 flush
+            inbuf_overflow=1024 * 1024,
+            connection_limit=100,
+            channel_timeout=300,     # SSE 长连接超时
+        )
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT") or os.environ.get("AGENT_PORT", 5001))
+    host = os.environ.get("BAA_HOST", "0.0.0.0")
     print(f"\n  Business Analyst Agent → http://localhost:{port}\n")
-    app.run(host="0.0.0.0", port=port, debug=not is_vercel, use_reloader=False)
+    print(f"  [WSGI] {os.environ.get('BAA_WSGI', 'waitress')}  (BAA_WSGI=gunicorn 可切换)\n")
+    _serve(app, host, port)
