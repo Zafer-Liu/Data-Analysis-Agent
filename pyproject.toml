@@ -1,0 +1,57 @@
+# Lint / format configuration for Business Analyst Agent.
+#
+# This file does NOT make the project a pip-installable package —
+# it only carries config for ruff (and future tools like mypy / pytest).
+# The runtime entry point is still `python app.py`.
+#
+# Run locally:
+#     pip install ruff
+#     ruff check .
+#     ruff format --check .
+#
+# CI uses the same commands (see .github/workflows/test.yml).
+
+[tool.ruff]
+target-version = "py310"
+line-length = 110
+extend-exclude = [
+    "outputs/",
+    "uploads/",
+    ".claude/",
+    "MCP/playwright/node_modules/",
+    "charts/",                      # legacy duplicate directory, scheduled for removal
+    "static/vendor/",
+]
+
+[tool.ruff.lint]
+# Starter set — only the rules that catch *real bugs* in this codebase today.
+# Style nags (import order, type-hint modernisation, etc.) are left off until
+# we have a chance to do a sweep without disrupting active development.
+select = [
+    "E9",    # syntax errors only (E1/E2/E3 = whitespace; E5 = line length; E7 = style nags)
+    "F",     # pyflakes — undefined names, unused imports/vars, ambiguous syntax
+    "B",     # flake8-bugbear — real bug patterns
+]
+ignore = [
+    "F401",  # unused import — shim files re-export by design; opt-in per-file when needed
+    "F403",  # star import — chart modules use `from base import *` as a convention
+    "F405",  # name may be undefined from star import — same reason
+    "F811",  # redefined while unused — chart subclasses redefine base attrs intentionally
+    "F841",  # local variable assigned but never used — common debug pattern; revisit later
+    "B007",  # unused loop variable — for/in over .items() with discarded key
+    "B008",  # function call in default arg — Flask/dataclass patterns
+    "B017",  # `assertRaises(Exception)` — tests do this on purpose
+    "B023",  # function-uses-loop-variable — async helpers do this
+    "B904",  # raise X from Y — would need wide refactor; not a runtime bug
+    "B905",  # zip() without strict= — Python 3.10+ recommendation, 30 sites; future sweep
+    "B005",  # str.strip() with multi-char arg — single legitimate use at chart_selector
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests reach into private helpers (_clean_identifier etc.) on purpose; allow
+# late imports for sys.path manipulation.
+"Test/*.py" = ["E402"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"

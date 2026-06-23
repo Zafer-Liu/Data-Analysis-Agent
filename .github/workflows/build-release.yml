@@ -1,0 +1,197 @@
+name: Build desktop release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Package version without v prefix, for example 1.0.0"
+        required: false
+        default: "1.0.0"
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.lock.txt ]; then
+            python -m pip install -r requirements.lock.txt
+          else
+            python -m pip install -r requirements.txt
+          fi
+          python -m pip install -r requirements-build.txt
+      - name: Run cross-platform release tests
+        shell: bash
+        run: |
+          python -m unittest \
+            Test.test_packaging_security \
+            Test.test_runtime_paths \
+            Test.test_desktop_runtime \
+            Test.test_frozen_smoke \
+            Test.test_installer_security \
+            Test.test_macos_packaging \
+            Test.test_release_workflow \
+            -v
+
+  build-windows:
+    name: Build Windows installer
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Resolve package version
+        shell: pwsh
+        run: |
+          $version = "${{ github.event.inputs.version || '' }}"
+          if (-not $version) {
+            $version = "${{ github.ref_name }}" -replace '^v', ''
+          }
+          if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$') {
+            throw "Invalid package version: $version"
+          }
+          "PACKAGE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          if (Test-Path -LiteralPath requirements.lock.txt) {
+            python -m pip install -r requirements.lock.txt
+          } else {
+            python -m pip install -r requirements.txt
+          }
+          python -m pip install -r requirements-build.txt
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+      - name: Build audited Windows installer
+        shell: pwsh
+        run: pwsh -File packaging/build_windows.ps1 -Version $env:PACKAGE_VERSION
+      - name: Upload Windows package and reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-package
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            build/windows-package/installer/BusinessAnalyticsAgent-Windows-x64.exe
+            build/windows-package/reports/*.json
+
+  build-macos:
+    name: Build macOS DMG
+    needs: test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Resolve package version
+        shell: bash
+        run: |
+          version="${{ github.event.inputs.version || '' }}"
+          if [ -z "$version" ]; then
+            version="${GITHUB_REF_NAME#v}"
+          fi
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid package version: $version" >&2
+            exit 2
+          fi
+          echo "PACKAGE_VERSION=$version" >> "$GITHUB_ENV"
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.lock.txt ]; then
+            python -m pip install -r requirements.lock.txt
+          else
+            python -m pip install -r requirements.txt
+          fi
+          python -m pip install -r requirements-build.txt
+      - name: Build audited macOS DMG
+        shell: bash
+        run: bash packaging/build_macos.sh --version "$PACKAGE_VERSION"
+      - name: Upload macOS package and reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-package
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            build/macos-package/dmg/BusinessAnalyticsAgent-macOS-*.dmg
+            build/macos-package/reports/*.json
+
+  release:
+    name: Create GitHub Release
+    needs: [build-windows, build-macos]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+      - name: Verify release artifact boundary
+        shell: bash
+        run: |
+          find release-artifacts -type f | sort
+          forbidden="$(find release-artifacts -type f \( \
+            -path '*/staging/*' -o \
+            -path '*/pyinstaller-dist/*' -o \
+            -path '*/pyinstaller-work/*' -o \
+            -path '*/dmg-root/*' -o \
+            -path '*/MCP/*' -o \
+            -path '*/uploads/*' -o \
+            -path '*/outputs/*' -o \
+            -name '*.log' -o \
+            -name '*.p12' -o \
+            -name '*.pfx' -o \
+            -name '*.mobileprovision' \
+          \) -print)"
+          if [ -n "$forbidden" ]; then
+            echo "$forbidden" >&2
+            exit 2
+          fi
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          files="$(find release-artifacts -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.json' \) | sort)"
+          if [ -z "$files" ]; then
+            echo "No release files found." >&2
+            exit 2
+          fi
+          gh release create "$GITHUB_REF_NAME" $files \
+            --title "$GITHUB_REF_NAME" \
+            --notes "Unsigned Business Analytics Agent desktop test packages. Do not treat these artifacts as signed or notarized releases."

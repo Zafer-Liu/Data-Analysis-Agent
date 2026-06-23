@@ -1,0 +1,3 @@
+# Build-only dependencies. Runtime dependencies remain in requirements.txt.
+# Pin PyInstaller so Windows/macOS GitHub runners produce comparable layouts.
+pyinstaller==6.21.0

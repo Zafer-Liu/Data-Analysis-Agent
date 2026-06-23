@@ -1,0 +1,56 @@
+# ============================================================
+#  Business Analytics Agent — .gitignore
+# ============================================================
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# ---- Build / dist ----
+build/
+dist/
+*.spec
+!packaging/business_agent.spec
+*.egg-info/
+.eggs/
+
+# ---- Runtime / cache ----
+.deps_installed
+outputs/
+uploads/
+*.log
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- IDE / editor ----
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ---- OS ----
+desktop.ini
+
+# ---- Local secrets / config ----
+.env
+.env.local
+*.local
+LLM/llm_config.json
+LLM/mcp_config.json
+data/datasource_config.json
+
+# ---- Large assets that should not be tracked ----
+*.psd
+!Banner.psd

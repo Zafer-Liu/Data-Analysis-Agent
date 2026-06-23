@@ -1,0 +1,76 @@
+# CI — runs on every push & PR.
+# Two parallel jobs:
+#   1. lint    — ruff (fast, ~5s)
+#   2. test    — full unittest suite (no external services needed)
+#
+# Anything heavier (e.g. test_smoke_all.py which generates all 41 charts) is
+# intentionally NOT in CI — keep it local / nightly to keep PR loops fast.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install ruff
+        run: pip install ruff
+      - name: ruff check
+        run: ruff check .
+      # Note: `ruff format --check` is intentionally NOT enforced yet — the
+      # existing codebase has its own conventions and a one-shot reformat would
+      # produce a huge diff. Enable later via a dedicated cleanup PR.
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        # Use the lockfile when present so CI matches a known-good baseline.
+        run: |
+          if [ -f requirements.lock.txt ]; then
+            pip install -r requirements.lock.txt
+          else
+            pip install -r requirements.txt
+          fi
+      - name: Verify clean release staging boundary
+        run: |
+          python packaging/build_manifest.py \
+            --destination build/security-staging \
+            --manifest build/security-staging-manifest.json
+          python packaging/audit_artifact.py \
+            build/security-staging \
+            --report build/security-staging-audit.json
+      - name: Run unit tests
+        # Explicit module list keeps slow / external tests out of CI.
+        run: |
+          python -m unittest \
+            Test.test_validate \
+            Test.test_retry \
+            Test.test_chart_selector \
+            Test.test_sources \
+            Test.test_api_smoke \
+            Test.test_cleanup \
+            Test.test_installer_security \
+            Test.test_packaging_security \
+            Test.test_runtime_paths \
+            Test.test_desktop_runtime \
+            Test.test_desktop_lifecycle \
+            Test.test_frozen_smoke \
+            Test.test_macos_packaging \
+            Test.test_release_workflow \
+            -v
