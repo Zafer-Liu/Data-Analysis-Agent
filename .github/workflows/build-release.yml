@@ -153,7 +153,6 @@ jobs:
   release:
     name: Create GitHub Release
     needs: [build-windows, build-macos]
-    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -161,6 +160,24 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: release-artifacts
+      - name: Resolve release tag
+        shell: bash
+        run: |
+          # dispatch 输入 "1.0.0" → 拼 "v1.0.0";tag push 直接用 ref_name
+          version="${{ github.event.inputs.version || '' }}"
+          if [ -n "$version" ]; then
+            tag="v${version#v}"
+            draft_flag="--draft"
+          else
+            tag="${GITHUB_REF_NAME}"
+            draft_flag=""
+          fi
+          if [ -z "$tag" ] || [ "$tag" = "main" ]; then
+            echo "Cannot resolve release tag (tag='$tag')" >&2
+            exit 2
+          fi
+          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+          echo "DRAFT_FLAG=$draft_flag" >> "$GITHUB_ENV"
       - name: Verify release artifact boundary
         shell: bash
         run: |
@@ -192,6 +209,7 @@ jobs:
             echo "No release files found." >&2
             exit 2
           fi
-          gh release create "$GITHUB_REF_NAME" $files \
-            --title "$GITHUB_REF_NAME" \
+          gh release create "$RELEASE_TAG" $files $DRAFT_FLAG \
+            --title "$RELEASE_TAG" \
+            --target ${{ github.sha }} \
             --notes "Unsigned Business Analytics Agent desktop test packages. Do not treat these artifacts as signed or notarized releases."
