@@ -9,23 +9,6 @@
 
 ---
 
-## 📦 下载
-
-| 平台 | 文件 | 大小 | 说明 |
-|------|------|------|------|
-| Windows (x64) | [`BusinessAnalyticsAgent_v1.0.0_LTS.exe`](./BusinessAnalyticsAgent_v1.0.0_LTS.exe) | 12.2 MB | 图形化安装，可自行选择安装目录 |
-| macOS / Linux | *暂不提供安装包* | — | 请使用[压缩包或命令行方式](../README.md#install)安装 |
-
-**SHA256**
-
-```text
-5202D1BD33A811A716279F13096D9EC8DAB442B8A5CA514C62AF49F4D2976430
-```
-
-> **Windows 安全提示：** 若安装时出现“Windows 已保护你的电脑”或“未知发布者”，请选择“更多信息” → “仍要运行”。当前安装包尚未进行 Microsoft 代码签名。
-
----
-
 ## ✨ v1.0.0 LTS 更新内容
 
 ### 🚀 安装与启动
