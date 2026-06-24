@@ -103,7 +103,7 @@ python app.py
 <table>
 <tr>
 <td width="50%" align="center" valign="top">
-<a href="https://doloffer.com/"><img src="./Information/assets/DolOffer.png" alt="DolOffer logo" width="220" /></a>
+<a href="https://doloffer.com/"><img src="./Information/assets/DolOffer.png" alt="DolOffer logo" width="160" /></a>
 <br>
 <a href="https://doloffer.com/"><strong>DolOffer</strong></a>
 <br>
@@ -114,7 +114,7 @@ python app.py
 <a href="https://github.com/Doloffer-g/guide">了解更多 →</a>
 </td>
 <td width="50%" align="center" valign="top">
-<a href="https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=data-analysis-agent"><img src="./Information/assets/ATLAS%20CLOUD.png" alt="Atlas Cloud logo" width="220" /></a>
+<a href="https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=data-analysis-agent"><img src="./Information/assets/ATLAS%20CLOUD.png" alt="Atlas Cloud logo" width="160" /></a>
 <br>
 <a href="https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=data-analysis-agent"><strong>Atlas Cloud</strong></a>
 <br>
