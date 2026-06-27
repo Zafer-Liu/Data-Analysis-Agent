@@ -15,8 +15,10 @@ ENV/
 .python-version
 
 # ---- Build / dist ----
+node_modules/
 build/
 dist/
+frontend/dist/
 *.spec
 !packaging/business_agent.spec
 *.egg-info/
@@ -31,6 +33,13 @@ uploads/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+
+# ---- Local-only tests ----
+# Keep the tests already tracked by Git for GitHub Actions, but do not add
+# newly created local tests to the repository.
+Test/
+Test/local_*.py
+Test/test_workspace_storage_cleanup.py
 
 # ---- IDE / editor ----
 .idea/
@@ -66,3 +75,6 @@ MCP/Flowchart
 MCP/mindmap
 MCP/playwright
 MCP/flowchart_server.py
+LLM/llm_config.json
+LLM/llm_config.json
+RAILWAY_DEPLOY.md

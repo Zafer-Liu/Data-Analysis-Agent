@@ -43,13 +43,21 @@ def resource_root() -> Path:
 
 
 def uses_external_data_root() -> bool:
-    return bool(os.environ.get("BAA_DATA_DIR") or os.environ.get("VERCEL") or is_frozen())
+    return bool(
+        os.environ.get("BAA_DATA_DIR")
+        or os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
+        or os.environ.get("VERCEL")
+        or is_frozen()
+    )
 
 
 def data_root() -> Path:
     override = _absolute_override("BAA_DATA_DIR")
     if override is not None:
         return override
+    railway_volume = _absolute_override("RAILWAY_VOLUME_MOUNT_PATH")
+    if railway_volume is not None:
+        return railway_volume
     if os.environ.get("VERCEL"):
         return Path("/tmp")
     if not is_frozen():
