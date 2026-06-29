@@ -17,24 +17,12 @@
          alt="#6 Python Repository of the Day" 
          width="280" />
   </a>
-
-  <br/><br/>
-
-  <!-- 技术栈分组 -->
-  <picture>
-    <source media="(prefers-color-scheme: dark)">
-    <img src="https://go-skill-icons.vercel.app/api/icons?i=python,flask,plotly&theme=dark" />
-  </picture>
-  
-  <br/>
-
-  <!-- Shields 状态徽标 -->
-  <img src="https://img.shields.io/badge/Python-3.10%2B-blue?style=for-the-badge" />
-  <img src="https://img.shields.io/badge/Backend-Flask-black?style=for-the-badge" />
-  <img src="https://img.shields.io/badge/Visualization-Plotly-3F4F75?style=for-the-badge" />
-  <img src="https://img.shields.io/badge/LLM-OpenAI%20Compatible-green?style=for-the-badge" />
-  <img src="https://img.shields.io/badge/Charts-41_Types-orange?style=for-the-badge" />
-  <img src="https://img.shields.io/badge/License-Apache%202.0-yellow?style=for-the-badge" />
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)
+![Flask](https://img.shields.io/badge/Backend-Flask-black.svg)
+![Plotly](https://img.shields.io/badge/Visualization-Plotly-3F4F75.svg)
+![LLM](https://img.shields.io/badge/LLM-OpenAI%20Compatible-green.svg)
+![Charts](https://img.shields.io/badge/Charts-41_Types-orange.svg)
+![License](https://img.shields.io/badge/License-Apache%202.0-yellow.svg)
 
 </div>
 
