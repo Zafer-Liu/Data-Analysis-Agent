@@ -1,11 +1,9 @@
-# 智能商业分析 Agent
-
-<!-- 语言切换 -->
-<p align="right"><a href="./README_EN.md">English</a></p>
-
 <p align="center">
   <img src="./Information/assets/Banner.png" alt="智能商业分析 Agent Banner" width="100%" />
 </p>
+
+<!-- 语言切换 -->
+<p align="right"><a href="./README_EN.md">English</a></p>
 
 <div align="center">
 
