@@ -27,10 +27,10 @@
 > - 图表生成
 > - 业务洞察分析
 
-> 💬 **官方交流群：** QQ 群 `991636855` · [Telegram 群](https://t.me/+cdRNfS68u9BlYjJl)
+> 💬 **官方交流群：** QQ 群 `991636855` · [Telegram 群](https://t.me/+cdRNfS68u9BlYjJl) · [Discord](https://discord.gg/EEG4Sw7tde)
 
 <p align="center">
-  <a href="#quickstart">⚡ 快速体验</a> ·
+  <a href="#changelog">📝 更新日志</a> ·
   <a href="#features">✨ 项目亮点</a> ·
   <a href="#agent-manager">🧩 推荐管理</a> ·
   <a href="#install">⚙️ 安装说明</a> ·
@@ -44,7 +44,7 @@
 
 <br>
 
-- [⚡ 快速体验](#quickstart)
+- [📝 更新日志](#changelog)
 - [🙏 赞助商](#sponsors)
 - [✨ 项目亮点](#features)
 - [🧠 核心能力](#capabilities)
@@ -52,7 +52,6 @@
 - [🛠 斜杠命令](#commands)
 - [📈 使用示例](#examples)
 - [🤖 LLM 配置说明](#llm-config)
-- [🗺️ 项目里程碑](#roadmap)
 - [❓ FAQ](#faq)
 - [🤝 贡献指南](#contributing)
 - [📄 License](#license)
@@ -62,37 +61,23 @@
 
 ---
 
-<a id="quickstart"></a>
+<a id="changelog"></a>
 
-# ⚡ 30 秒快速体验
+# 📝 更新日志
 
-```bash
-# 1. 克隆仓库
-git clone https://github.com/Zafer-Liu/Data-Analysis-Agent.git
-cd Data-Analysis-Agent
+> **当前版本 [`v1.1.0 LTS`](https://github.com/Zafer-Liu/Data-Analysis-Agent/releases/latest)** · 2026 年 7 月 2 日 · [📦 下载安装包](https://github.com/Zafer-Liu/Data-Analysis-Agent/releases/latest)
 
-# 2. 安装依赖
-pip install -r requirements.txt
+本次升级新增 **斜杠命令系统、文件时光回退、Hooks 自动化、AI 预填建议** 等多项功能，同时全面提升聊天界面与 Dashboard 的交互体验。
+1. 全新斜杠命令系统
+2. Hooks 用户自动化
+3. AI 预填下一步建议
+4. 工作目录时光回退
+5. 工作目录管理增强
 
-# 3. 启动
-python app.py
+## 📖 详细更新日志
 
-# 4. 浏览器打开 http://localhost:5001
-# 5. 在侧边栏配置 API Key，上传数据，开始提问！
-```
-
-> 💡 Windows 用户也可以直接从 [GitHub Releases](https://github.com/Zafer-Liu/Data-Analysis-Agent/releases/latest) 下载 exe 安装包。
-
-```text
-试试问：最近三个月销售额趋势如何？
-```
-
-<details>
-<summary>📖 完整安装方式（4种）</summary>
-
-详见下方 [安装说明](#install) 章节，支持 exe、压缩包、在线安装、Git Clone 四种方式。
-
-</details>
+- [Version Update Log（中文）](./Information/Version_Update_Log.md)
+- [Version Update Log (English)](./Information/Version_Update_Log_EN.md)
 
 ---
 
@@ -519,30 +504,6 @@ Model
 
 ---
 
-<a id="roadmap"></a>
-
-# 🗺️ 项目里程碑
-
-> **当前版本 `v1.1.0 LTS`** · 2026 年 7 月 2 日
-
-本次升级新增 **斜杠命令系统、文件时光回退、Hooks 自动化、AI 预填建议** 等多项功能，同时全面提升聊天界面与 Dashboard 的交互体验。
-1. 全新斜杠命令系统
-2. Hooks 用户自动化
-3. AI 预填下一步建议
-4. 工作目录时光回退
-5. 工作目录管理增强
-
-
-
----
-
-## 📖 详细更新日志
-
-- [Version Update Log（中文）](./Information/Version_Update_Log.md)
-- [Version Update Log (English)](./Information/Version_Update_Log_EN.md)
-
----
-
 <a id="faq"></a>
 
 # ❓ FAQ
@@ -786,7 +747,7 @@ outputs/charts
 
 - 直接 **Pull Request**，我们会在 24 小时内 review
 - 或联系邮箱：`rusboldtshanti34@gmail.com`（请备注"Contributor + 擅长方向"）
-- 加入官方交流群：QQ 群 `991636855` 或 [Telegram 群](https://t.me/+cdRNfS68u9BlYjJl)
+- 加入官方交流群：QQ 群 `991636855` 或 [Telegram 群](https://t.me/+cdRNfS68u9BlYjJl) 或 [Discord](https://discord.gg/EEG4Sw7tde)
 
 ---
 

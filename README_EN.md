@@ -27,10 +27,10 @@
 > - Chart generation
 > - Business insight analysis
 
-> 💬 **Official Community:** QQ Group `991636855` · [Telegram Group](https://t.me/+cdRNfS68u9BlYjJl)
+> 💬 **Official Community:** QQ Group `991636855` · [Telegram Group](https://t.me/+cdRNfS68u9BlYjJl) · [Discord](https://discord.gg/EEG4Sw7tde)
 
 <p align="center">
-  <a href="#quickstart">⚡ Quick Start</a> ·
+  <a href="#changelog">📝 Changelog</a> ·
   <a href="#features">✨ Highlights</a> ·
   <a href="#agent-manager">🧩 Agent Manager</a> ·
   <a href="#install">⚙️ Installation</a> ·
@@ -44,7 +44,7 @@
 
 <br>
 
-- [⚡ Quick Start](#quickstart)
+- [📝 Changelog](#changelog)
 - [🙏 Sponsors](#sponsors)
 - [✨ Project Highlights](#features)
 - [🧠 Core Capabilities](#capabilities)
@@ -52,7 +52,6 @@
 - [🛠 Slash Commands](#commands)
 - [📈 Usage Examples](#examples)
 - [🤖 LLM Configuration](#llm-config)
-- [🗺️ Project Milestones](#roadmap)
 - [❓ FAQ](#faq)
 - [🤝 Contribution Guide](#contributing)
 - [📄 License](#license)
@@ -62,37 +61,24 @@
 
 ---
 
-<a id="quickstart"></a>
+<a id="changelog"></a>
 
-# ⚡ 30-Second Quick Start
+# 📝 Changelog
 
-```bash
-# 1. Clone the repository
-git clone https://github.com/Zafer-Liu/Data-Analysis-Agent.git
-cd Data-Analysis-Agent
+> **Current version [`v1.1.0 LTS`](https://github.com/Zafer-Liu/Data-Analysis-Agent/releases/latest)** · July 2, 2026 · [📦 Download Installer](https://github.com/Zafer-Liu/Data-Analysis-Agent/releases/latest)
 
-# 2. Install dependencies
-pip install -r requirements.txt
+This release introduces the **Slash Command System, File Timeline Rewind, Hooks Automation, and AI Prompt Suggestions**, while significantly improving the chat interface and Dashboard experience. It is the next Long-Term Support (LTS) version following v1.0 LTS.
 
-# 3. Start the application
-python app.py
+1. All-New Slash Command System
+2. Hooks — User Automation
+3. AI Prompt Suggestion
+4. Workspace File Timeline Rewind
+5. Enhanced Workspace Management
 
-# 4. Open http://localhost:5001 in your browser
-# 5. Configure your API key in the sidebar, upload data, and start asking questions!
-```
+## 📖 Detailed Changelog
 
-> 💡 Windows users can also download the latest installer from [GitHub Releases](https://github.com/Zafer-Liu/Data-Analysis-Agent/releases/latest).
-
-```text
-Try asking: What is the sales trend for the last three months?
-```
-
-<details>
-<summary>📖 All installation methods (4)</summary>
-
-See [Installation](#install) below for the Windows installer, ZIP package, one-click install, and Git clone methods.
-
-</details>
+- [Version Update Log (中文)](./Information/Version_Update_Log.md)
+- [Version Update Log (English)](./Information/Version_Update_Log_EN.md)
 
 ---
 
@@ -498,28 +484,6 @@ to switch between models.
 
 ---
 
-<a id="roadmap"></a>
-
-# 🗺️ Project Milestones
-
-> **Current version `v1.1.0 LTS`** · July 2, 2026
-
-This release introduces the **Slash Command System, File Timeline Rewind, Hooks Automation, and AI Prompt Suggestions**, while significantly improving the chat interface and Dashboard experience. It is the next Long-Term Support (LTS) version following v1.0 LTS.
-
-1. All-New Slash Command System
-2. Hooks — User Automation
-3. AI Prompt Suggestion
-4. Workspace File Timeline Rewind
-5. Enhanced Workspace Management
----
-
-## 📖 Detailed Changelog
-
-- [Version Update Log (中文)](./Information/Version_Update_Log.md)
-- [Version Update Log (English)](./Information/Version_Update_Log_EN.md)
-
----
-
 <a id="faq"></a>
 
 # ❓ FAQ
@@ -760,7 +724,7 @@ We've hit a few deeply challenging, high-value problems. If you love solving har
 
 - Open a **Pull Request** directly — we review within 24 hours
 - Or contact us at: `rusboldtshanti34@gmail.com` (please note "Contributor + area of expertise")
-- Join the official community: QQ Group `991636855` or [Telegram Group](https://t.me/+cdRNfS68u9BlYjJl)
+- Join the official community: QQ Group `991636855` or [Telegram Group](https://t.me/+cdRNfS68u9BlYjJl) or [Discord](https://discord.gg/EEG4Sw7tde)
 
 ---
 
