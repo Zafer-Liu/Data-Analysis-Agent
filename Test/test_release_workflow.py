@@ -28,10 +28,14 @@ class ReleaseWorkflowTests(unittest.TestCase):
     def test_build_jobs_generate_frontend_bundle_before_packaging(self):
         text = WORKFLOW.read_text(encoding="utf-8")
         self.assertGreaterEqual(text.count("actions/setup-node@v4"), 2)
-        self.assertGreaterEqual(text.count("npm ci"), 2)
-        self.assertGreaterEqual(text.count("npm run build"), 2)
-        self.assertLess(text.index("npm run build"), text.index("packaging/build_windows.ps1"))
-        self.assertLess(text.rindex("npm run build"), text.index("packaging/build_macos.sh"))
+        self.assertGreaterEqual(text.count("cache: pnpm"), 2)
+        self.assertGreaterEqual(text.count("corepack enable"), 2)
+        self.assertGreaterEqual(text.count("pnpm install --frozen-lockfile"), 2)
+        self.assertGreaterEqual(text.count("pnpm run build"), 2)
+        self.assertNotIn("cache: npm", text)
+        self.assertNotIn("npm ci", text)
+        self.assertLess(text.index("pnpm run build"), text.index("packaging/build_windows.ps1"))
+        self.assertLess(text.rindex("pnpm run build"), text.index("packaging/build_macos.sh"))
 
     def test_windows_build_uses_existing_audited_script_and_inno(self):
         text = WORKFLOW.read_text(encoding="utf-8")

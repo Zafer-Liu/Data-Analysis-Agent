@@ -67,12 +67,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: npm
+          cache: pnpm
       - name: Build frontend bundle
         shell: bash
         run: |
-          npm ci
-          npm run build
+          corepack enable
+          pnpm install --frozen-lockfile
+          pnpm run build
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -123,12 +124,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: npm
+          cache: pnpm
       - name: Build frontend bundle
         shell: bash
         run: |
-          npm ci
-          npm run build
+          corepack enable
+          pnpm install --frozen-lockfile
+          pnpm run build
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
