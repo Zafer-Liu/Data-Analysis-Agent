@@ -74,16 +74,29 @@ def normalized_relative(value: str) -> str:
     return path.as_posix().lower()
 
 
+def _is_public_frontend_dist(parts: tuple[str, ...]) -> bool:
+    """Return True for the reviewed Vite runtime bundle under static/dist."""
+    return any(
+        parts[index] == "static" and parts[index + 1] == "dist"
+        for index in range(max(0, len(parts) - 1))
+    )
+
+
 def classify_path(value: str) -> tuple[str, str]:
     """Return (allow|exclude|deny, reason) for a relative package path."""
     relative = normalized_relative(value)
     path = PurePosixPath(relative)
     parts = tuple(part.lower() for part in path.parts)
+    public_frontend_dist = _is_public_frontend_dist(parts)
     if relative in KNOWN_LOCAL_ONLY:
         return "exclude", "local configuration"
     if any(part in IGNORED_CACHE_PARTS for part in parts):
         return "exclude", "generated cache"
-    if any(part in FORBIDDEN_PARTS for part in parts):
+    if any(
+        part in FORBIDDEN_PARTS
+        and not (part == "dist" and public_frontend_dist)
+        for part in parts
+    ):
         return "deny", "forbidden directory"
     name = path.name.lower()
     if name in FORBIDDEN_NAMES or name.startswith(".env.") or name.endswith(".local"):

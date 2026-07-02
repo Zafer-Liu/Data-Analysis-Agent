@@ -46,6 +46,17 @@ def run_frozen_smoke() -> int:
             "ok": path.is_dir(),
             "path": str(path),
         }
+    chat_bundle = resource_path("static", "dist", "chat-app.js")
+    dist_chunks = resource_path("static", "dist", "chunks")
+    checks["resource:static/dist/chat-app.js"] = {
+        "ok": chat_bundle.is_file() and chat_bundle.stat().st_size > 200_000,
+        "path": str(chat_bundle),
+        "size": chat_bundle.stat().st_size if chat_bundle.exists() else 0,
+    }
+    checks["resource:static/dist/chunks"] = {
+        "ok": dist_chunks.is_dir() and any(dist_chunks.glob("*.js")),
+        "path": str(dist_chunks),
+    }
 
     try:
         from Function.Analyze.registry import get_all

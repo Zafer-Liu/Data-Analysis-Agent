@@ -35,6 +35,13 @@ class PackagingSecurityTests(unittest.TestCase):
         (source / "packaging" / "desktop_launcher.py").write_text(
             "VALUE = 'desktop'\n", encoding="utf-8"
         )
+        (source / "static" / "dist" / "chunks").mkdir(parents=True)
+        (source / "static" / "dist" / "chat-app.js").write_text(
+            "console.log('chat bundle');\n", encoding="utf-8"
+        )
+        (source / "static" / "dist" / "chunks" / "workspace-ui-test.js").write_text(
+            "export default {};\n", encoding="utf-8"
+        )
         return source
 
     def test_staging_is_allowlisted_and_ignores_top_level_runtime_trees(self):
@@ -62,6 +69,8 @@ class PackagingSecurityTests(unittest.TestCase):
             self.assertIn("commands/clear.md", paths)
             self.assertIn("skills/SKILL.md", paths)
             self.assertIn("packaging/desktop_launcher.py", paths)
+            self.assertIn("static/dist/chat-app.js", paths)
+            self.assertIn("static/dist/chunks/workspace-ui-test.js", paths)
             self.assertFalse(any(path.lower().startswith("mcp/") for path in paths))
             self.assertFalse(any(path.startswith(("uploads/", "outputs/")) for path in paths))
             self.assertNotIn("LLM/llm_config.json", paths)
@@ -107,6 +116,18 @@ class PackagingSecurityTests(unittest.TestCase):
 
             self.assertFalse(report["ok"])
             self.assertTrue(any("invalid relative packaging path" in item for item in report["findings"]))
+
+    def test_public_vite_dist_is_packaged_but_still_blocks_sensitive_files(self):
+        for path in (
+            "static/dist/chat-app.js",
+            "static/dist/chunks/workspace-ui.js",
+            "_internal/static/dist/chat-app.js",
+            "Business Analytics Agent.app/Contents/Resources/static/dist/chat-app.js",
+        ):
+            self.assertEqual(classify_path(path)[0], "allow", path)
+        self.assertEqual(classify_path("static/dist/private.pem")[0], "deny")
+        self.assertEqual(classify_path("static/dist/node_modules/pkg/index.js")[0], "deny")
+        self.assertEqual(classify_path("dist/chat-app.js")[0], "deny")
 
     def test_only_reviewed_public_dependency_assets_bypass_document_suffix_block(self):
         self.assertEqual(
