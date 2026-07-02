@@ -17,6 +17,8 @@ log = logging.getLogger(__name__)
 
 LLM_CONFIG_FILE = runtime_config_path("llm_config.json", "LLM/llm_config.json")
 CONFIG_DIR = LLM_CONFIG_FILE.parent
+DEFAULT_CONTEXT_WINDOW = 1_000_000
+DEFAULT_MAX_OUTPUT_TOKENS = 384_000
 
 @dataclass
 class LLMConfig:
@@ -32,6 +34,10 @@ class LLMConfig:
     max_output_tokens: Optional[int] = None  # 最大输出（tokens）
     enable_thinking: bool = False            # 启用推理链（DeepSeek-R1 / Claude 3.7+）
     thinking_budget: int = 8000              # Claude extended thinking budget_tokens
+    supports_prompt_cache: Optional[bool] = None
+    prompt_cache_mode: Optional[str] = None
+    prompt_cache_retention: str = "in_memory"
+    cache_breakpoint_strategy: str = "stable_prefix"
 
 
 class LLMConfigManager:
@@ -43,24 +49,33 @@ class LLMConfigManager:
             "model": "deepseek-chat",
             "env_var": "DEEPSEEK_API_KEY",
             "is_custom": False,
-            "context_window": 64000,
-            "max_output_tokens": 8192,
+            "context_window": DEFAULT_CONTEXT_WINDOW,
+            "max_output_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
+            "supports_prompt_cache": True,
+            "prompt_cache_mode": "deepseek",
+            "prompt_cache_retention": "in_memory",
         },
         "openai": {
             "base_url": "https://api.openai.com/v1",
             "model": "gpt-4o-mini",
             "env_var": "OPENAI_API_KEY",
             "is_custom": False,
-            "context_window": 128000,
-            "max_output_tokens": 16384,
+            "context_window": DEFAULT_CONTEXT_WINDOW,
+            "max_output_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
+            "supports_prompt_cache": True,
+            "prompt_cache_mode": "openai",
+            "prompt_cache_retention": "in_memory",
         },
         "atlascloud": {
             "base_url": "https://api.atlascloud.ai/v1",
             "model": "moonshotai/kimi-k2.6",
             "env_var": "ATLASCLOUD_API_KEY",
             "is_custom": False,
-            "context_window": 128000,
-            "max_output_tokens": 16384,
+            "context_window": DEFAULT_CONTEXT_WINDOW,
+            "max_output_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
+            "supports_prompt_cache": False,
+            "prompt_cache_mode": "none",
+            "prompt_cache_retention": "in_memory",
         },
     }
 
@@ -101,7 +116,15 @@ class LLMConfigManager:
                     base_url=defaults.get("base_url"),
                     model=defaults.get("model"),
                     enabled=True,
-                    is_custom=False
+                    is_custom=False,
+                    supports_prompt_cache=defaults.get("supports_prompt_cache"),
+                    prompt_cache_mode=defaults.get("prompt_cache_mode"),
+                    prompt_cache_retention=defaults.get(
+                        "prompt_cache_retention", "in_memory"
+                    ),
+                    cache_breakpoint_strategy=defaults.get(
+                        "cache_breakpoint_strategy", "stable_prefix"
+                    ),
                 )
 
     def save_configs(self):
@@ -184,6 +207,14 @@ class LLMConfigManager:
             max_output_tokens=max_output_tokens if max_output_tokens is not None else defaults.get("max_output_tokens"),
             enable_thinking=enable_thinking,
             thinking_budget=thinking_budget,
+            supports_prompt_cache=defaults.get("supports_prompt_cache"),
+            prompt_cache_mode=defaults.get("prompt_cache_mode"),
+            prompt_cache_retention=defaults.get(
+                "prompt_cache_retention", "in_memory"
+            ),
+            cache_breakpoint_strategy=defaults.get(
+                "cache_breakpoint_strategy", "stable_prefix"
+            ),
         )
 
         # 关键修复：不再写 os.environ，避免进程内“复活”
@@ -303,6 +334,10 @@ class LLMConfigManager:
                 "context_window": config.context_window,
                 "max_output_tokens": config.max_output_tokens,
                 "enable_thinking": config.enable_thinking,
+                "supports_prompt_cache": config.supports_prompt_cache,
+                "prompt_cache_mode": config.prompt_cache_mode,
+                "prompt_cache_retention": config.prompt_cache_retention,
+                "cache_breakpoint_strategy": config.cache_breakpoint_strategy,
             }
         return result
 

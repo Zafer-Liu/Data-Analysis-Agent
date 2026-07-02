@@ -57,30 +57,15 @@ def _sql_guard(sql: str, workspace_authorization=None) -> str | None:
     )
 
 
-def _render_kpi_widget(data_source, spec: dict, workspace_authorization=None) -> dict:
-    """Execute SQL for a KPI_Card widget and return scalar value fields.
-
-    Returns a dict with keys: kpi_value, kpi_sub, kpi_trend, error.
-    The SQL should return a single row with one or more columns:
-      - First column → displayed as the main KPI value
-      - Second column (optional) → sub-label / description
-      - Third column (optional) → trend percentage (number)
-    """
-    sql = spec.get("sql", "")
-    if not sql or not data_source:
-        return {"kpi_value": "—", "kpi_sub": "", "kpi_trend": None, "error": "No SQL" if not sql else "No data source"}
-    guard_error = _sql_guard(sql, workspace_authorization)
-    if guard_error:
-        return {"kpi_value": "—", "kpi_sub": "", "kpi_trend": None, "error": guard_error}
+def _render_kpi_from_df(df, error: str | None = None) -> dict:
+    """Return KPI_Card value fields from an already-fetched DataFrame."""
+    if error:
+        return {"kpi_value": "—", "kpi_sub": "", "kpi_trend": None, "error": error}
     try:
-        df, err = data_source.execute_query(sql)
-        if err:
-            return {"kpi_value": "—", "kpi_sub": "", "kpi_trend": None, "error": f"SQL error: {err}"}
-        if df.empty or len(df.columns) == 0:
+        if df is None or df.empty or len(df.columns) == 0:
             return {"kpi_value": "—", "kpi_sub": "", "kpi_trend": None, "error": "No rows returned"}
         row = df.iloc[0]
         kpi_value = row.iloc[0]
-        # Format numbers nicely
         try:
             fv = float(kpi_value)
             if abs(fv) >= 1e8:
@@ -106,24 +91,22 @@ def _render_kpi_widget(data_source, spec: dict, workspace_authorization=None) ->
         return {"kpi_value": "—", "kpi_sub": "", "kpi_trend": None, "error": str(exc)}
 
 
-def _render_widget(
-    data_source, chart_store, color_scheme: str, spec: dict,
-    workspace_authorization=None,
-) -> tuple[str | None, str | None]:
-    """Execute SQL and generate chart HTML. Returns (chart_id, error)."""
-    sql = spec.get("sql", "")
-    if not sql or not data_source:
-        return None, ("No SQL defined" if not sql else "No data source")
-    guard_error = _sql_guard(sql, workspace_authorization)
-    if guard_error:
-        return None, guard_error
+def _render_kpi_widget(data_source, spec: dict, workspace_authorization=None) -> dict:
+    """Execute SQL for a KPI_Card widget and return scalar value fields."""
+    prefetched = prefetch_dashboard_widget_data(data_source, [spec], workspace_authorization)
+    item = prefetched[0] if prefetched else {"df": None, "error": "No SQL"}
+    return _render_kpi_from_df(item.get("df"), item.get("error"))
 
+
+def _render_widget_from_df(
+    chart_store, color_scheme: str, spec: dict, df, error: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Generate chart HTML from an already-fetched DataFrame."""
+    if error:
+        return None, error
     try:
         from chart_generate import generate_chart as _gen
-        df, err = data_source.execute_query(sql)
-        if err:
-            return None, f"SQL error: {err}"
-        if df.empty:
+        if df is None or df.empty:
             return None, "Query returned no rows"
 
         opts = {}
@@ -150,6 +133,45 @@ def _render_widget(
         return None, str(exc)
 
 
+def _render_widget(
+    data_source, chart_store, color_scheme: str, spec: dict,
+    workspace_authorization=None,
+) -> tuple[str | None, str | None]:
+    """Execute SQL and generate chart HTML. Returns (chart_id, error)."""
+    prefetched = prefetch_dashboard_widget_data(data_source, [spec], workspace_authorization)
+    item = prefetched[0] if prefetched else {"df": None, "error": "No SQL defined"}
+    return _render_widget_from_df(
+        chart_store, color_scheme, spec, item.get("df"), item.get("error"),
+    )
+
+
+def prefetch_dashboard_widget_data(
+    data_source, widgets_spec: list, workspace_authorization=None,
+) -> list[dict]:
+    """Fetch widget SQL results on the caller thread before any worker rendering."""
+    prefetched = []
+    for spec in widgets_spec:
+        sql = spec.get("sql", "")
+        error = ""
+        df = None
+        if not sql or not data_source:
+            error = "No SQL defined" if not sql else "No data source"
+        else:
+            guard_error = _sql_guard(sql, workspace_authorization)
+            if guard_error:
+                error = guard_error
+            else:
+                try:
+                    df, err = data_source.execute_query(sql)
+                    if err:
+                        error = f"SQL error: {err}"
+                except Exception as exc:
+                    log.warning("[dashboard] widget SQL error: %s", exc)
+                    error = str(exc)
+        prefetched.append({"spec": spec, "df": df, "error": error or None})
+    return prefetched
+
+
 # ── Page route ────────────────────────────────────────────────────────────────
 
 @bp.get("/dashboard/<dashboard_id>")
@@ -165,12 +187,33 @@ def build_dashboard(
     workspace_authorization=None,
 ) -> dict:
     """Build a dashboard from an already-leased data-source snapshot."""
+    prefetched = prefetch_dashboard_widget_data(
+        data_source, widgets_spec, workspace_authorization,
+    )
+    return build_dashboard_from_prefetched_widgets(
+        chart_store,
+        session_id=session_id,
+        workspace_id=workspace_id,
+        name=name,
+        widget_inputs=prefetched,
+        color_scheme=color_scheme,
+    )
+
+
+def build_dashboard_from_prefetched_widgets(
+    chart_store, *, session_id: str, workspace_id: str, name: str,
+    widget_inputs: list, color_scheme: str,
+) -> dict:
+    """Build dashboard JSON from caller-thread SQL results."""
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_name = re.sub(r'[^\w\-]', '_', name)
     dashboard_id = f"{safe_name}_{ts}"
 
     built_widgets = []
-    for spec in widgets_spec:
+    for item in widget_inputs:
+        spec = item.get("spec", {})
+        df = item.get("df")
+        error = item.get("error")
         widget_id = spec.get("id") or str(uuid.uuid4())[:8]
         chart_type = spec.get("chart_type", "Bar_Chart")
         base = {
@@ -183,10 +226,10 @@ def build_dashboard(
             "grid": spec.get("grid", {"x": 0, "y": 0, "w": 6, "h": 4}),
         }
         if chart_type == "KPI_Card":
-            base.update(_render_kpi_widget(data_source, spec, workspace_authorization))
+            base.update(_render_kpi_from_df(df, error))
         else:
-            chart_id, error = _render_widget(
-                data_source, chart_store, color_scheme, spec, workspace_authorization,
+            chart_id, error = _render_widget_from_df(
+                chart_store, color_scheme, spec, df, error,
             )
             base["chart_id"] = chart_id
             base["error"] = error

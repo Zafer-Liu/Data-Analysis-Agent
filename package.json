@@ -1,0 +1,25 @@
+{
+  "name": "data-analysis-agent-frontend",
+  "private": true,
+  "version": "1.1.0",
+  "type": "module",
+  "packageManager": "pnpm@11.7.0",
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "scripts": {
+    "build": "vite build && vite build --config vite.chat-app.config.js",
+    "build:check": "vite build --emptyOutDir && vite build --config vite.chat-app.config.js",
+    "format": "prettier --write \"frontend/core/**/*.js\" \"frontend/entries/**/*.js\" \"vite*.config.js\" \"eslint.config.js\" \"package.json\"",
+    "format:check": "prettier --check \"frontend/core/**/*.js\" \"frontend/entries/**/*.js\" \"vite*.config.js\" \"eslint.config.js\" \"package.json\"",
+    "lint": "eslint \"frontend/**/*.js\" \"vite*.config.js\"",
+    "quality": "pnpm format:check && pnpm lint && pnpm build:check && python -m unittest Test.test_api_smoke Test.test_job_ui"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.4",
+    "eslint": "^9.39.4",
+    "globals": "^16.5.0",
+    "prettier": "^3.9.3",
+    "vite": "^7.0.0"
+  }
+}

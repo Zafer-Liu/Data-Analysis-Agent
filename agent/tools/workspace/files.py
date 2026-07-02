@@ -23,6 +23,7 @@ from data.system_workspace import MAX_INDEXED_FILES, MAX_LIST_CHARS, MAX_LIST_LI
 
 MAX_FILE_BYTES = 20 * 1024 * 1024
 MAX_READ_BYTES = MAX_FILE_BYTES
+MAX_SPREADSHEET_READ_BYTES = 256 * 1024 * 1024
 MAX_READ_LINES = 400
 MAX_READ_CHARS = 12_000
 MAX_WRITE_BYTES = MAX_FILE_BYTES
@@ -36,6 +37,7 @@ TEXT_SUFFIXES = {
     ".sql", ".py", ".js", ".css", ".html", ".xml", ".toml", ".ini",
 }
 SKIP_DIRS = {".git", ".zhixi", ".baa_cache", "node_modules", "__pycache__", ".venv"}
+SPREADSHEET_SUFFIXES = {".xlsx", ".xls", ".xlsm", ".xlsb", ".ods"}
 
 
 class WorkspaceToolError(ValueError):
@@ -76,6 +78,97 @@ def _read_docx_text(path: Path) -> str:
         if text:
             lines.extend(text.splitlines())
     return "\n".join(lines)
+
+
+def _read_spreadsheet_preview(
+    path: Path,
+    *,
+    offset: int,
+    limit: int,
+    sheet_name: str = "",
+) -> dict:
+    """Read a bounded worksheet window without treating Excel as UTF-8 text."""
+    try:
+        import pandas as pd
+    except ImportError as exc:
+        raise WorkspaceToolError("spreadsheet preview requires pandas") from exc
+
+    workbook = None
+    errors: list[str] = []
+    for engine in ("calamine", "openpyxl", None):
+        try:
+            kwargs = {"engine": engine} if engine else {}
+            workbook = pd.ExcelFile(path, **kwargs)
+            break
+        except Exception as exc:
+            errors.append(f"{engine or 'default'}: {exc}")
+    if workbook is None:
+        raise WorkspaceToolError(
+            "spreadsheet cannot be opened: " + "; ".join(errors[-2:])
+        )
+
+    sheets = [str(name) for name in workbook.sheet_names]
+    if not sheets:
+        raise WorkspaceToolError("spreadsheet contains no worksheets")
+    selected_sheet = str(sheet_name or "").strip() or sheets[0]
+    if selected_sheet not in sheets:
+        raise WorkspaceToolError(
+            f"worksheet not found: {selected_sheet}; available: {', '.join(sheets[:20])}"
+        )
+
+    try:
+        frame = workbook.parse(
+            sheet_name=selected_sheet,
+            header=None,
+            skiprows=offset,
+            nrows=limit,
+        )
+    except Exception as exc:
+        raise WorkspaceToolError(
+            f"worksheet cannot be read: {selected_sheet}: {exc}"
+        ) from exc
+    finally:
+        try:
+            workbook.close()
+        except Exception:
+            pass
+
+    rendered_lines: list[str] = []
+    rendered_chars = 0
+    char_truncated = False
+    for row_number, row in enumerate(frame.itertuples(index=False, name=None), offset + 1):
+        cells: list[str] = []
+        for value in row:
+            try:
+                empty = bool(pd.isna(value))
+            except (TypeError, ValueError):
+                empty = False
+            text = "" if value is None or empty else str(value)
+            cells.append(text.replace("\r", " ").replace("\n", " ")[:500])
+        rendered = f"{row_number}: " + "\t".join(cells).rstrip()
+        if rendered_lines and rendered_chars + len(rendered) + 1 > MAX_READ_CHARS:
+            char_truncated = True
+            break
+        rendered_lines.append(rendered[:MAX_READ_CHARS])
+        rendered_chars += len(rendered_lines[-1]) + 1
+
+    consumed = len(rendered_lines)
+    may_have_more = len(frame.index) >= limit
+    return {
+        "content_type": (
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            if path.suffix.lower() != ".xls"
+            else "application/vnd.ms-excel"
+        ),
+        "sheet_name": selected_sheet,
+        "sheets": sheets[:50],
+        "offset": offset,
+        "total_lines": None,
+        "content": "\n".join(rendered_lines),
+        "next_offset": offset + consumed if may_have_more and consumed else None,
+        "truncated": char_truncated or may_have_more,
+        "character_limit_reached": char_truncated,
+    }
 
 
 class WorkspaceFileState:
@@ -332,14 +425,36 @@ class WorkspaceToolService:
             "truncated": len(results) >= max_results or searched_files > MAX_SEARCH_FILES,
         }
 
-    def read_file(self, file_path: str, offset: int = 0, limit: int = 200) -> dict:
+    def read_file(
+        self,
+        file_path: str,
+        offset: int = 0,
+        limit: int = 200,
+        sheet_name: str = "",
+    ) -> dict:
         path = self._path(file_path)
         if not path.is_file():
             raise WorkspaceToolError("file not found")
         size = path.stat().st_size
-        if size > MAX_READ_BYTES:
-            raise WorkspaceToolError(f"file exceeds {MAX_READ_BYTES} byte read limit")
-        if path.suffix.lower() == ".docx":
+        suffix = path.suffix.lower()
+        size_limit = (
+            MAX_SPREADSHEET_READ_BYTES
+            if suffix in SPREADSHEET_SUFFIXES else MAX_READ_BYTES
+        )
+        if size > size_limit:
+            raise WorkspaceToolError(f"file exceeds {size_limit} byte read limit")
+        offset = max(0, int(offset))
+        limit = max(1, min(int(limit), MAX_READ_LINES))
+        if suffix in SPREADSHEET_SUFFIXES:
+            result = _read_spreadsheet_preview(
+                path,
+                offset=offset,
+                limit=limit,
+                sheet_name=sheet_name,
+            )
+            self._file_state().record(path)
+            return {"path": self._display_path(path), **result}
+        if suffix == ".docx":
             text = _read_docx_text(path)
             content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         else:
@@ -350,8 +465,6 @@ class WorkspaceToolService:
                 raise WorkspaceToolError("file is not UTF-8 text or a supported DOCX document") from exc
             content_type = "text/plain; charset=utf-8"
         lines = text.splitlines()
-        offset = max(0, int(offset))
-        limit = max(1, min(int(limit), MAX_READ_LINES))
         self._file_state().record(path)
         selected = []
         chars = 0

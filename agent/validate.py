@@ -503,6 +503,18 @@ def validate_tool_args(
         if not args.get("target_column"):
             return "'run_analysis' requires 'target_column'."
 
+    if name == "ask_user":
+        question = args.get("question")
+        if not isinstance(question, str) or not question.strip():
+            return "'ask_user' requires a non-empty string 'question'."
+        options = args.get("options")
+        if not isinstance(options, list):
+            return "'ask_user': 'options' must be a list."
+        if not 2 <= len(options) <= 6:
+            return "'ask_user': 'options' must contain 2-6 items."
+        if any(not isinstance(option, str) or not option.strip() for option in options):
+            return "'ask_user': every option must be a non-empty string."
+
     if name in ("propose_ppt_outline", "generate_ppt"):
         slides = args.get("slides")
         if slides is not None and not isinstance(slides, list):
@@ -513,4 +525,55 @@ def validate_tool_args(
         if widgets is not None and not isinstance(widgets, list):
             return f"'{name}': 'widgets' must be a list."
 
+    if name == "propose_report_outline":
+        if not str(args.get("title") or "").strip():
+            return "'propose_report_outline' requires a non-empty 'title'."
+        sections = args.get("sections")
+        if not isinstance(sections, list) or not sections:
+            return (
+                "'propose_report_outline' requires a non-empty 'sections' list."
+            )
+        if any(not isinstance(section, dict) for section in sections):
+            return (
+                "'propose_report_outline': every section must be an object."
+            )
+
     return None
+
+
+def normalize_ask_user_args(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize common provider variants to the ask_user string contract.
+
+    Some OpenAI-compatible providers occasionally emit option objects even
+    though the JSON schema declares an array of strings. Accept familiar
+    display fields at this boundary, then let ``validate_tool_args`` reject
+    anything still malformed.
+    """
+    normalized = dict(args or {})
+    question = normalized.get("question")
+    normalized["question"] = question.strip() if isinstance(question, str) else ""
+
+    raw_options = normalized.get("options")
+    options: List[str] = []
+    if isinstance(raw_options, list):
+        for raw_option in raw_options:
+            text: Any = raw_option
+            if isinstance(raw_option, dict):
+                text = next(
+                    (
+                        raw_option.get(key)
+                        for key in ("label", "text", "title", "name", "value")
+                        if isinstance(raw_option.get(key), str)
+                        and raw_option.get(key).strip()
+                    ),
+                    "",
+                )
+            if not isinstance(text, str):
+                continue
+            text = text.strip()
+            if text and text not in options:
+                options.append(text)
+            if len(options) == 6:
+                break
+    normalized["options"] = options
+    return normalized

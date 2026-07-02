@@ -115,7 +115,12 @@ def profile(
                 height=height,
                 margin=dict(l=40, r=20, t=60, b=40),
             )
-            charts.append(fig.to_html(full_html=True, include_plotlyjs="cdn"))
+            charts.append(
+                fig.to_html(
+                    full_html=True,
+                    include_plotlyjs="/static/vendor/plotly.min.js",
+                )
+            )
         except Exception as e:
             log.warning("[data_profile] 分布图生成异常: %s", e)
 

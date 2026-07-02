@@ -1,4 +1,5 @@
-"""Blueprint: system utilities — zip-based auto-update from GitHub."""
+"""Blueprint: system utilities — GitHub Releases version check & update."""
+import json
 import logging
 import os
 import shutil
@@ -25,10 +26,19 @@ _directory_picker_lock = threading.Lock()
 # Project root: api/system.py → api/ → project root
 PROJECT_ROOT = resource_root()
 
+# ── Current version (keep in sync with templates/agent_chat.html footer) ──
+CURRENT_VERSION = "v1.1.0"
+
+# ── GitHub Releases API ──
+GITHUB_OWNER = "Zafer-Liu"
+GITHUB_REPO = "Data-Analysis-Agent"
+RELEASES_API = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
+RELEASES_PAGE = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
+
 # GitHub archive URL (no git required — works for zip installs too)
-ARCHIVE_URL = "https://github.com/Zafer-Liu/Data-Analysis-Agent/archive/refs/heads/main.zip"
+ARCHIVE_URL = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/archive/refs/heads/main.zip"
 # The prefix inside the zip: GitHub always uses {repo}-{branch}/
-ZIP_PREFIX = "Data-Analysis-Agent-main/"
+ZIP_PREFIX = f"{GITHUB_REPO}-main/"
 
 # Paths (relative to project root) that must NEVER be overwritten during update
 # — user data, local config, runtime outputs, local-only documentation
@@ -272,6 +282,58 @@ def _apply_update(zip_path: Path) -> Tuple[List[str], List[str], List[str]]:
         _rmtree_safe(tmp_dir)
 
     return updated, added, skipped
+
+
+def _parse_version(tag: str) -> tuple:
+    """Parse 'v1.2.3' into (1, 2, 3) for comparison."""
+    import re
+    m = re.match(r"v?(\d+)\.(\d+)\.(\d+)", str(tag or ""))
+    return tuple(int(x) for x in m.groups()) if m else (0, 0, 0)
+
+
+@bp.get("/api/system/check-update")
+def check_update():
+    """Query GitHub Releases API for the latest version.
+
+    Returns JSON: { ok, current_version, latest_version, has_update,
+                    release_url, release_notes, published_at, assets }
+    """
+    try:
+        req = urllib.request.Request(RELEASES_API, headers={
+            "User-Agent": f"{GITHUB_REPO}/1.0",
+            "Accept": "application/vnd.github.v3+json",
+        })
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:
+        log.warning("[check-update] GitHub API failed: %s", exc)
+        return jsonify({
+            "ok": False,
+            "error": str(exc),
+            "current_version": CURRENT_VERSION,
+        })
+
+    latest_tag = data.get("tag_name", "")
+    has_update = _parse_version(latest_tag) > _parse_version(CURRENT_VERSION)
+
+    assets = []
+    for a in (data.get("assets") or []):
+        assets.append({
+            "name": a.get("name", ""),
+            "size": a.get("size", 0),
+            "download_url": a.get("browser_download_url", ""),
+        })
+
+    return jsonify({
+        "ok": True,
+        "current_version": CURRENT_VERSION,
+        "latest_version": latest_tag,
+        "has_update": has_update,
+        "release_url": data.get("html_url", RELEASES_PAGE),
+        "release_notes": data.get("body", ""),
+        "published_at": data.get("published_at", ""),
+        "assets": assets,
+    })
 
 
 @bp.post("/api/system/update")

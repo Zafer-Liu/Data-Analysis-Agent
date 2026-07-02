@@ -66,16 +66,11 @@ class CommandDispatcher:
     def prepare_agent_turn(
         self, name_or_alias: str, arguments: str = "",
     ) -> CommandDispatchResult:
-        """Prepare a prompt/backend command for the Agent execution loop.
-
-        Backend proposal commands still use the LLM, but their registered type
-        and handler key drive guarded business-flow policy. Local commands are
-        intentionally rejected before any model request.
-        """
+        """Prepare only a prompt command for the Agent execution loop."""
         command = self.resolve(name_or_alias)
-        if command.type is CommandType.LOCAL:
+        if command.type is not CommandType.PROMPT:
             raise CommandDispatchError(
-                f"local command /{command.name} cannot run in the Agent"
+                f"{command.type.value} command /{command.name} cannot run in the Agent"
             )
         return CommandDispatchResult(
             command, arguments, prompt=render_command_prompt(command, arguments),

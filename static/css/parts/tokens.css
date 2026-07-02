@@ -61,6 +61,18 @@
   --color-user-bubble-bg: #2e6df0;       /* slightly deeper than primary for AA contrast */
   --color-user-bubble-fg: #ffffff;
 
+  /* Send button gradient (primary action) */
+  --send-btn-grad-from:   #3b82f6;
+  --send-btn-grad-to:     #2563eb;
+  --send-btn-grad-hover-from: #4f8df8;
+  --send-btn-grad-hover-to:   #3b82f6;
+  --send-btn-dark-from:   #3b82f6;
+  --send-btn-dark-to:     #6366f1;
+  --send-btn-dark-hover-from: #60a5fa;
+  --send-btn-dark-hover-to:   #818cf8;
+  --send-btn-glow:        rgba(37, 99, 235, .4);
+  --send-btn-ring:        rgba(59, 130, 246, .15);
+
   /* Radius (4-tier system) */
   --radius-sm: 6px;
   --radius-md: 10px;

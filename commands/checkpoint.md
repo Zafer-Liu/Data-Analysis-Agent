@@ -1,7 +1,9 @@
 ---
 description: 查看对话快照并回退文件、对话或两者
 usage: "/checkpoint"
-type: local
+aliases: [cp]
+type: local-ui
+arguments: none
 handler-key: "client:rewind"
 category: tools
 icon: "⏪"

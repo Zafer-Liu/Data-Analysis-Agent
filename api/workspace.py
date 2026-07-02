@@ -21,6 +21,12 @@ from flask import Blueprint, request, jsonify
 
 from .state import session_manager, workspace_manager
 from data.workspace import validate_workdir
+from data.workspace_storage import (
+    build_workspace_storage_plan,
+    execute_workspace_storage_cleanup,
+    target_from_metadata,
+    target_from_runtime,
+)
 
 log = logging.getLogger(__name__)
 
@@ -311,7 +317,11 @@ def mount_workspace(sid: str):
                 "workspace_id": previous_runtime.workspace_id,
             }), 409
 
-    ok, msg, runtime = workspace_manager.mount(sid, path, permission=permission)
+    # Explicit API mounts are always remembered. Internal production mounts use
+    # the manager default (also remembered); tests opt out with remember=False.
+    ok, msg, runtime = workspace_manager.mount(
+        sid, path, permission=permission, remember=True,
+    )
     if not ok:
         return jsonify({"ok": False, "error": msg}), 400
 
@@ -515,6 +525,40 @@ def _removal_preview(sid: str, workspace_id: str) -> tuple[dict | None, int]:
     }, 200
 
 
+def _storage_target_and_leases(sid: str, workspace_id: str):
+    # Active runtimes are authoritative even when the mount is intentionally
+    # absent from user-facing recent-workspace discovery (internal/job mounts).
+    runtime = workspace_manager.get_by_workspace(workspace_id)
+    if runtime is not None:
+        return (
+            target_from_runtime(runtime),
+            int(runtime.job_ref_count),
+            None,
+            200,
+        )
+    records = workspace_manager.list_known(sid)
+    record = next(
+        (item for item in records if item.get("workspace_id") == workspace_id),
+        None,
+    )
+    if record is None:
+        return None, 0, {
+            "ok": False,
+            "error": "工作目录不在发现列表中。",
+            "code": "workspace_not_found",
+        }, 404
+    metadata = workspace_manager.metadata_store.find(workspace_id)
+    if metadata is None:
+        return None, 0, {
+            "ok": False,
+            "error": "工作目录身份已失效，请刷新列表后重试。",
+            "code": "workspace_identity_unavailable",
+        }, 409
+    target = target_from_metadata(metadata)
+    active_lease_count = int(record.get("active_lease_count") or 0)
+    return target, active_lease_count, None, 200
+
+
 @bp.get("/api/session/<sid>/workspaces/<workspace_id>/remove-preview")
 def preview_workspace_removal(sid: str, workspace_id: str):
     """Preview a discovery-only removal; never modify the Workspace."""
@@ -556,6 +600,64 @@ def remove_workspace_record(sid: str, workspace_id: str):
         "metadata_deleted": False,
         "stable_identity_lookup_preserved": True,
     })
+
+
+@bp.get("/api/session/<sid>/workspaces/<workspace_id>/storage-cleanup-preview")
+def preview_workspace_storage_cleanup(sid: str, workspace_id: str):
+    """Read-only D4 storage inspection and cleanup dry-run."""
+    if not session_manager.get(sid):
+        return jsonify({"ok": False, "error": "会话不存在。"}), 404
+    target, active_lease_count, error, status = _storage_target_and_leases(
+        sid, workspace_id,
+    )
+    if error is not None:
+        return jsonify(error), status
+    payload = build_workspace_storage_plan(
+        target, active_lease_count=active_lease_count,
+    )
+    return jsonify(payload)
+
+
+@bp.post("/api/session/<sid>/workspaces/<workspace_id>/storage-cleanup")
+def run_workspace_storage_cleanup(sid: str, workspace_id: str):
+    """Execute confirmed D4 cleanup candidates with a manifest."""
+    if not session_manager.get(sid):
+        return jsonify({"ok": False, "error": "会话不存在。"}), 404
+    body = request.get_json(silent=True) or {}
+    if body.get("confirmed") is not True:
+        return jsonify({
+            "ok": False,
+            "error": "清理前必须明确确认。",
+            "code": "confirmation_required",
+        }), 400
+    candidate_ids = body.get("candidate_ids")
+    if candidate_ids is not None and not isinstance(candidate_ids, list):
+        return jsonify({
+            "ok": False,
+            "error": "candidate_ids 必须是数组。",
+            "code": "invalid_candidate_ids",
+        }), 400
+    target, active_lease_count, error, status = _storage_target_and_leases(
+        sid, workspace_id,
+    )
+    if error is not None:
+        return jsonify(error), status
+    try:
+        payload = execute_workspace_storage_cleanup(
+            target,
+            candidate_ids=[str(value) for value in candidate_ids] if candidate_ids else None,
+            active_lease_count=active_lease_count,
+        )
+    except Exception as exc:
+        log.exception("[api] workspace storage cleanup failed workspace=%s", workspace_id)
+        return jsonify({
+            "ok": False,
+            "error": str(exc),
+            "code": "workspace_storage_cleanup_failed",
+        }), 500
+    if not payload.get("ok") and payload.get("error") == "workspace_cleanup_blocked":
+        return jsonify(payload), 409
+    return jsonify(payload)
 
 
 @bp.get("/api/session/<sid>/workspaces/<workspace_id>/switch-preview")

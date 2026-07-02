@@ -139,6 +139,34 @@ AGENT_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "delete_analysis_tables",
+            "description": (
+                "Delete one or more derived/analysis tables from the connected data source. "
+                "Use this only after the user explicitly confirms the exact table names. "
+                "The tool refuses to delete raw/source tables or tables that cannot be "
+                "proven to be analysis/derived objects."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "table_names": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Exact analysis table names to delete.",
+                        "minItems": 1,
+                    },
+                    "confirm": {
+                        "type": "boolean",
+                        "description": "Must be true after confirming the exact table names.",
+                    },
+                },
+                "required": ["table_names", "confirm"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "query_data",
             "description": "Execute a SQL SELECT query and return the results as a table.",
             "parameters": {
@@ -270,10 +298,13 @@ AGENT_TOOLS = [
                     },
                     "title": {
                         "type": "string",
-                        "description": "Chart title shown above the visualization.",
+                        "description": (
+                            "Required human-readable chart title shown in the tool "
+                            "timeline and above the visualization."
+                        ),
                     },
                 },
-                "required": ["chart_type", "sql", "field_mapping"],
+                "required": ["chart_type", "sql", "field_mapping", "title"],
             },
         },
     },
@@ -779,10 +810,93 @@ AGENT_TOOLS = [
 ]
 
 
+HOOKS_AUTOMATION_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "browse_webpage",
+            "description": (
+                "Read a public HTTP(S) webpage and return bounded text for configuration tasks. "
+                "Use this when the user sends a URL/link/API documentation/webhook documentation "
+                "and asks you to configure something from it. Local/private network URLs are blocked. "
+                "For Hooks auto-configuration, first call browse_webpage on the user's link, then "
+                "derive a minimal Hooks JSON config, then call configure_hooks."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "Absolute public http:// or https:// URL to read.",
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "minimum": 1000,
+                        "maximum": 30000,
+                        "description": "Maximum readable characters to return. Default 12000.",
+                    },
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "configure_hooks",
+            "description": (
+                "Validate and save a Hooks configuration. Use this after reading user-provided "
+                "documentation and deriving the hook JSON. The settings object must match the "
+                "Hooks API shape: {enabled, allow_command_hooks, hooks:[{id,event,if,reject,once,async,action}]}."
+                " prompt/http actions are always supported. command actions are supported only when "
+                "the user explicitly asks for a local Python script hook and confirm_command_hooks=true; "
+                "the command must be a simple Python .py script invocation, not arbitrary shell. "
+                "Prefer merge=true to preserve existing hooks. "
+                "After calling this tool, summarize what was configured and mention that it applies from "
+                "the next turn/tool call."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "settings": {
+                        "type": "object",
+                        "description": (
+                            "Full or partial Hooks settings JSON. Example hook: "
+                            "{id:'notify_done', event:'turn_end', async:true, "
+                            "action:{type:'http', method:'POST', url:'https://...', "
+                            "body:{event:'$EVENT', message:'$MESSAGE', answer:'$FINAL_ANSWER'}}}"
+                        ),
+                    },
+                    "merge": {
+                        "type": "boolean",
+                        "description": "If true, update/add hooks by id while preserving existing hooks. Default true.",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Short user-facing reason for the configuration.",
+                    },
+                    "confirm_command_hooks": {
+                        "type": "boolean",
+                        "description": (
+                            "Set true only when the user explicitly asked to configure a command hook. "
+                            "This enables allow_command_hooks and permits simple Python script commands "
+                            "such as python path/to/hook.py. Never set true for shell snippets."
+                        ),
+                    },
+                },
+                "required": ["settings"],
+            },
+        },
+    },
+]
+
+AGENT_TOOLS.extend(HOOKS_AUTOMATION_TOOL_SCHEMAS)
+
+
 WORKSPACE_TOOL_SCHEMAS = [
     {"type": "function", "function": {"name": "workspace_glob", "description": "Page through file metadata. When a user workspace is mounted, omit path to search that mounted directory first; returned user/... paths can be passed unchanged to read, move, or delete tools. Use explicit workspace://uploads, workspace://outputs, or workspace://mcp only for system roots. Contents are never read by this tool.", "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}, "path": {"type": "string", "description": "Optional root/base. Omit for the mounted user workspace; otherwise use workspace://user, workspace://uploads, workspace://outputs, or workspace://mcp."}, "max_results": {"type": "integer", "minimum": 1, "maximum": 100}, "cursor": {"type": "integer", "minimum": 0}}, "required": ["pattern"]}}},
     {"type": "function", "function": {"name": "workspace_grep", "description": "Regex-search allowlisted UTF-8 text files on demand. At most 50 matches and 200 candidate files are examined; dependency, cache and build directories are skipped.", "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}, "path": {"type": "string"}, "include": {"type": "string"}, "max_results": {"type": "integer", "minimum": 1, "maximum": 50}}, "required": ["pattern"]}}},
-    {"type": "function", "function": {"name": "workspace_read_file", "description": "Read one allowlisted UTF-8 text or DOCX file up to 20 MiB. DOCX正文会自动提取；output remains capped at 400 lines and 12000 characters, so use next_offset to continue. Existing files must be read before write/edit.", "parameters": {"type": "object", "properties": {"file_path": {"type": "string"}, "offset": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 400}}, "required": ["file_path"]}}},
+    {"type": "function", "function": {"name": "workspace_read_file", "description": "Read one allowlisted UTF-8 text, DOCX, or spreadsheet file. Excel/XLS/XLSX/ODS files return a bounded worksheet preview (up to 256 MiB file size); use sheet_name, offset, and next_offset to page through rows. Text/DOCX files allow up to 20 MiB. Output remains capped at 400 lines and 12000 characters. Existing files must be read before write/edit.", "parameters": {"type": "object", "properties": {"file_path": {"type": "string"}, "offset": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 400}, "sheet_name": {"type": "string", "description": "Optional worksheet name for spreadsheet files; defaults to the first sheet."}}, "required": ["file_path"]}}},
     {"type": "function", "function": {"name": "workspace_write_file", "description": "Write UTF-8 content up to 20 MiB to workspace://outputs or an explicitly mounted user workspace. Existing files must be read first; uploads, mcp and sensitive/internal paths are read-only.", "parameters": {"type": "object", "properties": {"file_path": {"type": "string"}, "content": {"type": "string"}}, "required": ["file_path", "content"]}}},
     {"type": "function", "function": {"name": "workspace_edit_file", "description": "Replace one unique exact string in a previously-read file under outputs or the mounted user workspace. System uploads and mcp roots are read-only.", "parameters": {"type": "object", "properties": {"file_path": {"type": "string"}, "old_string": {"type": "string"}, "new_string": {"type": "string"}}, "required": ["file_path", "old_string", "new_string"]}}},
     {"type": "function", "function": {"name": "workspace_delete_file", "description": "Delete exactly one file from workspace://outputs or a writable mounted user workspace. Recursive/directory deletion is forbidden and confirm=true is always required.", "parameters": {"type": "object", "properties": {"file_path": {"type": "string"}, "confirm": {"type": "boolean", "description": "Must be true after confirming the exact file path to delete."}}, "required": ["file_path", "confirm"]}}},
@@ -805,15 +919,20 @@ TASK_TOOL_SCHEMAS = [
 AGENT_TOOLS.extend(TASK_TOOL_SCHEMAS)
 
 TEAM_TOOL_SCHEMAS = [
-    {"type": "function", "function": {"name": "team_create", "description": "Create a persistent analyst team definition in the mounted workspace. Members are roles, not unrestricted OS processes.", "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "description": {"type": "string"}, "members": {"type": "array", "items": {"type": "object", "properties": {"name": {"type": "string"}, "role": {"type": "string"}, "instructions": {"type": "string"}}, "required": ["name"]}}}, "required": ["name", "members"]}}},
+    {"type": "function", "function": {"name": "team_create", "description": "Create a persistent analyst team definition in the mounted workspace. Members are roles, not unrestricted OS processes. Team and member names may be Chinese or English. Pass members as an array of objects, not a string.", "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "description": {"type": "string"}, "members": {"type": "array", "items": {"type": "object", "properties": {"name": {"type": "string"}, "role": {"type": "string"}, "instructions": {"type": "string"}}, "required": ["name"]}}}, "required": ["name", "members"]}}},
     {"type": "function", "function": {"name": "team_delete", "description": "Delete a team definition and mailbox from the mounted workspace.", "parameters": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}}},
-    {"type": "function", "function": {"name": "send_message", "description": "Store a message for a named member in a mounted-workspace team mailbox.", "parameters": {"type": "object", "properties": {"team_name": {"type": "string"}, "recipient": {"type": "string"}, "message": {"type": "string"}}, "required": ["team_name", "recipient", "message"]}}},
-    {"type": "function", "function": {"name": "agent_delegate", "description": "Delegate a bounded reasoning task to a named workspace team member. The delegated call has no tools or filesystem access; include all required context in prompt.", "parameters": {"type": "object", "properties": {"prompt": {"type": "string"}, "description": {"type": "string"}, "team_name": {"type": "string"}, "member_name": {"type": "string"}}, "required": ["prompt"]}}},
+    {"type": "function", "function": {"name": "team_list", "description": "List persistent analyst teams in the mounted workspace with member statuses.", "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "team_status", "description": "Get one workspace team status, member inbox counts, and recent mailbox messages.", "parameters": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}}},
+    {"type": "function", "function": {"name": "send_message", "description": "Store a message for a named member in a mounted-workspace team mailbox. Use recipient='*' to broadcast to all members.", "parameters": {"type": "object", "properties": {"team_name": {"type": "string"}, "recipient": {"type": "string"}, "message": {"type": "string"}}, "required": ["team_name", "recipient", "message"]}}},
+    {"type": "function", "function": {"name": "agent_delegate", "description": "Delegate a bounded reasoning task to a named workspace team member. The delegated member has a limited read-only toolset for schema inspection, data queries, knowledge search, and workspace reading; it consumes unread mailbox messages and writes the result back to the team leader mailbox.", "parameters": {"type": "object", "properties": {"prompt": {"type": "string"}, "description": {"type": "string"}, "team_name": {"type": "string"}, "member_name": {"type": "string"}}, "required": ["prompt"]}}},
+    {"type": "function", "function": {"name": "team_delegate", "description": "Delegate multiple independent bounded reasoning tasks to named team members in parallel. Prefer this over repeated agent_delegate calls when Teams are enabled. Keep each member prompt focused and concise. Each teammate has a limited read-only toolset for schema inspection, data queries, knowledge search, and workspace reading; it consumes unread mailbox messages and writes the result back to the leader mailbox.", "parameters": {"type": "object", "properties": {"team_name": {"type": "string"}, "assignments": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "object", "properties": {"member_name": {"type": "string"}, "prompt": {"type": "string"}, "description": {"type": "string"}}, "required": ["member_name", "prompt"]}}, "timeout_seconds": {"type": "integer", "minimum": 10, "maximum": 300, "description": "Per-member timeout. Default 300."}, "max_concurrency": {"type": "integer", "minimum": 1, "maximum": 8, "description": "Parallel worker count. Default is assignments count capped at 6."}, "result_max_tokens": {"type": "integer", "minimum": 400, "maximum": 2500, "description": "Per-member output cap. Default 1200 for speed."}}, "required": ["team_name", "assignments"]}}},
 ]
 
 AGENT_TOOLS.extend(TEAM_TOOL_SCHEMAS)
 
 CONTROL_TOOL_SCHEMAS = [
+    {"type": "function", "function": {"name": "read_tool_result", "description": "Read a recoverable tool-result Artifact that belongs to this session. Use query for matching snippets or offset/limit for bounded character pagination. Never guess missing Artifact content.", "parameters": {"type": "object", "properties": {"artifact_id": {"type": "string", "description": "Opaque tr_... id from a prior tool result."}, "offset": {"type": "integer", "minimum": 0, "default": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 4000, "default": 4000}, "query": {"type": "string", "description": "Optional case-insensitive text to find with bounded context."}}, "required": ["artifact_id"]}}},
+    {"type": "function", "function": {"name": "search_mcp_tools", "description": "Search the compact catalog of currently connected MCP tools. Returns up to 5 names and summaries without loading every full parameter schema. Use when the user needs an external capability that is not already exposed.", "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "Capability, service, or exact MCP tool name to find."}, "server": {"type": "string", "description": "Optional exact MCP server id."}, "limit": {"type": "integer", "minimum": 1, "maximum": 5, "default": 5}}, "required": ["query"]}}},
     {"type": "function", "function": {"name": "plan_complete", "description": "Return a completed structured plan in coordinator workflows.", "parameters": {"type": "object", "properties": {"summary": {"type": "string"}, "steps": {"type": "array", "items": {"type": "object"}}}, "required": ["summary", "steps"]}}},
 ]
 
@@ -831,7 +950,7 @@ def get_tool_schema_version(tool_name: str) -> str:
     return TOOL_SCHEMA_VERSIONS.get(tool_name, TOOL_SCHEMA_VERSION)
 
 
-def get_tools_with_mcp(mcp_manager=None) -> list:
+def get_tools_with_mcp(mcp_manager=None, selected_mcp_tools=None) -> list:
     if mcp_manager is None:
         return AGENT_TOOLS
     try:
@@ -839,6 +958,11 @@ def get_tools_with_mcp(mcp_manager=None) -> list:
     except Exception as e:
         log.warning("[schemas] MCP schema fetch failed: %s", e)
         mcp_schemas = []
+    if selected_mcp_tools is not None:
+        from agent.mcp_discovery import select_mcp_schemas
+        mcp_schemas = select_mcp_schemas(
+            mcp_schemas, selected_mcp_tools, limit=5,
+        )
     return AGENT_TOOLS + mcp_schemas
 
 

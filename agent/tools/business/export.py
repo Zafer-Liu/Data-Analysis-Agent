@@ -1,12 +1,18 @@
 # -*- coding: utf-8 -*-
 """Mixin: export-oriented tools (Excel, Word report, PPT, Dashboard)."""
 import datetime
+import copy
 import logging
 log = logging.getLogger(__name__)
 import os
 import re
 import uuid
 from infrastructure.paths import data_path
+
+REPORT_JOB_SECTION_THRESHOLD = 6
+REPORT_JOB_CHART_THRESHOLD = 3
+DASHBOARD_JOB_WIDGET_THRESHOLD = 4
+DASHBOARD_JOB_ROW_THRESHOLD = 50_000
 
 
 class ExportToolsMixin:
@@ -102,30 +108,24 @@ class ExportToolsMixin:
 
     # ── Word report ───────────────────────────────────────────────────────────
 
-    def _tool_export_report(self, title: str, sections: list) -> str:
-        from Function.Output.report_export import export_to_report
+    def _report_chart_htmls(self) -> list:
+        return [
+            self._chart_store[cid]
+            for cid in self._session_chart_ids
+            if cid in self._chart_store
+        ]
 
-        if not sections:
-            return "❌ 报告内容为空，请提供至少一个章节。"
+    def _render_report_export(self, title: str, sections: list, chart_htmls: list) -> str:
+        from Function.Output.report_export import export_to_report
 
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         export_dir = self._get_export_dir()
         os.makedirs(export_dir, exist_ok=True)
         filepath = os.path.join(export_dir, f"report_{ts}.docx")
 
-        chart_htmls = [
-            self._chart_store[cid]
-            for cid in self._session_chart_ids
-            if cid in self._chart_store
-        ]
-
-        try:
-            result_path, download_name = export_to_report(
-                title, sections, filepath, chart_htmls=chart_htmls
-            )
-        except Exception as exc:
-            log.warning("[export] report generation failed: %s", exc)
-            return f"❌ 报告生成失败：{exc}"
+        _result_path, download_name = export_to_report(
+            title, sections, filepath, chart_htmls=chart_htmls
+        )
 
         n_charts = len(chart_htmls)
         chart_note = f"（含 {n_charts} 张图表）" if n_charts else ""
@@ -134,6 +134,68 @@ class ExportToolsMixin:
             f"✅ 报告已生成，共 {len(sections)} 个章节{chart_note}。\n\n"
             f"[📥 点击下载 {download_name}]({download_url})"
         )
+
+    def _tool_export_report(self, title: str, sections: list) -> str:
+        if not sections:
+            return "❌ 报告内容为空，请提供至少一个章节。"
+
+        try:
+            return self._render_report_export(title, sections, self._report_chart_htmls())
+        except Exception as exc:
+            log.warning("[export] report generation failed: %s", exc)
+            return f"❌ 报告生成失败：{exc}"
+
+    def _tool_export_report_with_jobs(self, title: str, sections: list):
+        if not sections:
+            return "❌ 报告内容为空，请提供至少一个章节。"
+
+        chart_htmls = self._report_chart_htmls()
+        should_job = (
+            self._job_runner is not None
+            and (
+                len(sections) > REPORT_JOB_SECTION_THRESHOLD
+                or len(chart_htmls) > REPORT_JOB_CHART_THRESHOLD
+            )
+        )
+        if not should_job:
+            try:
+                return self._render_report_export(title, sections, chart_htmls)
+            except Exception as exc:
+                log.warning("[export] report generation failed: %s", exc)
+                return f"❌ 报告生成失败：{exc}"
+
+        title_snapshot = str(title or "分析报告")
+        sections_snapshot = copy.deepcopy(sections)
+        chart_htmls_snapshot = list(chart_htmls)
+        result_holder = {}
+
+        def _worker(ctx):
+            ctx.set_progress(5, "正在整理报告素材")
+            ctx.check_canceled()
+            ctx.set_progress(35, "正在生成 Word 报告")
+            result = self._render_report_export(
+                title_snapshot, sections_snapshot, chart_htmls_snapshot
+            )
+            ctx.check_canceled()
+            ctx.set_progress(90, "正在发布报告文件")
+            result_holder["text"] = result
+            ctx.set_progress(100, "报告生成完成")
+            return {
+                "title": title_snapshot,
+                "sections": len(sections_snapshot),
+                "charts": len(chart_htmls_snapshot),
+            }
+
+        job = yield from self._run_as_job(
+            _worker,
+            job_type="report_export",
+            label=f"{title_snapshot} · {len(sections_snapshot)} sections",
+        )
+        if job.get("status") == "canceled":
+            return "报告生成已取消。"
+        if job.get("status") != "succeeded":
+            return f"❌ 报告生成失败：{job.get('error') or 'background job failed'}"
+        return result_holder.get("text", "❌ 报告生成失败：后台结果不可用。")
 
     def _tool_propose_report_outline(self, title: str, sections: list) -> dict:
         rows = ["| # | 章节标题 |\n|---|---------|"]
@@ -437,3 +499,117 @@ class ExportToolsMixin:
             f"✅ 看板「{name}」已生成，包含 **{len(widgets)}** 个图表组件。\n\n"
             f"[📊 打开看板]({url})"
         )
+
+    def _format_dashboard_result(self, name: str, widgets: list, data: dict) -> str:
+        dashboard_id = data.get("dashboard_id", "")
+        url = data.get("url", f"/dashboard/{dashboard_id}")
+        sid = self._session_id
+        if sid:
+            url = f"{url}?sid={sid}"
+        return (
+            f"✅ 看板「{name}」已生成，包含 **{len(widgets)}** 个图表组件。\n\n"
+            f"[📊 打开看板]({url})"
+        )
+
+    def _tool_generate_dashboard_with_jobs(
+        self,
+        name: str,
+        widgets: list,
+        color_scheme: str = "",
+    ):
+        color_scheme = color_scheme or getattr(self, "ppt_color_scheme", "mckinsey")
+        try:
+            from api.dashboard import (
+                build_dashboard_from_prefetched_widgets,
+                prefetch_dashboard_widget_data,
+            )
+            widget_inputs = prefetch_dashboard_widget_data(
+                self.data_source,
+                widgets,
+                self._workspace_path_authorization(),
+            )
+        except Exception as exc:
+            log.warning("[export] dashboard prefetch failed: %s", exc)
+            return f"❌ 看板生成失败：{exc}"
+
+        total_rows = 0
+        for item in widget_inputs:
+            df = item.get("df")
+            if df is not None:
+                try:
+                    total_rows += len(df)
+                except TypeError:
+                    pass
+
+        should_job = (
+            self._job_runner is not None
+            and (
+                len(widgets) > DASHBOARD_JOB_WIDGET_THRESHOLD
+                or total_rows >= DASHBOARD_JOB_ROW_THRESHOLD
+            )
+        )
+
+        def _build(inputs):
+            return build_dashboard_from_prefetched_widgets(
+                self._chart_store,
+                session_id=self._session_id,
+                workspace_id=self._workspace_id,
+                name=name,
+                widget_inputs=inputs,
+                color_scheme=color_scheme,
+            )
+
+        if not should_job:
+            try:
+                return self._format_dashboard_result(name, widgets, _build(widget_inputs))
+            except Exception as exc:
+                log.warning("[export] dashboard generation failed: %s", exc)
+                return f"❌ 看板生成失败：{exc}"
+
+        snapshot = []
+        for item in widget_inputs:
+            df = item.get("df")
+            snapshot.append({
+                "spec": copy.deepcopy(item.get("spec", {})),
+                "df": df.copy(deep=True) if df is not None else None,
+                "error": item.get("error"),
+            })
+        name_snapshot = str(name or "数据看板")
+        widgets_snapshot = copy.deepcopy(widgets)
+        color_scheme_snapshot = str(color_scheme)
+        result_holder = {}
+
+        def _worker(ctx):
+            ctx.set_progress(10, "正在整理看板数据")
+            ctx.check_canceled()
+            ctx.set_progress(45, "正在渲染看板组件")
+            data = build_dashboard_from_prefetched_widgets(
+                self._chart_store,
+                session_id=self._session_id,
+                workspace_id=self._workspace_id,
+                name=name_snapshot,
+                widget_inputs=snapshot,
+                color_scheme=color_scheme_snapshot,
+            )
+            ctx.check_canceled()
+            ctx.set_progress(90, "正在发布看板")
+            result_holder["text"] = self._format_dashboard_result(
+                name_snapshot, widgets_snapshot, data
+            )
+            ctx.set_progress(100, "看板生成完成")
+            return {
+                "name": name_snapshot,
+                "widgets": len(widgets_snapshot),
+                "input_rows": total_rows,
+            }
+
+        job = yield from self._run_as_job(
+            _worker,
+            job_type="dashboard_generation",
+            label=f"{name_snapshot} · {len(widgets_snapshot)} widgets",
+        )
+        if job.get("status") == "canceled":
+            return "看板生成已取消。"
+        if job.get("status") != "succeeded":
+            return f"❌ 看板生成失败：{job.get('error') or 'background job failed'}"
+        return result_holder.get("text", "❌ 看板生成失败：后台结果不可用。")

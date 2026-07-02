@@ -53,6 +53,19 @@ def _normal_path(path: Path | str) -> str:
     return os.path.normcase(str(Path(path).resolve(strict=False)))
 
 
+def _is_missing_ephemeral_temp_root(path: Path) -> bool:
+    """Hide stale temporary mounts from the user-facing discovery list."""
+    if path.is_dir():
+        return False
+    try:
+        path.resolve(strict=False).relative_to(
+            Path(tempfile.gettempdir()).resolve(strict=False)
+        )
+        return True
+    except (ValueError, OSError, RuntimeError):
+        return False
+
+
 def is_workspace_uuid(value: object) -> bool:
     """Return whether *value* is a canonical UUID v4 workspace id."""
     if not isinstance(value, str):
@@ -243,6 +256,14 @@ class WorkspaceMetadataStore:
                 continue
             root = Path(root_text)
             available = root.is_dir()
+            if (
+                not available
+                and entry.get("discovery_kind") != "user"
+                and _is_missing_ephemeral_temp_root(root)
+            ):
+                # Internal jobs and tests may briefly mount temporary roots.
+                # Once deleted, they are not meaningful user workspace history.
+                continue
             metadata = None
             issue = ""
             if available:
@@ -332,6 +353,7 @@ class WorkspaceMetadataStore:
         permission: str = "read_only",
         *,
         name: str | None = None,
+        remember: bool = True,
     ) -> WorkspaceMetadata:
         root_path = Path(root).resolve(strict=True)
         if permission not in {"read_only", "read_write"}:
@@ -411,13 +433,15 @@ class WorkspaceMetadataStore:
                 )
 
             _atomic_json_write(metadata_path, metadata.to_dict())
-            entries[metadata.workspace_id] = {
-                "name": metadata.name,
-                "root_path": metadata.root_path,
-                "created_at": metadata.created_at,
-                "last_opened_at": metadata.last_opened_at,
-            }
-            _atomic_json_write(self.index_path, index)
+            if remember:
+                entries[metadata.workspace_id] = {
+                    "name": metadata.name,
+                    "root_path": metadata.root_path,
+                    "created_at": metadata.created_at,
+                    "last_opened_at": metadata.last_opened_at,
+                    "discovery_kind": "user",
+                }
+                _atomic_json_write(self.index_path, index)
             return metadata
 
 

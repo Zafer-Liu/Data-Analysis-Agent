@@ -11,11 +11,144 @@ from .state import session_manager, config_manager, chart_store
 from agent.activation import ActivationContext, INTERNAL_ACTIONS
 from agent.agent import BusinessAgent
 from agent.commands import CommandLoader, CommandType
+from agent.prompts import get_system_prompt
 from agent.reasoning import split_reasoning_tags
+from agent.retry import call_with_retry as _call_with_retry
 from agent.skills import SkillLoader
 
 log = logging.getLogger(__name__)
 bp = Blueprint("chat", __name__)
+
+
+_PROMPT_SUGGESTION_DIRECTIVE = """You are a prompt suggestion engine.
+Predict the single next message this user is most likely to type after reading the assistant's latest answer.
+Return only the message text that should be prefilled in the chat input.
+Do not explain, do not quote, do not use markdown, and do not mention that this is a suggestion.
+Keep it short, concrete, and directly actionable."""
+
+
+def _visible_history_for_prompt_suggestion(history: list, max_messages: int = 8, max_chars: int = 9000) -> list[dict]:
+    visible: list[dict] = []
+    total = 0
+    for msg in reversed(history or []):
+        role = msg.get("role")
+        content = str(msg.get("content") or "").strip()
+        if role not in {"user", "assistant"} or not content or msg.get("tool_calls"):
+            continue
+        content = re.sub(r"\s+", " ", content)[:2200]
+        total += len(content)
+        visible.append({"role": role, "content": content})
+        if len(visible) >= max_messages or total >= max_chars:
+            break
+    return list(reversed(visible))
+
+
+def _sanitize_prompt_suggestion(text: str, max_len: int = 220) -> str:
+    suggestion = str(text or "").strip()
+    if not suggestion:
+        return ""
+    if re.search(r"(?is)<think(?:ing)?\b", suggestion) and not re.search(r"(?is)</think(?:ing)?\s*>", suggestion):
+        return ""
+    suggestion = re.sub(r"(?is)<think\b[^>]*>.*?</think\s*>", "", suggestion)
+    suggestion = re.sub(r"(?is)<thinking\b[^>]*>.*?</thinking\s*>", "", suggestion)
+    suggestion = re.sub(r"(?is)</?think(?:ing)?\b[^>]*>", "", suggestion)
+    suggestion = re.sub(r"^```(?:\w+)?\s*", "", suggestion)
+    suggestion = re.sub(r"\s*```$", "", suggestion)
+    suggestion = suggestion.strip().strip("\"'“”‘’`")
+    suggestion = re.sub(
+        r"^(?:建议|用户下一步|下一条消息|next message|suggestion|user)\s*[:：]\s*",
+        "",
+        suggestion,
+        flags=re.IGNORECASE,
+    ).strip()
+    suggestion = re.sub(r"^```(?:\w+)?\s*", "", suggestion)
+    suggestion = re.sub(r"\s*```$", "", suggestion)
+    suggestion = re.sub(r"^\s*[-*•]\s*", "", suggestion).strip()
+    suggestion = re.sub(r"[ \t]+", " ", suggestion)
+    suggestion = re.sub(r"\n{3,}", "\n\n", suggestion)
+    if len(suggestion) > max_len:
+        suggestion = suggestion[:max_len].rstrip("，,。.!！?？;；:：、 ")
+    return suggestion
+
+
+def _build_prompt_suggestion_messages(history: list, lang: str = "zh") -> list[dict]:
+    visible = _visible_history_for_prompt_suggestion(history)
+    if len(visible) < 2:
+        return []
+    language_hint = (
+        "Prefer Chinese unless the recent conversation is clearly in another language."
+        if lang != "en" else
+        "Prefer English unless the recent conversation is clearly in another language."
+    )
+    return [
+        {"role": "system", "content": get_system_prompt()},
+        *visible,
+        {
+            "role": "system",
+            "content": f"{_PROMPT_SUGGESTION_DIRECTIVE}\n{language_hint}",
+        },
+    ]
+
+
+def _fallback_prompt_suggestion(lang: str = "zh") -> str:
+    return ""
+
+
+def _build_team_context(sid: str, workspace_id: str = "", *, max_teams: int = 6, max_messages: int = 3) -> str:
+    try:
+        from agent.tools.workspace.teams import WorkspaceTeamStore
+
+        store = WorkspaceTeamStore(sid, workspace_id=workspace_id)
+        teams = store.list()
+    except Exception as exc:
+        log.debug("[teams] context unavailable sid=%s workspace=%s error=%s", sid, workspace_id, exc)
+        return ""
+    if not teams:
+        return ""
+
+    lines = [
+        "Existing workspace analyst teams are available. Use team_status when details may be stale, "
+        "send_message to queue work for members, and team_delegate for parallel bounded member turns.",
+        "Delegated members have limited read-only tools for schema, data queries, knowledge search, "
+        "and workspace file reading. They cannot mutate data or create nested teams.",
+        "For a fresh user request, do not synthesize old member results as if they were new work. "
+        "If prior team messages are from an earlier turn or may be stale, create/recreate the team "
+        "or call team_delegate again for the required members before producing the final answer.",
+    ]
+    for team in teams[:max_teams]:
+        name = str(team.get("name") or "")
+        if not name:
+            continue
+        try:
+            status = store.status(name)
+        except Exception:
+            status = team
+        description = str(status.get("description") or "").strip()
+        lines.append(
+            f"- Team {name}: {len(status.get('members') or [])} members; "
+            f"lead_unread={status.get('lead_unread_messages', 0)}; "
+            f"description={description[:160] or 'none'}"
+        )
+        members = []
+        for member in (status.get("members") or [])[:10]:
+            last_message = str(member.get("last_message") or "").replace("\n", " ")[:90]
+            members.append(
+                f"{member.get('name', '')}"
+                f"(role={member.get('role', '') or 'analyst'}, "
+                f"status={member.get('status', 'idle')}, "
+                f"unread={member.get('unread_messages', 0)}"
+                f"{', last=' + last_message if last_message else ''})"
+            )
+        if members:
+            lines.append("  Members: " + "; ".join(members))
+        recent = status.get("recent_messages") or []
+        for message in recent[-max_messages:]:
+            body = str(message.get("message") or "").replace("\n", " ")[:140]
+            if body:
+                lines.append(
+                    f"  Message {message.get('sender', '?')} -> {message.get('recipient', '?')}: {body}"
+                )
+    return "\n".join(lines)[:5000]
 
 
 class ActivationRequestError(ValueError):
@@ -72,10 +205,10 @@ def _resolve_activation(sess, payload: dict):
             raise ActivationRequestError(
                 f"未知斜杠命令：/{command_name}", "unknown_command",
             )
-        if command_def.type is CommandType.LOCAL:
+        if command_def.type is not CommandType.PROMPT:
             raise ActivationRequestError(
-                f"/{command_def.name} 是本地命令，不能提交给 Agent。",
-                "local_command_only",
+                f"/{command_def.name} 是 {command_def.type.value} 命令，不能提交给 Agent。",
+                "command_not_agent_routable",
             )
         activation = ActivationContext(command_name=command_def.name)
     return activation, skill_def, command_def
@@ -173,6 +306,7 @@ def _apply_sql_analysis_context(sess, data_context: dict | None) -> list[dict]:
 
 def _build_agent(
     sess, *, workspace_id: str | None = None, source_snapshot=None,
+    hook_engine=None, hook_context=None, user_id: str = "",
 ) -> BusinessAgent:
     provider = sess.model_provider or config_manager.get_default_provider()
     if not provider:
@@ -227,6 +361,16 @@ def _build_agent(
     log.debug("[chat] build_agent  provider=%s  model=%s  active_sources=%s  merged=%s",
               provider, cfg.model, src_names, merged_source is not None)
 
+    provider_defaults = config_manager.DEFAULT_CONFIGS.get(provider, {})
+    supports_prompt_cache = getattr(cfg, "supports_prompt_cache", None)
+    if supports_prompt_cache is None:
+        supports_prompt_cache = provider_defaults.get(
+            "supports_prompt_cache", False
+        )
+    prompt_cache_mode = getattr(cfg, "prompt_cache_mode", None)
+    if not prompt_cache_mode:
+        prompt_cache_mode = provider_defaults.get("prompt_cache_mode", "none")
+
     return BusinessAgent(
         client=client, model=cfg.model,
         data_source=(source_snapshot.primary if source_snapshot is not None else sess.data_source),
@@ -240,9 +384,28 @@ def _build_agent(
         color_scheme=getattr(sess, "ppt_color_scheme", "mckinsey"),
         session_id=sess.session_id,
         workspace_id=workspace_id,
+        user_id=user_id,
         job_runner=sess.job_runner,
         context_window=getattr(cfg, "context_window", None),
         max_output_tokens=getattr(cfg, "max_output_tokens", None),
+        hook_engine=hook_engine,
+        hook_context=hook_context,
+        compaction_state=getattr(sess, "compaction_state", None),
+        provider=provider,
+        usage_recorder=sess.record_usage,
+        mcp_discovery_recorder=sess.record_discovered_mcp_tools,
+        supports_prompt_cache=supports_prompt_cache,
+        prompt_cache_mode=prompt_cache_mode,
+        prompt_cache_retention=(
+            getattr(cfg, "prompt_cache_retention", None)
+            or provider_defaults.get("prompt_cache_retention", "in_memory")
+        ),
+        cache_breakpoint_strategy=(
+            getattr(cfg, "cache_breakpoint_strategy", None)
+            or provider_defaults.get(
+                "cache_breakpoint_strategy", "stable_prefix"
+            )
+        ),
     )
 
 
@@ -251,6 +414,16 @@ def _build_agent(
 @bp.post("/api/session/new")
 def new_session():
     sess = session_manager.create()
+    try:
+        from agent.hooks.models import HookContext
+        from data.hooks_store import load_engine
+
+        load_engine().run_hooks(
+            "session_start",
+            HookContext(event_name="session_start", session_id=sess.session_id),
+        )
+    except Exception as exc:
+        log.debug("[hooks] session_start skipped sid=%s error=%s", sess.session_id, exc)
     log.info("[session] created  sid=%s", sess.session_id)
     return jsonify({"session_id": sess.session_id})
 
@@ -280,7 +453,51 @@ def load_current_session(sid: str):
         "history":      sess.history,
         "total_input":  sess.total_input_tokens,
         "total_output": sess.total_output_tokens,
+        "total_cached_input": getattr(sess, "total_cached_input_tokens", 0),
+        "total_cache_write": getattr(sess, "total_cache_write_tokens", 0),
+        "usage_breakdowns": list(getattr(sess, "usage_breakdowns", []))[-100:],
         "msg_count":    cnt,
+    })
+
+
+@bp.get("/api/session/<sid>/token-metrics")
+def get_token_metrics(sid: str):
+    """Return bounded per-call Token diagnostics without prompt contents."""
+    sess = session_manager.get(sid)
+    if not sess:
+        return jsonify({"error": "session not found"}), 404
+    breakdowns = list(getattr(sess, "usage_breakdowns", []) or [])[-100:]
+    actual_prompt = sum(
+        int(item.get("actual_prompt_tokens") or 0)
+        for item in breakdowns if isinstance(item, dict)
+    )
+    estimated_prompt = sum(
+        int(item.get("payload_tokens_est") or 0)
+        for item in breakdowns if isinstance(item, dict)
+    )
+    estimation_error_pct = (
+        round(abs(estimated_prompt - actual_prompt) / actual_prompt * 100, 2)
+        if actual_prompt else None
+    )
+    total_input = int(getattr(sess, "total_input_tokens", 0) or 0)
+    total_cached = int(getattr(sess, "total_cached_input_tokens", 0) or 0)
+    return jsonify({
+        "ok": True,
+        "calls_retained": len(breakdowns),
+        "retention_limit": 100,
+        "total_input_tokens": total_input,
+        "total_output_tokens": int(getattr(sess, "total_output_tokens", 0) or 0),
+        "total_cached_input_tokens": total_cached,
+        "total_cache_write_tokens": int(
+            getattr(sess, "total_cache_write_tokens", 0) or 0
+        ),
+        "cache_hit_ratio": (
+            round(total_cached / total_input, 4) if total_input else 0.0
+        ),
+        "estimated_prompt_tokens_retained": estimated_prompt,
+        "actual_prompt_tokens_retained": actual_prompt,
+        "estimation_error_pct": estimation_error_pct,
+        "breakdowns": breakdowns,
     })
 
 
@@ -311,25 +528,106 @@ def stop_session(sid: str):
     sess = session_manager.get(sid)
     if sess:
         sess.cancel_requested = True
+        try:
+            from agent.hooks.models import HookContext
+            from data.hooks_store import load_engine
+
+            load_engine().run_hooks(
+                "stop",
+                HookContext(event_name="stop", session_id=sid, message="stop requested"),
+            )
+        except Exception as exc:
+            log.debug("[hooks] stop skipped sid=%s error=%s", sid, exc)
         log.info("[session] stop requested  sid=%s", sid)
     return jsonify({"ok": True})
+
+
+# ── Prompt suggestion ───────────────────────────────────────────────────────
+
+@bp.post("/api/session/<sid>/prompt-suggestion")
+def prompt_suggestion(sid: str):
+    log.debug("[prompt-suggestion] called sid=%s", sid)
+    sess = session_manager.get(sid)
+    if not sess:
+        log.warning("[prompt-suggestion] session not found sid=%s", sid)
+        return jsonify({"ok": False, "suggestion": ""}), 404
+
+    lang = str((request.json or {}).get("lang") or "zh").lower()
+    messages = _build_prompt_suggestion_messages(sess.history, lang=lang)
+    if not messages:
+        log.info("[prompt-suggestion] history too short sid=%s history_len=%d", sid, len(sess.history or []))
+        return jsonify({"ok": False, "suggestion": ""})
+
+    provider = sess.model_provider or config_manager.get_default_provider()
+    cfg = config_manager.get_config(provider) if provider else None
+    if not provider or cfg is None:
+        log.warning("[prompt-suggestion] no provider/config sid=%s provider=%s cfg=%s", sid, provider, cfg)
+        return jsonify({"ok": False, "suggestion": ""})
+
+    log.debug("[prompt-suggestion] calling LLM sid=%s provider=%s model=%s msg_count=%d",
+              sid, provider, cfg.model, len(messages))
+    try:
+        from LLM.llm_config_manager import get_llm_client
+        client = get_llm_client(provider)
+        response = _call_with_retry(
+            client.chat.completions.create,
+            model=cfg.model,
+            messages=messages,
+            temperature=0.25,
+            max_tokens=80,
+        )
+        raw = response.choices[0].message.content if response.choices else ""
+        log.debug("[prompt-suggestion] raw response sid=%s raw=%r", sid, raw[:300] if raw else "")
+        suggestion = _sanitize_prompt_suggestion(raw)
+        log.debug("[prompt-suggestion] sanitized sid=%s suggestion=%r", sid, suggestion[:200] if suggestion else "")
+    except Exception as exc:
+        log.warning("[prompt-suggestion] LLM call failed sid=%s error=%s", sid, exc)
+        return jsonify({"ok": False, "suggestion": ""})
+
+    log.info("[prompt-suggestion] result sid=%s ok=%s suggestion=%r", sid, bool(suggestion), suggestion[:100] if suggestion else "")
+    return jsonify({"ok": bool(suggestion), "suggestion": suggestion})
 
 
 # ── Chat SSE ───────────────────────────────────────────────────────────────
 
 @bp.post("/api/session/<sid>/chat")
 def chat_stream(sid: str):
-    d = request.json or {}
-    message = (d.get("message") or "").strip()
+    d = request.get_json(silent=True)
+    if not isinstance(d, dict):
+        return jsonify({
+            "error": "请求正文必须是 JSON 对象",
+            "code": "invalid_request_body",
+        }), 400
+    raw_message = d.get("message")
+    if raw_message is not None and not isinstance(raw_message, str):
+        return jsonify({
+            "error": "消息必须是字符串",
+            "code": "invalid_message_type",
+        }), 400
+    message = (raw_message or "").strip()
     if not message:
         return jsonify({"error": "消息不能为空"}), 400
 
     sess = session_manager.get_or_create(sid)
+    user_id = str(
+        request.headers.get("X-BAA-User-ID")
+        or d.get("user_id")
+        or "local-default"
+    ).strip()[:200]
     try:
         activation, active_skill, active_command = _resolve_activation(sess, d)
     except ActivationRequestError as exc:
         return jsonify({"error": str(exc), "code": exc.code}), 400
+    if activation.kind == "none":
+        added_tools = sess.record_discovered_tools(message)
+        if added_tools:
+            log.info("[tools] discovered sid=%s tools=%s", sid, added_tools)
     sess.cancel_requested = False
+    _command_usage_before = (
+        sess.total_input_tokens,
+        sess.total_output_tokens,
+        sess.total_cached_input_tokens,
+    )
     data_context = _resolve_data_context(sess, d.get("data_context"))
     missing_sql_scope = _apply_sql_analysis_context(sess, data_context)
     if missing_sql_scope:
@@ -388,15 +686,65 @@ def chat_stream(sid: str):
 
     def generate():
         runner = sess.job_runner
+        command_metric_recorded = False
+
+        def _record_prompt_command_metric(outcome: str, error_code: str = "") -> None:
+            nonlocal command_metric_recorded
+            if command_metric_recorded or active_command is None:
+                return
+            command_metric_recorded = True
+            sess.record_command_metric(
+                command=active_command.name,
+                command_type=active_command.type.value,
+                outcome=outcome,
+                duration_ms=int((time.monotonic() - _turn_start) * 1000),
+                error_code=error_code,
+                input_tokens=max(0, sess.total_input_tokens - _command_usage_before[0]),
+                output_tokens=max(0, sess.total_output_tokens - _command_usage_before[1]),
+                cached_input_tokens=max(
+                    0,
+                    sess.total_cached_input_tokens - _command_usage_before[2],
+                ),
+            )
+        try:
+            from agent.hooks.models import HookContext
+            from data.hooks_store import load_engine
+
+            hook_engine = load_engine()
+            hook_context = HookContext(
+                event_name="turn_start",
+                session_id=sid,
+                turn_id=conversation_job_id,
+                workspace_id=fixed_workspace_id,
+                workspace_name=(
+                    fixed_workspace_runtime.to_dict().get("name", "")
+                    if fixed_workspace_runtime is not None else ""
+                ),
+                workspace_path=(
+                    fixed_workspace_runtime.to_dict().get("path", "")
+                    if fixed_workspace_runtime is not None else ""
+                ),
+                message=message,
+                model_provider=sess.model_provider or config_manager.get_default_provider() or "",
+            )
+        except Exception as exc:
+            log.warning("[hooks] disabled for turn sid=%s error=%s", sid, exc)
+            hook_engine = None
+            hook_context = None
+
         try:
             agent = _build_agent(
                 sess, workspace_id=fixed_workspace_id,
                 source_snapshot=source_snapshot,
+                hook_engine=hook_engine,
+                hook_context=hook_context,
+                user_id=user_id,
             )
         except ValueError as exc:
             log.error("[chat] build_agent failed  sid=%s  error=%s", sid, exc)
             runner.fail_tracked(conversation_job_id, str(exc))
             source_snapshot.release()
+            _record_prompt_command_metric("error", "agent_build_failed")
             yield _sse({"type": "error", "message": str(exc)})
             yield _sse({"type": "done"})
             return
@@ -428,6 +776,48 @@ def chat_stream(sid: str):
                 _append_parent_artifact({
                     "type": "file", "name": name.replace("📥", "").strip(), "url": url,
                 })
+
+        def _append_tool_result_summary(event: dict) -> None:
+            tool = str(event.get("tool") or "").strip()
+            if not tool:
+                return
+            if event.get("artifacts"):
+                return
+            result_tools = {
+                "query_data", "create_analysis_table", "delete_analysis_tables",
+                "run_analysis", "profile_data", "clean_data",
+                "export_excel", "export_report", "generate_ppt", "generate_dashboard",
+                "workspace_read_file", "workspace_write_file", "workspace_edit_file",
+                "workspace_delete_file", "workspace_move_file", "workspace_bash",
+                "workspace_command", "task_create", "task_update", "team_create",
+                "team_delete", "team_list", "team_status", "send_message", "agent_delegate",
+            }
+            if tool not in result_tools:
+                return
+            content = str(event.get("content") or "").strip()
+            summary = str(event.get("summary") or "").strip()
+            error = str(event.get("error") or "").strip()
+            label = {
+                "query_data": "query_data 查询结果",
+                "create_analysis_table": "创建分析表结果",
+                "delete_analysis_tables": "删除分析表结果",
+                "run_analysis": "分析计算结果",
+                "profile_data": "数据概况结果",
+                "clean_data": "数据清洗结果",
+                "export_excel": "Excel 导出结果",
+                "export_report": "报告生成结果",
+                "generate_ppt": "PPT 生成结果",
+                "generate_dashboard": "看板生成结果",
+            }.get(tool, f"{tool} 结果")
+            if error:
+                label = f"{label}（失败）"
+            _append_parent_artifact({
+                "type": "tool_result_summary",
+                "tool": tool,
+                "name": label,
+                "summary": summary or content[:500],
+                "ok": bool(event.get("ok", True)),
+            })
 
         def _start_step(event: dict) -> None:
             nonlocal step_count
@@ -493,11 +883,25 @@ def chat_stream(sid: str):
             getattr(sess, "temp_prompt", "")
             if getattr(sess, "temp_prompt_enabled", False) else ""
         )
+        if hook_engine and hook_context:
+            for notification in hook_engine.run_hooks("user_prompt_submit", hook_context):
+                yield _sse(notification.to_event())
+            for notification in hook_engine.run_hooks("turn_start", hook_context):
+                yield _sse(notification.to_event())
+            hook_prompts = hook_engine.drain_prompt_messages()
+            if hook_prompts:
+                hook_prompt_text = "[Hook Prompt]\n" + "\n\n".join(hook_prompts)
+                active_temp_prompt = (
+                    f"{active_temp_prompt}\n\n{hook_prompt_text}"
+                    if active_temp_prompt else hook_prompt_text
+                )
         workspace_status = (
             {"mounted": True, **fixed_workspace_runtime.to_dict()}
             if fixed_workspace_runtime is not None else {"mounted": False}
         )
         recovery_context = sess.build_recovery_context(workspace_status)
+        teams_enabled = bool(d.get("teams_enabled"))
+        team_context = _build_team_context(sid, fixed_workspace_id) if teams_enabled else ""
 
         conversation_scope = runner.conversation_scope(conversation_job_id)
         conversation_scope.__enter__()
@@ -514,6 +918,18 @@ def chat_stream(sid: str):
                 temp_prompt=active_temp_prompt,
                 data_context=data_context,
                 recovery_context=recovery_context,
+                team_context=team_context,
+                teams_enabled=teams_enabled,
+                discovered_tools=frozenset(getattr(sess, "discovered_tools", []) or []),
+                discovered_mcp_tools=list(
+                    getattr(sess, "discovered_mcp_tools", []) or []
+                ),
+                mcp_catalog_version_seen=str(
+                    getattr(sess, "mcp_catalog_version", "") or ""
+                ),
+                tool_result_artifacts=list(
+                    getattr(sess, "recent_artifacts", []) or []
+                ),
             ):
                 if sess.cancel_requested:
                     log.info("[chat] cancelled by user  sid=%s", sid)
@@ -533,6 +949,7 @@ def chat_stream(sid: str):
                     )
                     for artifact in event.get("artifacts") or []:
                         _append_parent_artifact(artifact)
+                    _append_tool_result_summary(event)
                     _collect_downloads(str(event.get("content") or ""))
                     # Recovery metadata is server-only; do not expose full SQL
                     # or future internal context fields through browser SSE.
@@ -543,6 +960,15 @@ def chat_stream(sid: str):
                     _append_parent_artifact(event["artifact"])
                 elif etype == "error":
                     stream_error = str(event.get("message") or "Conversation failed")
+                elif etype == "hook_event":
+                    runner.append_tracked_event(conversation_job_id, {
+                        "type": "hook_event",
+                        "job_id": conversation_job_id,
+                        "hook_id": event.get("hook_id", ""),
+                        "event": event.get("event", ""),
+                        "ok": bool(event.get("ok", True)),
+                        "output": str(event.get("output") or "")[:500],
+                    })
 
                 # Provider/fallback safety net. BusinessAgent normally separates
                 # <think> during streaming, but never let an embedded block leak
@@ -563,10 +989,22 @@ def chat_stream(sid: str):
                         sess.chart_ids = []
                     sess.chart_ids.append(cid)
                     turn_chart_ids.append(cid)
+                    chart_title = str(
+                        event.get("title")
+                        or event.get("chart_type")
+                        or f"图表 {len(turn_chart_ids)}"
+                    ).strip()
+                    chart_type = str(event.get("chart_type") or "").strip()
                     log.info("[chat] chart generated  sid=%s  chart_id=%s", sid, cid)
-                    yield _sse({"type": "chart_ref", "chart_id": cid})
+                    yield _sse({
+                        "type": "chart_ref",
+                        "chart_id": cid,
+                        "title": chart_title,
+                        "chart_type": chart_type,
+                    })
                     _append_parent_artifact({
-                        "type": "chart", "name": f"图表 {len(turn_chart_ids)}",
+                        "type": "chart", "name": chart_title,
+                        "chart_type": chart_type,
                         "url": f"/api/chart/{cid}", "chart_id": cid,
                     })
                 elif etype == "chart_placeholder":
@@ -577,6 +1015,9 @@ def chat_stream(sid: str):
                     sess.record_usage(
                         event.get("prompt_tokens", 0),
                         event.get("completion_tokens", 0),
+                        breakdown=event.get("prompt_breakdown"),
+                        cached_input_tokens=event.get("cached_input_tokens", 0),
+                        cache_write_tokens=event.get("cache_write_tokens", 0),
                     )
                     cfg = config_manager.get_config(sess.model_provider)
                     enriched = {
@@ -588,6 +1029,12 @@ def chat_stream(sid: str):
                     if not enriched.get("context_window"):
                         enriched["context_window"] = cfg.context_window if cfg else None
                     yield _sse(enriched)
+                elif etype == "history_compacted":
+                    compacted_history = event.get("history")
+                    if isinstance(compacted_history, list):
+                        sess.history = compacted_history
+                    # Internal state mutation; the browser only needs the
+                    # surrounding compaction activity events.
                 else:
                     yield _sse(event)
 
@@ -615,6 +1062,14 @@ def chat_stream(sid: str):
                 chart_ids=turn_chart_ids,
             )
             final_answer = "".join(collected)
+            if hook_engine and hook_context:
+                end_context = hook_context.child(
+                    event_name="turn_end",
+                    final_answer=final_answer,
+                    elapsed_seconds=time.monotonic() - _turn_start,
+                )
+                for notification in hook_engine.run_hooks("turn_end", end_context):
+                    yield _sse(notification.to_event())
             _collect_downloads(final_answer)
             if stream_error:
                 runner.fail_tracked(conversation_job_id, stream_error)
@@ -639,6 +1094,10 @@ def chat_stream(sid: str):
         except Exception as exc:
             log.exception("[chat] unhandled agent error  sid=%s", sid)
             runner.fail_tracked(conversation_job_id, f"{type(exc).__name__}: {exc}")
+            if hook_engine and hook_context:
+                error_context = hook_context.child(event_name="error", error=str(exc))
+                for notification in hook_engine.run_hooks("error", error_context):
+                    yield _sse(notification.to_event())
             yield _sse({"type": "error", "message": f"内部错误：{exc}"})
 
         finally:
@@ -660,6 +1119,12 @@ def chat_stream(sid: str):
                 except FileHistoryError:
                     log.exception("[filehistory] snapshot finalize failed sid=%s", sid)
             source_snapshot.release()
+            current = runner.get_status(conversation_job_id) or {}
+            status = str(current.get("status") or "")
+            _record_prompt_command_metric(
+                "success" if status == "succeeded" else "error",
+                "" if status == "succeeded" else (status or "stream_incomplete"),
+            )
             yield _sse({"type": "done"})
 
     return Response(

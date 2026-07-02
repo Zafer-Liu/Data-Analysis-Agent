@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agent.validate import (
     SQL_TOOLS,
+    normalize_ask_user_args,
     validate_tool_args,
 )
 from data.workspace import WorkspacePathAuthorization
@@ -167,6 +168,34 @@ class TestStructuredArgValidation(unittest.TestCase):
         self.assertIsNone(validate_tool_args(
             "propose_dashboard_outline", {"widgets": []}
         ))
+
+    def test_ask_user_requires_string_options(self):
+        self.assertIsNone(validate_tool_args("ask_user", {
+            "question": "请选择分析方向",
+            "options": ["整体概览", "RFM 分层"],
+        }))
+        self.assertIsNotNone(validate_tool_args("ask_user", {
+            "question": "请选择分析方向",
+            "options": [{"label": "整体概览"}, {"label": "RFM 分层"}],
+        }))
+
+    def test_ask_user_provider_objects_are_normalized(self):
+        args = normalize_ask_user_args({
+            "question": " 请选择分析方向 ",
+            "options": [
+                {"label": "整体概览", "value": "overview"},
+                {"text": "RFM 分层"},
+                " 时间趋势 ",
+                {"value": "付款行为"},
+                {"unexpected": "ignored"},
+                {"label": "整体概览"},
+            ],
+        })
+        self.assertEqual(args["question"], "请选择分析方向")
+        self.assertEqual(args["options"], [
+            "整体概览", "RFM 分层", "时间趋势", "付款行为",
+        ])
+        self.assertIsNone(validate_tool_args("ask_user", args))
 
 
 class TestUnknownTools(unittest.TestCase):

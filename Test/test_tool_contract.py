@@ -90,7 +90,7 @@ class TestToolContract(unittest.TestCase):
         self.assertTrue(is_job_eligible("run_analysis"))
         self.assertEqual(get_tool_spec("workspace_bash").category, "write")
         self.assertTrue(get_tool_spec("workspace_bash").requires_workspace)
-        self.assertFalse(is_job_eligible("query_data"))
+        self.assertTrue(is_job_eligible("query_data"))
 
     def test_tool_result_envelope_fields_and_error_classification(self):
         env = make_tool_result(

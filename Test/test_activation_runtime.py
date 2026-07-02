@@ -53,7 +53,12 @@ class TestActivationResolution(unittest.TestCase):
     def test_local_command_cannot_reach_agent(self):
         with self.assertRaises(ActivationRequestError) as caught:
             _resolve_activation(self.session, {"command": "status"})
-        self.assertEqual(caught.exception.code, "local_command_only")
+        self.assertEqual(caught.exception.code, "command_not_agent_routable")
+
+    def test_backend_command_cannot_reach_agent(self):
+        with self.assertRaises(ActivationRequestError) as caught:
+            _resolve_activation(self.session, {"command": "compact"})
+        self.assertEqual(caught.exception.code, "command_not_agent_routable")
 
     def test_legacy_confirm_command_migrates_to_internal_action(self):
         activation, skill, command = _resolve_activation(

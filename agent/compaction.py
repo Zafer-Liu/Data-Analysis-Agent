@@ -3,17 +3,17 @@
 Conversation history compaction — LLM-based semantic summarization.
 
 Inspired by Claude Code's compact.ts / prompt.ts:
-  - When the *real* prompt-token usage of the previous turn exceeds a fraction
-    of the model context window, summarize the oldest portion of history via a
-    lightweight LLM call, keeping the most-recent turns verbatim.
+  - When the payload approaches a fixed-reserve threshold, summarize the
+    oldest portion of history via a lightweight LLM call while keeping a
+    token-budgeted recent tail verbatim.
   - The summary is injected as a single system message so the agent retains
     full semantic context without bloating the prompt.
   - Images and large tool results are stripped before summarization to keep
     the compaction request itself small.
 
 Trigger口径与前端上下文条一致:
-  前端显示 prompt_tokens / context_window；compaction 用上一轮真实
-  prompt_tokens 判定，达到 _COMPACT_TRIGGER_RATIO (80%) 即触发。
+  前端显示 prompt_tokens / context_window；compaction 使用上一轮真实
+  prompt_tokens 与当前 Payload 估算，并为输出和单轮增长保留固定空间。
 
 Usage (in agent.run):
     if should_compact_history(history, last_prompt_tokens, ctx_window):
@@ -21,28 +21,28 @@ Usage (in agent.run):
         history, ok = compact_history(history, client, model, summary_model=...)
         yield {"type": "tool_end", "tool": "compaction"}
 """
+import json
+import hashlib
 import logging
 import time
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple, Optional, Callable
 
 log = logging.getLogger(__name__)
 
 # ── Thresholds ────────────────────────────────────────────────────────────────
 
-# Trigger compaction when the previous turn's real prompt tokens reach this
-# fraction of the context window. Lower = trigger earlier, keeping history leaner.
-_COMPACT_TRIGGER_RATIO = 0.70   # was 0.80 — trigger earlier before history gets huge
-
-# Rule-based trim kicks in at this lower ratio, BEFORE semantic compaction.
-# In the 60–70% zone we just drop oversized tool results without an LLM call.
-_TRIM_TRIGGER_RATIO = 0.60
-
 # Tool result messages longer than this are truncated during rule-based trim.
 _TRIM_TOOL_RESULT_CAP = 2000   # chars
 
+# Maximum aggregate model-visible tool-result content kept in one payload
+# preparation pass. Recoverable artifact-backed results are shortened first.
+_TOOL_RESULT_AGGREGATE_CAP = 16_000
+
 # Keep this many recent turns verbatim (never summarized).
 # Increased so more recent analysis context survives intact.
-_KEEP_RECENT_TURNS = 8   # was 6
+_KEEP_RECENT_TURNS = 8   # legacy fallback for callers that do not use token tails
+_KEEP_RECENT_MIN_MESSAGES = 5
+_KEEP_RECENT_TOKEN_BUDGET = 10_000
 
 # Hard cap on chars fed to the summarizer.
 # Reduced so the compaction prompt focuses on conclusions, not raw data dumps.
@@ -54,6 +54,10 @@ _SUMMARY_MAX_TOKENS = 2500   # was 1200
 
 # Minimum history messages before compaction is worthwhile.
 _MIN_TURNS_FOR_COMPACT = 4
+
+_COMPACTION_FAILURE_LIMIT = 3
+_DEFAULT_OUTPUT_RESERVE = 384_000
+_DEFAULT_TURN_SAFETY_MARGIN = 8_000
 
 # Marker used to tag the injected summary message so downstream pruning logic
 # can recognise and protect it.
@@ -74,6 +78,9 @@ CRITICAL INSTRUCTIONS:
 - PRESERVE ALL SPECIFIC NUMBERS: revenue figures, percentages, counts, rankings, dates, thresholds.
   A summary that says "sales were high" is USELESS. Write "sales were ¥1,234,567 (+12.3% YoY)".
 - PRESERVE COLUMN NAMES AND TABLE NAMES exactly as used, so future queries can reference them.
+- PRESERVE explicit user constraints, corrections, prohibitions, and output preferences as close
+  to the user's original wording as possible.
+- Never turn an unverified claim into a verified fact. Keep evidence boundaries explicit.
 - Be thorough in sections 3 and 4 — these are the most important for continuity.
 
 <conversation_to_summarize>
@@ -116,6 +123,10 @@ Tasks requested but NOT yet completed. What should happen next.
 
 ## 9. Current State
 Exactly where the conversation left off — last action taken, what the user asked most recently.
+
+## 10. User Constraints & Corrections
+Explicit constraints, corrections, prohibited approaches, metric-definition changes, and output
+preferences. Preserve short important user statements verbatim when possible.
 """
 
 
@@ -200,6 +211,47 @@ def _messages_to_text(messages: List[Dict]) -> str:
     return "\n\n".join(parts)
 
 
+def _bounded_summary_text(
+    messages: List[Dict[str, Any]],
+    max_chars: int = _MAX_SUMMARY_INPUT_CHARS,
+) -> str:
+    """Build summary input without blindly chopping off the newest head data."""
+    rendered = [_messages_to_text([message]) for message in messages]
+    selected: set[int] = set()
+    used = 0
+
+    # User intent and corrections have the highest retention priority.
+    for index, message in enumerate(messages):
+        text = rendered[index]
+        if message.get("role") != "user" or not text:
+            continue
+        remaining = max_chars - used
+        if remaining <= 0:
+            break
+        if len(text) > remaining:
+            text = text[:remaining]
+            rendered[index] = text
+        selected.add(index)
+        used += len(text) + 2
+
+    # Fill the remaining budget from newest to oldest, then restore chronology.
+    for index in range(len(messages) - 1, -1, -1):
+        if index in selected or not rendered[index]:
+            continue
+        remaining = max_chars - used
+        if remaining <= 0:
+            break
+        text = rendered[index]
+        if len(text) > remaining:
+            text = text[-remaining:]
+            rendered[index] = "[earlier part omitted] " + text
+        selected.add(index)
+        used += len(rendered[index]) + 2
+
+    result = "\n\n".join(rendered[index] for index in sorted(selected))
+    return result[:max_chars]
+
+
 def _safe_tail_start(history: List[Dict], desired_keep: int) -> int:
     """Return the index where the verbatim tail should start.
 
@@ -218,15 +270,352 @@ def _safe_tail_start(history: List[Dict], desired_keep: int) -> int:
     return idx
 
 
+def _message_chars(message: Dict[str, Any]) -> int:
+    try:
+        return len(json.dumps(message, ensure_ascii=False, default=str))
+    except Exception:
+        return len(str(message))
+
+
+def _atomic_message_groups(history: List[Dict]) -> List[Tuple[int, int]]:
+    """Return tool-call-safe [start, end) message groups.
+
+    An assistant tool-call message and all immediately following tool results
+    are kept together. Other messages form one-message groups.
+    """
+    groups: List[Tuple[int, int]] = []
+    i = 0
+    while i < len(history):
+        start = i
+        message = history[i]
+        i += 1
+        if message.get("role") == "assistant" and message.get("tool_calls"):
+            while i < len(history) and history[i].get("role") == "tool":
+                i += 1
+        groups.append((start, i))
+    return groups
+
+
+def safe_tail_start_by_tokens(
+    history: List[Dict],
+    *,
+    token_budget: int = _KEEP_RECENT_TOKEN_BUDGET,
+    min_messages: int = _KEEP_RECENT_MIN_MESSAGES,
+    chars_per_token: float = 3.5,
+) -> int:
+    """Choose a recent verbatim tail by token budget without splitting tools."""
+    if not history:
+        return 0
+    groups = _atomic_message_groups(history)
+    kept_chars = 0
+    kept_messages = 0
+    start = len(history)
+    char_budget = max(1, int(token_budget * chars_per_token))
+    for group_start, group_end in reversed(groups):
+        group_chars = sum(_message_chars(item) for item in history[group_start:group_end])
+        group_messages = group_end - group_start
+        if kept_messages >= min_messages and kept_chars + group_chars > char_budget:
+            break
+        start = group_start
+        kept_chars += group_chars
+        kept_messages += group_messages
+    return start
+
+
+def compaction_threshold(
+    context_window: int,
+    *,
+    output_reserve: Optional[int] = None,
+    safety_margin: Optional[int] = None,
+) -> int:
+    """Return a fixed-reserve auto-compaction threshold.
+
+    Reserves are capped for small windows so a useful input budget remains.
+    """
+    if not context_window or context_window <= 0:
+        return 0
+    output = (
+        _DEFAULT_OUTPUT_RESERVE if output_reserve is None else max(0, int(output_reserve))
+    )
+    safety = (
+        _DEFAULT_TURN_SAFETY_MARGIN
+        if safety_margin is None else max(0, int(safety_margin))
+    )
+    output = min(output, max(1000, int(context_window * 0.45)))
+    safety = min(safety, max(1000, int(context_window * 0.15)))
+    # Always leave at least 35% of the window usable for input.
+    return max(1, context_window - min(output + safety, int(context_window * 0.65)))
+
+
+def compaction_circuit_open(state: Optional[Dict[str, Any]]) -> bool:
+    return bool((state or {}).get("circuit_open"))
+
+
+def record_compaction_result(
+    state: Optional[Dict[str, Any]],
+    *,
+    success: bool,
+    error_type: str = "",
+) -> None:
+    """Update a mutable session-owned compaction circuit state."""
+    if state is None:
+        return
+    state["last_attempt_at"] = time.time()
+    if success:
+        state["consecutive_failures"] = 0
+        state["last_failure_type"] = ""
+        state["circuit_open"] = False
+        state["last_success_at"] = state["last_attempt_at"]
+        return
+    failures = int(state.get("consecutive_failures") or 0) + 1
+    state["consecutive_failures"] = failures
+    state["last_failure_type"] = str(error_type or "compaction_failed")
+    if failures >= _COMPACTION_FAILURE_LIMIT:
+        state["circuit_open"] = True
+
+
+def apply_tool_result_budget(
+    messages: List[Dict[str, Any]],
+    *,
+    per_result_cap: int = _TRIM_TOOL_RESULT_CAP,
+    aggregate_cap: int = _TOOL_RESULT_AGGREGATE_CAP,
+) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    """Apply deterministic per-result and aggregate tool-result budgets.
+
+    Artifact-backed results are safe to shorten because their stable URI remains
+    in the preview. Non-recoverable results are only shortened when the whole
+    payload still exceeds the aggregate cap.
+    """
+    from agent.tools.results import (
+        extract_tool_result_references,
+        truncate_tool_result_to_total_cap,
+    )
+
+    bounded = [dict(message) for message in messages]
+    tool_indexes = [
+        index for index, message in enumerate(bounded)
+        if message.get("role") == "tool" and isinstance(message.get("content"), str)
+    ]
+    trimmed = 0
+    original_chars = sum(len(str(bounded[index].get("content") or "")) for index in tool_indexes)
+    fair_share_cap = max(
+        240,
+        min(per_result_cap, aggregate_cap // max(1, len(tool_indexes))),
+    )
+
+    # First shorten recoverable large results. The truncation helper preserves
+    # artifact URIs, and applying it repeatedly is idempotent.
+    for index in tool_indexes:
+        content = str(bounded[index].get("content") or "")
+        if (
+            len(content) > fair_share_cap
+            and "[result truncated for payload," not in content
+            and extract_tool_result_references(content)
+        ):
+            bounded[index]["content"] = truncate_tool_result_to_total_cap(
+                content, fair_share_cap,
+            )
+            trimmed += 1
+
+    def current_total() -> int:
+        return sum(len(str(bounded[index].get("content") or "")) for index in tool_indexes)
+
+    # If aggregate content is still too large, trim the largest messages first.
+    # Prefer recoverable messages, then use deterministic truncation as a safety
+    # valve for non-recoverable content.
+    if current_total() > aggregate_cap:
+        ordered = sorted(
+            tool_indexes,
+            key=lambda index: (
+                not bool(extract_tool_result_references(str(bounded[index].get("content") or ""))),
+                -len(str(bounded[index].get("content") or "")),
+                index,
+            ),
+        )
+        for index in ordered:
+            if current_total() <= aggregate_cap:
+                break
+            content = str(bounded[index].get("content") or "")
+            excess = current_total() - aggregate_cap
+            target_cap = max(240, min(per_result_cap, len(content) - excess))
+            if len(content) <= target_cap:
+                continue
+            if "[result truncated for payload," in content:
+                continue
+            bounded[index]["content"] = truncate_tool_result_to_total_cap(
+                content, target_cap,
+            )
+            trimmed += 1
+
+    final_chars = current_total()
+    return bounded, {
+        "tool_results": len(tool_indexes),
+        "trimmed": trimmed,
+        "original_chars": original_chars,
+        "final_chars": final_chars,
+    }
+
+
+def estimate_payload_tokens(
+    messages: List[Dict[str, Any]],
+    tools: Optional[List[Dict[str, Any]]] = None,
+    *,
+    chars_per_token: float = 3.5,
+) -> int:
+    """Estimate the exact payload shape that is about to be sent."""
+    chars = sum(_message_chars(message) for message in messages)
+    if tools:
+        try:
+            chars += len(json.dumps(tools, ensure_ascii=False, default=str))
+        except Exception:
+            chars += len(str(tools))
+    return max(1, int(chars / chars_per_token))
+
+
+def build_payload_signature(
+    messages: List[Dict[str, Any]],
+    tools: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Build a compact signature that can prove byte-stable payload prefixes."""
+    message_hashes: List[str] = []
+    message_chars: List[int] = []
+    for message in messages:
+        try:
+            serialized = json.dumps(
+                message,
+                ensure_ascii=False,
+                default=str,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        except Exception:
+            serialized = str(message)
+        message_hashes.append(hashlib.sha256(serialized.encode("utf-8")).hexdigest())
+        message_chars.append(len(serialized))
+    try:
+        tools_text = json.dumps(
+            tools or [],
+            ensure_ascii=False,
+            default=str,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    except Exception:
+        tools_text = str(tools or [])
+    return {
+        "message_hashes": message_hashes,
+        "message_chars": message_chars,
+        "tools_hash": hashlib.sha256(tools_text.encode("utf-8")).hexdigest(),
+        "tools_chars": len(tools_text),
+    }
+
+
+def _signature_extends(current: Dict[str, Any], previous: Dict[str, Any]) -> bool:
+    previous_hashes = list(previous.get("message_hashes") or [])
+    current_hashes = list(current.get("message_hashes") or [])
+    return (
+        bool(previous_hashes)
+        and current.get("tools_hash") == previous.get("tools_hash")
+        and len(current_hashes) >= len(previous_hashes)
+        and current_hashes[:len(previous_hashes)] == previous_hashes
+    )
+
+
+def estimate_payload_tokens_with_anchor(
+    messages: List[Dict[str, Any]],
+    tools: Optional[List[Dict[str, Any]]],
+    state: Optional[Dict[str, Any]],
+    *,
+    chars_per_token: float = 3.5,
+) -> Tuple[int, Dict[str, Any], bool]:
+    """Use exact prior API usage plus only the byte-stable appended delta."""
+    signature = build_payload_signature(messages, tools)
+    anchor = dict((state or {}).get("usage_anchor") or {})
+    if anchor and _signature_extends(signature, anchor):
+        previous_count = len(anchor.get("message_hashes") or [])
+        delta_chars = sum(signature["message_chars"][previous_count:])
+        estimate = int(anchor.get("prompt_tokens") or 0) + int(
+            delta_chars / chars_per_token
+        )
+        if estimate > 0:
+            return estimate, signature, True
+    return (
+        estimate_payload_tokens(
+            messages,
+            tools,
+            chars_per_token=chars_per_token,
+        ),
+        signature,
+        False,
+    )
+
+
+def record_payload_usage(
+    state: Optional[Dict[str, Any]],
+    signature: Dict[str, Any],
+    *,
+    prompt_tokens: int,
+    completion_tokens: int = 0,
+) -> None:
+    """Record a real provider usage anchor and bounded turn-growth samples."""
+    if state is None:
+        return
+    previous = dict(state.get("usage_anchor") or {})
+    prompt_tokens = max(0, int(prompt_tokens or 0))
+    if previous and _signature_extends(signature, previous):
+        growth = prompt_tokens - int(previous.get("prompt_tokens") or 0)
+        if growth >= 0:
+            samples = [
+                max(0, int(value))
+                for value in list(state.get("turn_growth_samples") or [])
+            ]
+            samples.append(growth)
+            state["turn_growth_samples"] = samples[-100:]
+    state["usage_anchor"] = {
+        "message_hashes": list(signature.get("message_hashes") or []),
+        "tools_hash": str(signature.get("tools_hash") or ""),
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": max(0, int(completion_tokens or 0)),
+        "recorded_at": time.time(),
+    }
+
+
+def adaptive_safety_margin(
+    state: Optional[Dict[str, Any]],
+    *,
+    default: int = _DEFAULT_TURN_SAFETY_MARGIN,
+    minimum: int = 2_000,
+    maximum: int = 20_000,
+) -> int:
+    """Return a bounded P95 single-call growth margin with 20% headroom."""
+    samples = sorted(
+        max(0, int(value))
+        for value in list((state or {}).get("turn_growth_samples") or [])
+    )
+    if len(samples) < 5:
+        return max(minimum, min(maximum, int(default)))
+    index = max(0, min(len(samples) - 1, (95 * len(samples) + 99) // 100 - 1))
+    p95 = samples[index]
+    return max(minimum, min(maximum, int(p95 * 1.2)))
+
+
 # ── Core compaction logic ─────────────────────────────────────────────────────
 
 def _call_summarizer(
     client,
     summary_model: str,
     conversation_text: str,
-) -> str:
-    """Call the LLM to produce a summary. Returns summary string or raises."""
+    focus: str = "",
+) -> tuple[str, Any]:
+    """Call the LLM and return summary text plus provider usage."""
     prompt = _COMPACT_PROMPT_TEMPLATE.format(conversation_text=conversation_text)
+    focus = str(focus or "").strip()[:1000]
+    if focus:
+        prompt += (
+            "\n\nAdditional user retention priority:\n"
+            + focus
+            + "\nPreserve this priority when it is supported by the conversation."
+        )
 
     response = client.chat.completions.create(
         model=summary_model,
@@ -238,7 +627,7 @@ def _call_summarizer(
         max_tokens=_SUMMARY_MAX_TOKENS,
         stream=False,
     )
-    return response.choices[0].message.content or ""
+    return response.choices[0].message.content or "", getattr(response, "usage", None)
 
 
 def compact_history(
@@ -246,6 +635,8 @@ def compact_history(
     client,
     model: str,
     summary_model: Optional[str] = None,
+    usage_callback: Optional[Callable[[Any], None]] = None,
+    focus: str = "",
 ) -> Tuple[List[Dict], bool]:
     """
     Summarize the oldest portion of history, keeping the most recent turns verbatim.
@@ -267,9 +658,13 @@ def compact_history(
     if len(history) < _MIN_TURNS_FOR_COMPACT:
         return history, False
 
-    # Split: summarize the head, keep a tool-call-safe verbatim tail.
-    desired_keep = min(_KEEP_RECENT_TURNS, len(history) // 2)
-    tail_start = _safe_tail_start(history, desired_keep)
+    # Split: summarize the head, keep a token-budgeted, tool-call-safe tail.
+    tail_start = safe_tail_start_by_tokens(history)
+    if tail_start == 0:
+        # Small histories can fit entirely inside the tail. Keep the legacy
+        # count fallback so manual compaction can still make progress.
+        desired_keep = min(_KEEP_RECENT_TURNS, len(history) // 2)
+        tail_start = _safe_tail_start(history, desired_keep)
     to_summarize = history[:tail_start]
     to_keep      = history[tail_start:]
 
@@ -278,14 +673,6 @@ def compact_history(
 
     # Strip heavy content and build text
     stripped = [_strip_heavy_content(m) for m in to_summarize]
-    conversation_text = _messages_to_text(stripped)
-
-    # Truncate input if still too large
-    if len(conversation_text) > _MAX_SUMMARY_INPUT_CHARS:
-        conversation_text = (
-            conversation_text[:_MAX_SUMMARY_INPUT_CHARS]
-            + "\n…[earlier context truncated]"
-        )
 
     # Use the session model for summarization unless the caller supplied a
     # lighter one. Never hard-code a model id — a custom provider/endpoint may
@@ -293,11 +680,41 @@ def compact_history(
     use_model = summary_model or model
 
     t0 = time.monotonic()
-    try:
-        summary = _call_summarizer(client, use_model, conversation_text)
-    except Exception as exc:
-        log.warning("[compaction] summarization failed: %s — keeping history as-is", exc)
-        return history, False
+    summary = ""
+    summary_input = stripped
+    for attempt in range(3):
+        conversation_text = _bounded_summary_text(summary_input)
+        try:
+            summary, usage = _call_summarizer(
+                client, use_model, conversation_text, focus=focus,
+            )
+            if usage is not None and usage_callback is not None:
+                usage_callback(usage)
+            break
+        except Exception as exc:
+            from agent.retry import is_context_length_error
+
+            if not is_context_length_error(exc) or attempt >= 2:
+                log.warning(
+                    "[compaction] summarization failed after %d attempt(s): %s — "
+                    "keeping history as-is",
+                    attempt + 1, exc,
+                )
+                return history, False
+            groups = _atomic_message_groups(summary_input)
+            if len(groups) <= 1:
+                log.warning(
+                    "[compaction] summary input still too long with one atomic group"
+                )
+                return history, False
+            drop_groups = max(1, (len(groups) + 4) // 5)
+            cut_index = groups[min(drop_groups, len(groups) - 1)][0]
+            log.warning(
+                "[compaction] summary prompt too long; dropping %d oldest atomic "
+                "group(s) and retrying",
+                drop_groups,
+            )
+            summary_input = summary_input[cut_index:]
 
     if not summary.strip():
         log.warning("[compaction] summarizer returned empty output — keeping history as-is")
@@ -371,8 +788,11 @@ def should_trim_history(
     last_prompt_tokens: int,
     context_window: int,
     chars_per_token: float = 3.5,
+    *,
+    output_reserve: Optional[int] = None,
+    safety_margin: Optional[int] = None,
 ) -> bool:
-    """Return True when the context is in the 60–70% zone (trim range).
+    """Return True shortly before the fixed-reserve compaction threshold.
 
     Used to gate trim_oversized_tool_results() — avoids unnecessary iteration
     when the context is comfortably below the trim threshold.
@@ -382,8 +802,13 @@ def should_trim_history(
     if not context_window or context_window <= 0:
         return False
 
-    lo = context_window * _TRIM_TRIGGER_RATIO
-    hi = context_window * _COMPACT_TRIGGER_RATIO
+    hi = compaction_threshold(
+        context_window,
+        output_reserve=output_reserve,
+        safety_margin=safety_margin,
+    )
+    trim_band = max(1000, int(safety_margin or _DEFAULT_TURN_SAFETY_MARGIN))
+    lo = max(1, hi - trim_band)
 
     # Signal 1: real token usage from previous turn
     if last_prompt_tokens:
@@ -400,12 +825,14 @@ def should_compact_history(
     last_prompt_tokens: int,
     context_window: int,
     chars_per_token: float = 3.5,
+    *,
+    output_reserve: Optional[int] = None,
+    safety_margin: Optional[int] = None,
 ) -> bool:
     """
     Decide whether to run semantic compaction.
 
-    Triggers on EITHER of two signals reaching _COMPACT_TRIGGER_RATIO (80%) of
-    the context window:
+    Triggers on EITHER of two signals reaching the fixed-reserve threshold:
 
       1. last_prompt_tokens — the real prompt-token count the LLM reported on
          the previous turn (same measure the frontend context bar shows).
@@ -424,7 +851,11 @@ def should_compact_history(
     if not context_window or context_window <= 0:
         return False
 
-    threshold = context_window * _COMPACT_TRIGGER_RATIO
+    threshold = compaction_threshold(
+        context_window,
+        output_reserve=output_reserve,
+        safety_margin=safety_margin,
+    )
 
     # Signal 1: real usage from the previous turn.
     if last_prompt_tokens and last_prompt_tokens >= threshold:

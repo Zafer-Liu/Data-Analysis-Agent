@@ -1,10 +1,12 @@
 """Blueprint: data source management — upload Excel/CSV, connect SQL DB."""
+import json
 import logging
 import traceback
 import uuid
 import os
 import re
 import threading
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 
@@ -14,6 +16,7 @@ from werkzeug.utils import secure_filename
 from .state import session_manager, datasource_config_manager
 from data.connector import ExcelDataSource, CSVDataSource, SQLDataSource, GoogleSheetsDataSource, HTTPAPIDataSource
 from data.sources.excel import excel_requires_job, parse_excel_job
+from data.sources.workspace_persistent import WorkspacePersistentSource
 from infrastructure.paths import data_path
 
 log = logging.getLogger(__name__)
@@ -22,8 +25,10 @@ bp = Blueprint("datasource", __name__)
 
 # Source mode retains <project>/uploads; frozen/override mode uses user data.
 UPLOAD_DIR = data_path("uploads")
+WAREHOUSE_SAVE_DIR = data_path("outputs", "DataWarehouse")
 
 UPLOAD_DIR.mkdir(exist_ok=True)
+WAREHOUSE_SAVE_DIR.mkdir(parents=True, exist_ok=True)
 PARSED_EXCEL_DIR = UPLOAD_DIR / ".parsed_excel"
 PARSED_EXCEL_DIR.mkdir(exist_ok=True)
 ALLOWED_EXTS = {".xlsx", ".xls", ".csv"}
@@ -100,6 +105,191 @@ def _encode_db_password(conn_str: str) -> str:
     return f"{prefix}:{encoded}@{rest}"
 
 
+def _safe_stem(name: str) -> str:
+    """Turn an arbitrary warehouse name into a filesystem-safe stem."""
+    name = re.sub(r'[\\/:*?"<>|]', "_", name).strip()
+    return name or "data_warehouse"
+
+
+def _warehouse_file(filename: str) -> Path:
+    return WAREHOUSE_SAVE_DIR / Path(filename).name
+
+
+def _serialize_source(entry: dict, active_ids: set[str]) -> dict | None:
+    source = entry.get("source")
+    source_id = str(entry.get("id") or "")
+    base = {
+        "name": getattr(source, "name", "未命名"),
+        "active": source_id in active_ids,
+    }
+
+    if isinstance(source, CSVDataSource):
+        return {**base, "kind": "csv", "file_path": getattr(source, "file_path", "")}
+    if isinstance(source, ExcelDataSource):
+        payload = {**base, "kind": "excel", "file_path": getattr(source, "file_path", "")}
+        db_path = getattr(source, "_db_path", None)
+        if db_path:
+            payload["db_path"] = str(db_path)
+        return payload
+    if isinstance(source, SQLDataSource):
+        try:
+            conn = source._engine.url.render_as_string(hide_password=False)
+        except Exception:
+            conn = ""
+        return {
+            **base,
+            "kind": "sql",
+            "connection_string": conn,
+            "analysis_tables": source.get_analysis_tables(),
+        }
+    if isinstance(source, GoogleSheetsDataSource):
+        creds = getattr(source, "_creds_dict", None)
+        spreadsheet = getattr(source, "_spreadsheet_ref", "")
+        if not creds or not spreadsheet:
+            return None
+        return {**base, "kind": "gsheets", "creds_dict": creds, "spreadsheet": spreadsheet}
+    if isinstance(source, HTTPAPIDataSource):
+        return {
+            **base,
+            "kind": "http",
+            "url": getattr(source, "_url", ""),
+            "auth_type": getattr(source, "_auth_type", "none"),
+            "auth_value": getattr(source, "_auth_value", ""),
+        }
+    if isinstance(source, WorkspacePersistentSource):
+        return {
+            **base,
+            "kind": "workspace_persistent",
+            "db_path": str(getattr(source, "_db_path", "")),
+        }
+    return None
+
+
+def _restore_source(info: dict):
+    kind = str(info.get("kind") or "")
+    name = str(info.get("name") or "").strip()
+    if kind == "csv":
+        file_path = str(info.get("file_path") or "")
+        if not Path(file_path).is_file():
+            raise FileNotFoundError(file_path or "CSV 文件不存在")
+        return CSVDataSource(file_path, name or Path(file_path).name)
+    if kind == "excel":
+        file_path = str(info.get("file_path") or "")
+        if not Path(file_path).is_file():
+            raise FileNotFoundError(file_path or "Excel 文件不存在")
+        db_path = str(info.get("db_path") or "")
+        if db_path and Path(db_path).is_file():
+            return ExcelDataSource.from_database(file_path, name or Path(file_path).name, db_path)
+        return ExcelDataSource(file_path, name or Path(file_path).name)
+    if kind == "sql":
+        conn = str(info.get("connection_string") or "")
+        if not conn:
+            raise ValueError("SQL 连接字符串为空")
+        source = SQLDataSource(conn, name)
+        tables = info.get("analysis_tables") or []
+        if tables:
+            source.set_analysis_tables([str(item) for item in tables])
+        return source
+    if kind == "gsheets":
+        creds = info.get("creds_dict")
+        spreadsheet = str(info.get("spreadsheet") or "")
+        if not isinstance(creds, dict) or not spreadsheet:
+            raise ValueError("Google Sheets 凭证或表格地址为空")
+        return GoogleSheetsDataSource(creds, spreadsheet, name)
+    if kind == "http":
+        url = str(info.get("url") or "")
+        if not url:
+            raise ValueError("API URL 为空")
+        return HTTPAPIDataSource(
+            url,
+            str(info.get("auth_type") or "none"),
+            str(info.get("auth_value") or ""),
+            name,
+        )
+    if kind == "workspace_persistent":
+        db_path = str(info.get("db_path") or "")
+        if not Path(db_path).is_file():
+            raise FileNotFoundError(db_path or "工作目录 DuckDB 不存在")
+        return WorkspacePersistentSource(db_path, name or "工作目录")
+    raise ValueError(f"不支持的数据源类型：{kind or 'unknown'}")
+
+
+def _list_warehouses() -> list[dict]:
+    files = sorted(
+        WAREHOUSE_SAVE_DIR.glob("*.json"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    result = []
+    for path in files:
+        try:
+            meta = json.loads(path.read_text(encoding="utf-8"))
+            sources = meta.get("sources") or []
+            result.append({
+                "filename": path.name,
+                "name": meta.get("name") or path.stem,
+                "saved_at": meta.get("saved_at") or "",
+                "source_count": len(sources),
+                "active_count": sum(1 for item in sources if item.get("active")),
+                "source_names": [str(item.get("name") or "") for item in sources[:3]],
+            })
+        except Exception:
+            continue
+    return result
+
+
+def _save_current_warehouse(sess, sid: str, name: str, *, autosaved: bool = False) -> dict:
+    active_ids = set(sess._active_ids)
+    sources = []
+    skipped = []
+    for entry in sess._sources:
+        payload = _serialize_source(entry, active_ids)
+        if payload is None:
+            skipped.append(getattr(entry.get("source"), "name", "未命名"))
+            continue
+        sources.append(payload)
+    if not sources:
+        raise ValueError("当前数据源无法保存为数据仓库")
+
+    saved_at = datetime.now().isoformat(timespec="seconds")
+    payload = {
+        "name": name,
+        "saved_at": saved_at,
+        "session_id": sid,
+        "autosaved": autosaved,
+        "sources": sources,
+        "skipped_sources": skipped,
+    }
+    path = WAREHOUSE_SAVE_DIR / f"{_safe_stem(name)}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    log.info(
+        "[warehouse] saved sid=%s name=%r file=%s sources=%d autosaved=%s",
+        sid, name, path.name, len(sources), autosaved,
+    )
+    return {
+        "filename": path.name,
+        "name": name,
+        "saved_at": saved_at,
+        "source_count": len(sources),
+        "skipped_sources": skipped,
+        "autosaved": autosaved,
+    }
+
+
+def _autosave_uploaded_warehouse(sess, sid: str, source_names: list[str]) -> dict | None:
+    if not source_names:
+        return None
+    label = "、".join(source_names[:2])
+    if len(source_names) > 2:
+        label += f" 等{len(source_names)}个文件"
+    name = f"上传数据_{label}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    try:
+        return _save_current_warehouse(sess, sid, name, autosaved=True)
+    except Exception as exc:
+        log.warning("[warehouse] auto-save uploaded sources failed sid=%s: %s", sid, exc)
+        return None
+
+
 @bp.post("/api/session/<sid>/upload")
 def upload_file(sid: str):
     """Upload one or more files; each is appended as a new data source."""
@@ -154,6 +344,10 @@ def upload_file(sid: str):
     if not added and not pending_jobs:
         return jsonify({"error": "; ".join(errors) or "文件解析失败"}), 400
 
+    warehouse_autosave = (
+        _autosave_uploaded_warehouse(sess, sid, [item["source_name"] for item in added])
+        if added else None
+    )
     payload = {
         "ok": True,
         "added": added,
@@ -163,6 +357,7 @@ def upload_file(sid: str):
         "source_name": added[0]["source_name"] if added else pending_jobs[0]["source_name"],
         "schema_preview": added[0]["schema_preview"] if added else "",
         "errors": errors,
+        "warehouse_autosave": warehouse_autosave,
     }
     return jsonify(payload), (202 if pending_jobs else 200)
 
@@ -214,12 +409,14 @@ def finalize_upload_job(sid: str, jid: str):
         "source_name": source.name,
         "schema_preview": schema,
     }]
+    warehouse_autosave = _autosave_uploaded_warehouse(sess, sid, [source.name])
     return jsonify({
         "ok": True,
         "added": added,
         "sources": sess.list_sources(),
         "source_name": source.name,
         "schema_preview": schema,
+        "warehouse_autosave": warehouse_autosave,
     })
 
 
@@ -262,6 +459,86 @@ def list_sources(sid: str):
     if not sess:
         return jsonify({"sources": []})
     return jsonify({"sources": sess.list_sources()})
+
+
+@bp.get("/api/data-warehouses")
+def list_data_warehouses():
+    """List saved data warehouse snapshots."""
+    return jsonify(_list_warehouses())
+
+
+@bp.post("/api/session/<sid>/data-warehouse/save")
+def save_data_warehouse(sid: str):
+    """Save the current session's connected data sources as a reusable warehouse."""
+    sess = session_manager.get(sid)
+    if not sess or not sess._sources:
+        return jsonify({"error": "当前没有可保存的数据源"}), 400
+
+    name = (request.json or {}).get("name", "").strip()
+    if not name:
+        name = datetime.now().strftime("数据仓库_%Y%m%d_%H%M%S")
+
+    try:
+        saved = _save_current_warehouse(sess, sid, name)
+    except ValueError:
+        return jsonify({"error": "当前数据源无法保存为数据仓库"}), 400
+    return jsonify({
+        "ok": True,
+        **saved,
+    })
+
+
+@bp.post("/api/session/<sid>/data-warehouse/load")
+def load_data_warehouse(sid: str):
+    """Replace current session data sources with a saved warehouse snapshot."""
+    filename = (request.json or {}).get("filename", "").strip()
+    if not filename:
+        return jsonify({"error": "未指定数据仓库文件"}), 400
+    path = _warehouse_file(filename)
+    if not path.exists() or path.suffix != ".json":
+        return jsonify({"error": "数据仓库不存在"}), 404
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return jsonify({"error": f"读取失败: {exc}"}), 500
+
+    sess = session_manager.get_or_create(sid)
+    sess.data_source = None
+    restored = []
+    errors = []
+    for info in data.get("sources") or []:
+        try:
+            source = _restore_source(info)
+            source_id = sess.add_source(source)
+            restored.append((source_id, bool(info.get("active", True))))
+        except Exception as exc:
+            errors.append(f"{info.get('name') or info.get('kind')}: {exc}")
+
+    if not restored:
+        return jsonify({"error": "数据仓库中的数据源均恢复失败", "errors": errors}), 400
+
+    sess._active_ids = [source_id for source_id, active in restored if active]
+    sess._combined_schema_cache = None
+    sess._invalidate_merged_source()
+    log.info(
+        "[warehouse] loaded sid=%s file=%s restored=%d errors=%d",
+        sid, path.name, len(restored), len(errors),
+    )
+    return jsonify({
+        "ok": True,
+        "name": data.get("name") or path.stem,
+        "sources": sess.list_sources(),
+        "errors": errors,
+    })
+
+
+@bp.delete("/api/data-warehouses/<filename>")
+def delete_data_warehouse(filename: str):
+    path = _warehouse_file(filename)
+    if not path.exists() or path.suffix != ".json":
+        return jsonify({"error": "数据仓库不存在"}), 404
+    path.unlink()
+    return jsonify({"ok": True})
 
 
 @bp.post("/api/session/<sid>/sources/<source_id>/analysis-tables")

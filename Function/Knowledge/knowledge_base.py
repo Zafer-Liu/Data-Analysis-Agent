@@ -2,8 +2,10 @@
 """
 KnowledgeBase — SQLite-backed store for business knowledge.
 
-DB location: <data_root>/uploads/knowledge/knowledge.db
-  — relative to the project root so the path is portable across machines.
+DB location is scope-dependent:
+  - mounted Workspace: <workspace>/.zhixi/knowledge/knowledge.db
+  - desktop default user: <data_root>/uploads/knowledge/knowledge.db
+  - named user: <data_root>/uploads/knowledge/users/<user-hash>/knowledge.db
 
 Three tables:
   metrics        — canonical metric definitions (DAU, LTV, …)
@@ -11,8 +13,8 @@ Three tables:
   context_notes  — free-form background knowledge
 
 Every table has an `enabled` column (1 = active, 0 = disabled).
-Only enabled records are injected into the Agent's System Prompt
-and returned by query_knowledge.
+Only enabled records are returned by query_knowledge. Knowledge content is
+never injected wholesale into the Agent's System Prompt.
 """
 import logging
 log = logging.getLogger(__name__)
@@ -30,6 +32,38 @@ from infrastructure.paths import data_path
 # Walk up from this file: Function/Knowledge/ → Function/ → project root
 _KB_DIR  = data_path("uploads", "knowledge")
 _DB_PATH = _KB_DIR / "knowledge.db"
+_DEFAULT_USER_ID = "local-default"
+
+
+def normalize_user_id(user_id: str | None) -> str:
+    """Return a bounded logical user key supplied by the trusted app layer."""
+    value = str(user_id or "").strip()
+    return value[:200] or _DEFAULT_USER_ID
+
+
+def knowledge_scope_dir(
+    *,
+    workspace_id: str = "",
+    user_id: str = "",
+    workspace_root: Path | None = None,
+) -> Path:
+    """Resolve an isolated storage directory without mixing scope contents."""
+    if workspace_id:
+        root = Path(workspace_root).resolve() if workspace_root else None
+        if root is None:
+            from data.workspace import workspace_manager
+            resolved = workspace_manager.root_for_workspace(str(workspace_id))
+            root = Path(resolved).resolve() if resolved else None
+        if root is None:
+            raise ValueError("Knowledge Workspace is not available")
+        return root / ".zhixi" / "knowledge"
+
+    owner = normalize_user_id(user_id)
+    # Preserve the existing desktop user's database and uploaded files.
+    if owner == _DEFAULT_USER_ID:
+        return _KB_DIR
+    owner_hash = hashlib.sha256(owner.encode("utf-8")).hexdigest()[:24]
+    return _KB_DIR / "users" / owner_hash
 
 
 def _env_float(name: str, default: float) -> float:
@@ -242,9 +276,25 @@ def _chunk_text(text: str, max_chars: int = 1200, overlap: int = 160) -> list[st
 class KnowledgeBase:
     """Thread-safe single-instance knowledge store."""
 
-    def __init__(self, db_path: Path | None = None):
-        _ensure_dir()
-        self._path = db_path or _DB_PATH
+    def __init__(
+        self,
+        db_path: Path | None = None,
+        *,
+        workspace_id: str = "",
+        user_id: str = "",
+        workspace_root: Path | None = None,
+    ):
+        scope_dir = (
+            Path(db_path).parent
+            if db_path is not None
+            else knowledge_scope_dir(
+                workspace_id=workspace_id,
+                user_id=user_id,
+                workspace_root=workspace_root,
+            )
+        )
+        scope_dir.mkdir(parents=True, exist_ok=True)
+        self._path = Path(db_path) if db_path is not None else scope_dir / "knowledge.db"
         self._conn = sqlite3.connect(str(self._path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -281,12 +331,13 @@ class KnowledgeBase:
                 "INSERT INTO rag_chunks_fts(rag_chunks_fts) VALUES('rebuild')")
         self._conn.commit()
 
-    # ── enabled summary (for System Prompt injection) ─────────────────────────
+    # ── enabled summary (admin/debug display only; never prompt injection) ─────
 
     def get_enabled_summary(self) -> str:
-        """Return a compact text block of all enabled records for injection
-        into the LLM System Prompt.  Only name+definition for metrics
-        (sql_template and notes are fetched on demand via query_knowledge).
+        """Return an administrative summary of enabled records.
+
+        This method must not be used to build an LLM prompt. Runtime access uses
+        ``search()`` so only relevant Top-K entries cross the model boundary.
         """
         metrics = self._rows(self._conn.execute(
             "SELECT name, alias, definition FROM metrics WHERE enabled=1 ORDER BY name"
@@ -634,8 +685,9 @@ class KnowledgeBase:
     # ── search (only enabled records) ─────────────────────────────────────────
 
     def search(self, question: str, limit: int = 5) -> dict[str, list[dict]]:
-        """Hybrid RAG search across enabled structured knowledge and chunks."""
+        """Hybrid RAG search with a global Top-K cap across all result types."""
         q = question.strip()
+        limit = max(1, min(int(limit or 5), 10))
 
         # Vector fallback for structured records.  This complements SQLite FTS,
         # especially for Chinese wording variations where tokenization is weak.
@@ -683,12 +735,24 @@ class KnowledgeBase:
 
         chunk_rows = self._search_chunks(q, limit=limit, min_score=MIN_CHUNK_SCORE)
 
-        return {
-            "metrics": metric_rows[:limit],
-            "rules": rule_rows,
-            "notes": note_rows[:limit],
-            "documents": chunk_rows,
+        ranked: list[tuple[float, str, dict]] = []
+        for kind, rows in (
+            ("metrics", metric_rows),
+            ("rules", rule_rows),
+            ("notes", note_rows),
+            ("documents", chunk_rows),
+        ):
+            for row in rows:
+                score = float(row.get("score", row.get("vector_score", 0.0)) or 0.0)
+                ranked.append((score, kind, row))
+        ranked.sort(key=lambda item: item[0], reverse=True)
+
+        result: dict[str, list[dict]] = {
+            "metrics": [], "rules": [], "notes": [], "documents": [],
         }
+        for _, kind, row in ranked[:limit]:
+            result[kind].append(row)
+        return result
 
     # ── bulk insert ───────────────────────────────────────────────────────────
 

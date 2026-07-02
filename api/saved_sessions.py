@@ -104,6 +104,24 @@ def _recovery_state(sess) -> dict:
             item for item in sess.list_sources() if item.get("active")
         ],
         "turn_activations": list(getattr(sess, "turn_activations", []))[-100:],
+        "discovered_tools": list(getattr(sess, "discovered_tools", []))[-100:],
+        "discovered_mcp_tools": list(
+            getattr(sess, "discovered_mcp_tools", [])
+        )[-10:],
+        "mcp_tool_last_used": dict(
+            getattr(sess, "mcp_tool_last_used", {}) or {}
+        ),
+        "mcp_catalog_version": str(
+            getattr(sess, "mcp_catalog_version", "") or ""
+        ),
+        "compaction_state": dict(getattr(sess, "compaction_state", {}) or {}),
+        "usage_breakdowns": list(getattr(sess, "usage_breakdowns", []))[-100:],
+        "total_cached_input_tokens": int(
+            getattr(sess, "total_cached_input_tokens", 0) or 0
+        ),
+        "total_cache_write_tokens": int(
+            getattr(sess, "total_cache_write_tokens", 0) or 0
+        ),
     }
 
 
@@ -331,6 +349,15 @@ def load_session(sid: str):
     sess.chart_ids = _collect_chart_ids(sess.history)
 
     recovery = data.get("recovery_state") or {}
+    sess.usage_breakdowns = [
+        item for item in recovery.get("usage_breakdowns", []) if isinstance(item, dict)
+    ][-100:]
+    sess.total_cached_input_tokens = int(
+        recovery.get("total_cached_input_tokens") or 0
+    )
+    sess.total_cache_write_tokens = int(
+        recovery.get("total_cache_write_tokens") or 0
+    )
     sess.recent_sql = [str(item)[:4000] for item in recovery.get("recent_sql", [])][-5:]
     sess.recent_artifacts = []
     for artifact in recovery.get("recent_artifacts", [])[-20:]:
@@ -344,6 +371,27 @@ def load_session(sid: str):
         dict(item) for item in recovery.get("turn_activations", [])[-100:]
         if isinstance(item, dict)
     ]
+    sess.discovered_tools = [
+        str(item) for item in recovery.get("discovered_tools", [])[-100:]
+        if str(item or "").strip()
+    ]
+    sess.discovered_mcp_tools = [
+        str(item) for item in recovery.get("discovered_mcp_tools", [])
+        if str(item).startswith("mcp__")
+    ][-10:]
+    sess.mcp_tool_last_used = {
+        str(name): float(value or 0)
+        for name, value in dict(recovery.get("mcp_tool_last_used") or {}).items()
+        if str(name) in sess.discovered_mcp_tools
+    }
+    sess.mcp_catalog_version = str(recovery.get("mcp_catalog_version") or "")
+    sess.compaction_state = dict(recovery.get("compaction_state") or {
+        "consecutive_failures": 0,
+        "last_failure_type": "",
+        "circuit_open": False,
+        "last_attempt_at": 0.0,
+        "last_success_at": 0.0,
+    })
 
     # Restore the workspace first. Its persistent DuckDB and cache contain the
     # active tables and B6 result artifacts referenced by the saved session.
@@ -359,6 +407,7 @@ def load_session(sid: str):
             sid,
             str(workspace_info.get("workdir")),
             permission=str(workspace_info.get("permission") or "read_only"),
+            remember=True,
         )
         if ok and runtime is not None:
             saved_workspace_id = str(workspace_info.get("workspace_id") or "")

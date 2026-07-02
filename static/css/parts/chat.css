@@ -1,6 +1,6 @@
 /* ── Messages ─────────────────────────────────────────────────── */
 .messages {
-  flex: 1; overflow-y: auto;
+  flex: 1; overflow-y: auto; overflow-x: hidden;
   padding: 18px 24px 12px;
   display: flex; flex-direction: column;
   gap: 14px;
@@ -134,6 +134,23 @@
 .msg.user .msg-bubble:hover::before {
   opacity: 1;
 }
+.msg.user.msg-append .msg-avatar {
+  background: color-mix(in srgb, var(--color-primary) 16%, var(--color-surface));
+  color: var(--color-primary);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-primary) 28%, transparent);
+}
+.msg.user.msg-append .msg-bubble {
+  background: color-mix(in srgb, var(--color-primary) 10%, var(--color-surface));
+  color: color-mix(in srgb, var(--color-primary) 72%, var(--color-text));
+  border: 1px solid color-mix(in srgb, var(--color-primary) 28%, var(--color-border));
+  box-shadow: 0 1px 3px rgba(59, 130, 246, .08);
+}
+.msg.user.msg-append .msg-bubble::before {
+  display: none;
+}
+.msg.user.msg-append .msg-bubble:hover {
+  box-shadow: 0 2px 8px rgba(59, 130, 246, .14);
+}
 [data-theme="dark"] .msg.user .msg-bubble {
   background: linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%);
   box-shadow: 0 2px 8px rgba(59, 130, 246, .4),
@@ -144,6 +161,16 @@
   box-shadow: 0 4px 16px rgba(59, 130, 246, .5),
               0 2px 6px rgba(139, 92, 246, .4),
               inset 0 1px 0 rgba(255, 255, 255, .2);
+}
+[data-theme="dark"] .msg.user.msg-append .msg-avatar {
+  background: color-mix(in srgb, var(--color-primary) 22%, var(--color-surface));
+  color: #bfdbfe;
+}
+[data-theme="dark"] .msg.user.msg-append .msg-bubble {
+  background: color-mix(in srgb, var(--color-primary) 18%, var(--color-surface));
+  color: #bfdbfe;
+  border-color: color-mix(in srgb, var(--color-primary) 38%, var(--color-border));
+  box-shadow: 0 1px 4px rgba(96, 165, 250, .12);
 }
 
 /* ── Assistant bubble (report-card style) ─────────────────────────
@@ -697,6 +724,29 @@ details.tool-audit {
   40%  { transform: rotate(200deg) scale(1.25); opacity: .7; }
   100% { transform: rotate(360deg) scale(1);    opacity: 1; }
 }
+.compaction-progress-body {
+  flex: 1;
+  min-width: 0;
+}
+.compaction-progress-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+.compaction-progress {
+  flex: 1;
+  min-width: 140px;
+  margin-top: 0;
+  background: rgba(139, 92, 246, .14);
+}
+.compaction-progress .job-progress-fill {
+  background: linear-gradient(90deg, #8b5cf6, #6366f1);
+}
+.compaction-progress-value {
+  color: var(--tool-row-text);
+  font-size: var(--fs-xs);
+}
 
 .tool-step-compaction.done-compaction {
   background: var(--tool-row-bg);
@@ -735,12 +785,21 @@ details.tool-audit {
   border-left: 3px solid var(--color-primary-tint);
   border-radius: var(--radius-md);
   overflow: hidden;
+  padding: 12px 14px 14px 20px;
   box-shadow: var(--shadow-xs);
   transition: border-color var(--t-fast), box-shadow var(--t-fast);
 }
 .chart-frame:hover {
   border-left-color: var(--color-primary);
   box-shadow: var(--shadow-sm);
+}
+.chart-frame-title {
+  min-height: 28px;
+  padding: 0 52px 8px 0;
+  color: var(--color-text);
+  font-size: var(--fs-md);
+  font-weight: 650;
+  line-height: 1.4;
 }
 [data-theme="dark"] .chart-frame {
   background: var(--color-surface);
@@ -752,9 +811,11 @@ details.tool-audit {
 }
 .chart-frame iframe {
   width: 100%; height: 420px; border: none; display: block;
+  border-radius: calc(var(--radius-md) - 2px);
+  background: #fff;
 }
 .chart-expand-btn {
-  position: absolute; top: 8px; right: 8px; z-index: 10;
+  position: absolute; top: 16px; right: 18px; z-index: 10;
   background: rgba(255,255,255,.85); backdrop-filter: blur(6px);
   border: 1px solid var(--color-border); border-radius: var(--radius-sm);
   padding: 4px 9px; font-size: var(--fs-sm); color: var(--color-text-soft);
@@ -852,7 +913,23 @@ details.tool-audit {
 .msg-bubble hr { border: none; border-top: 1px solid var(--color-border); margin: 8px 0; }
 .msg-bubble a { color: var(--color-primary); text-decoration: none; }
 .msg-bubble a:hover { text-decoration: underline; }
-.stream-error { color: #ef4444; }
+.stream-error { color: var(--color-danger); display: block; margin-bottom: 8px; }
+.stream-retry-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  margin-top: 4px;
+  padding: 5px 12px;
+  font-size: var(--fs-sm); font-weight: 600;
+  color: var(--color-danger-text);
+  background: var(--color-danger-soft);
+  border: 1px solid var(--color-danger-tint);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background .15s, border-color .15s;
+}
+.stream-retry-btn:hover {
+  background: var(--color-danger-tint);
+  border-color: var(--color-danger);
+}
 
 /* User-bubble override — code/links on blue must be readable */
 .msg.user .msg-bubble code {
@@ -989,25 +1066,6 @@ details.tool-audit {
 .reasoning-body.open { display: block; }
 
 /* ── Token usage bar ──────────────────────────────────────────── */
-/* ── Input area ─────────────────────────────────────────────────
-   Card-style composer:
-     ┌────────────────────────────────────────────────────────┐
-     │ chip chip chip chip chip                          (scrolls →)  ← hint chips
-     │ ┌────────────────────────────────────────────────────┐ │
-     │ │ [/cmd ×]                              [▮▮▮  5.2K] │ │  ← cmd badge + token pill
-     │ │                                                    │ │
-     │ │  textarea (auto-grow, max 200px)                   │ │
-     │ │                                                    │ │
-     │ │  ⏎ Enter 发送 · Shift+⏎ 换行          [ ↑ send ]  │ │  ← keyboard hint + send
-     │ └────────────────────────────────────────────────────┘ │
-     └────────────────────────────────────────────────────────┘
-*/
-.input-area {
-  background: var(--color-surface);
-  border-top: 1px solid var(--color-border);
-  padding: 8px 22px 12px;
-  position: relative;
-}
 
 /* ── Top bar above the composer: hint chips + token pill ────────── */
 .input-topbar {
@@ -1167,7 +1225,7 @@ details.tool-audit {
 #msg-input::-webkit-scrollbar-thumb {
   background: var(--color-border); border-radius: 3px;
 }
-#msg-input::-webkit-scrollbar-thumb:hover { background: #cbd5e1; }
+#msg-input::-webkit-scrollbar-thumb:hover { background: var(--color-text-dim); }
 
 /* ── Send button (round, sits in bottom-right cell of input-card grid) ── */
 .send-btn {
@@ -1176,13 +1234,13 @@ details.tool-audit {
   width: 36px; height: 36px;
   margin-bottom: 1px;
   border: none; border-radius: 50%;
-  background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+  background: linear-gradient(135deg, var(--send-btn-grad-from) 0%, var(--send-btn-grad-to) 100%);
   color: #fff;
   cursor: pointer; flex-shrink: 0;
   display: inline-flex; align-items: center; justify-content: center;
   box-shadow: 0 1px 0 rgba(255,255,255,.2) inset,
-              0 2px 8px rgba(37, 99, 235, .4),
-              0 0 0 0 rgba(59, 130, 246, 0);
+              0 2px 8px var(--send-btn-glow),
+              0 0 0 0 var(--send-btn-ring);
   transition: all .2s cubic-bezier(.2, .8, .2, 1);
   position: relative;
   overflow: visible;
@@ -1193,17 +1251,17 @@ details.tool-audit {
   position: absolute;
   inset: -4px;
   border-radius: 50%;
-  background: radial-gradient(circle, rgba(59, 130, 246, .4) 0%, transparent 70%);
+  background: radial-gradient(circle, color-mix(in srgb, var(--color-primary) 40%, transparent) 0%, transparent 70%);
   opacity: 0;
   transition: opacity .3s ease;
   pointer-events: none;
 }
 .send-btn svg { width: 18px; height: 18px; display: block; position: relative; z-index: 1; }
 .send-btn:hover {
-  background: linear-gradient(135deg, #4f8df8 0%, #3b82f6 100%);
+  background: linear-gradient(135deg, var(--send-btn-grad-hover-from) 0%, var(--send-btn-grad-hover-to) 100%);
   box-shadow: 0 1px 0 rgba(255,255,255,.25) inset,
-              0 4px 16px rgba(37, 99, 235, .5),
-              0 0 0 4px rgba(59, 130, 246, .15);
+              0 4px 16px var(--send-btn-glow),
+              0 0 0 4px var(--send-btn-ring);
   transform: translateY(-2px) scale(1.05);
 }
 .send-btn:not(.stopping):hover::before { opacity: 1; }
@@ -1240,10 +1298,10 @@ details.tool-audit {
   z-index: 1;
 }
 [data-theme="dark"] .send-btn {
-  background: linear-gradient(135deg, #3b82f6 0%, #6366f1 100%);
+  background: linear-gradient(135deg, var(--send-btn-dark-from) 0%, var(--send-btn-dark-to) 100%);
 }
 [data-theme="dark"] .send-btn:hover {
-  background: linear-gradient(135deg, #60a5fa 0%, #818cf8 100%);
+  background: linear-gradient(135deg, var(--send-btn-dark-hover-from) 0%, var(--send-btn-dark-hover-to) 100%);
 }
 
 /* ── Composer v2: queue header + writing canvas + capability toolbar ── */
@@ -1251,6 +1309,7 @@ details.tool-audit {
   border-top: 0;
   padding: 10px clamp(14px, 3vw, 34px) 16px;
   background: linear-gradient(180deg, transparent 0%, var(--color-surface) 26%);
+  position: relative;
 }
 .composer-shell {
   width: min(1180px, 100%);
@@ -1302,6 +1361,7 @@ details.tool-audit {
 .composer-queue-delete:hover { color: var(--color-danger); }
 
 .composer-shell .input-card {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 0;
@@ -1328,7 +1388,8 @@ details.tool-audit {
 [data-theme="dark"] .skill-badge { color: #c4b5fd; }
 
 /* Independent Skill picker; never shares slash-command DOM or state. */
-.skill-picker {
+.skill-picker,
+.model-picker {
   position: absolute;
   z-index: 40;
   left: clamp(14px, 3vw, 34px);
@@ -1341,7 +1402,13 @@ details.tool-audit {
   background: var(--color-surface);
   box-shadow: 0 18px 48px rgba(15, 23, 42, .16);
 }
-.skill-picker.open { display: block; }
+.model-picker {
+  position: fixed;
+  left: 16px;
+  bottom: auto;
+  width: min(460px, calc(100vw - 24px));
+}
+.skill-picker.open, .model-picker.open { display: block; }
 .skill-picker-head { display: flex; align-items: center; justify-content: space-between; padding: 0 2px 9px; }
 .skill-picker-close { border: 0; background: transparent; color: var(--color-text-mute); font-size: 21px; cursor: pointer; }
 .skill-picker-search {
@@ -1357,6 +1424,15 @@ details.tool-audit {
   background: transparent; color: var(--color-text); text-align: left; cursor: pointer;
 }
 .skill-picker-item:hover, .skill-picker-item.active { background: var(--color-primary-soft); }
+.model-picker-item.selected {
+  background: color-mix(in srgb, var(--color-primary) 12%, var(--color-surface));
+}
+.model-picker-icon {
+  height: 28px; border-radius: 8px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: #151515; color: #fff;
+  font-size: 9px; font-weight: 800; letter-spacing: -.02em;
+}
 .skill-picker-icon { width: 28px; text-align: center; font-size: 19px; }
 .skill-picker-copy { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
 .skill-picker-copy strong { font-size: var(--fs-sm); }
@@ -1364,6 +1440,8 @@ details.tool-audit {
 .skill-picker-source { color: var(--color-text-dim); font-size: var(--fs-2xs); }
 .skill-picker-empty { padding: 22px 10px; color: var(--color-text-mute); text-align: center; }
 .composer-shell #msg-input {
+  position: relative;
+  z-index: 1;
   order: 2;
   flex: 0 1 auto;
   width: 100%;
@@ -1374,6 +1452,35 @@ details.tool-audit {
   line-height: 1.55;
   align-self: stretch;
   box-sizing: border-box;
+}
+.prompt-suggestion-ghost {
+  position: absolute;
+  z-index: 2;
+  left: 20px;
+  right: 20px;
+  top: 11px;
+  min-height: 26px;
+  max-height: 56px;
+  overflow: hidden;
+  color: color-mix(in srgb, var(--color-text) 42%, var(--color-text-dim));
+  font-size: 17px;
+  line-height: 1.55;
+  pointer-events: none;
+  white-space: pre-wrap;
+  word-break: break-word;
+  opacity: 0;
+  transition: opacity var(--t-fast);
+}
+.composer-shell #msg-input.prompt-suggestion-active + .prompt-suggestion-ghost {
+  opacity: 1;
+}
+.composer-shell #msg-input.prompt-suggestion-active {
+  color: transparent;
+  caret-color: var(--color-text);
+}
+.composer-shell #msg-input.prompt-suggestion-active::placeholder {
+  color: color-mix(in srgb, var(--color-text) 42%, var(--color-text-dim));
+  opacity: 1;
 }
 .composer-shell #msg-input::placeholder { color: color-mix(in srgb, var(--color-text-dim) 88%, transparent); }
 .composer-toolbar {
@@ -1433,16 +1540,16 @@ details.tool-audit {
   background: #151515; color: #fff;
   font-size: 9px; font-weight: 800; letter-spacing: -.02em;
 }
-.composer-model select {
+.composer-model-text {
   width: min(190px, 21vw);
   max-width: 190px;
-  border: 0;
-  outline: 0;
-  background: transparent;
   color: var(--color-text);
-  font: inherit;
-  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
 }
+.native-model-select { display: none !important; }
 .composer-icon-tool { min-width: 36px; justify-content: center; padding: 0 8px; font-size: 21px; }
 .composer-mcp { width: auto; font-size: 10px; font-weight: 800; letter-spacing: .04em; }
 .composer-workspace { color: var(--color-text); }
@@ -1525,7 +1632,7 @@ details.tool-audit {
   .composer-tool span:not(:first-child),
   .composer-chev,
   .composer-mcp { display: none; }
-  .composer-model select { width: 118px; }
+  .composer-model-text { width: 118px; }
   .composer-workspace span:last-child { display: none; }
   .composer-toolbar-actions { gap: 3px; }
   .composer-toolbar .send-btn { flex-basis: 38px; width: 38px; height: 38px; }
@@ -1642,7 +1749,591 @@ details.tool-audit {
 .slash-name mark { background: #fef08a; color: var(--color-warn-text); border-radius: 2px;
   padding: 0 1px; font-weight: 700; }
 .slash-desc { font-size: 11.5px; color: var(--color-text-mute); margin-top: 1px; line-height: 1.4; }
+.slash-unavailable-reason { font-size: 11px; color: var(--color-danger); margin-top: 2px; line-height: 1.35; }
 .slash-soon { display: inline-block; margin-left: 6px; background: var(--color-surface-3);
   border-radius: 4px; padding: 1px 6px; font-size: var(--fs-2xs); color: var(--color-text-dim);
   font-weight: 600; vertical-align: middle; }
 .slash-empty { padding: 14px; text-align: center; font-size: var(--fs-sm); color: var(--color-text-dim); }
+.slash-diagnostics { margin: 7px 12px 10px; padding: 8px 10px; border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm); color: var(--color-text-dim); font-size: 11px; }
+.slash-diagnostics summary { cursor: pointer; color: var(--color-warn); }
+.slash-diagnostics ul { margin: 7px 0 0; padding-left: 18px; }
+.slash-diagnostics li + li { margin-top: 4px; }
+/* ════════════════════════════════════════════════════════════════
+   UI Phase 0 — workspace layout and visual hierarchy
+
+   This layer deliberately contains only presentation overrides. It keeps
+   the existing DOM and data-action contracts intact while giving chat,
+   tools and the composer one shared content rail.
+   ════════════════════════════════════════════════════════════════ */
+
+:root {
+  --workspace-content-max: 1080px;
+  --workspace-reading-max: 960px;
+  --workspace-gutter: clamp(16px, 3vw, 36px);
+  --workspace-sidebar: 250px;
+  --workspace-rail: 72px;
+}
+
+/* ── Application frame ───────────────────────────────────────── */
+.main {
+  background:
+    radial-gradient(circle at 50% -15%, color-mix(in srgb, var(--color-primary) 6%, transparent), transparent 34%),
+    var(--color-bg);
+}
+
+.chat-header {
+  min-height: 62px;
+  padding: 10px var(--workspace-gutter);
+  box-shadow: 0 1px 0 var(--color-border);
+}
+
+.chat-header::before {
+  opacity: .32;
+}
+
+.chat-header-title {
+  font-size: var(--fs-xl);
+  letter-spacing: -.01em;
+}
+
+.chat-header-sub {
+  max-width: min(54vw, 680px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.header-btns {
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+.hdr-btn {
+  min-height: 34px;
+  padding: 6px 11px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--color-text-mute);
+}
+
+.hdr-btn:hover {
+  border-color: var(--color-border);
+  background: var(--color-surface-2);
+  color: var(--color-text);
+}
+
+/* ── Shared content rail ─────────────────────────────────────── */
+.messages {
+  padding: 26px var(--workspace-gutter) 18px;
+  gap: 18px;
+}
+
+.messages > .welcome,
+.messages > .chat-vue-root {
+  width: min(var(--workspace-content-max), 100%);
+  margin-inline: auto;
+}
+
+.chat-vue-list {
+  gap: 18px;
+}
+
+.msg {
+  gap: 12px;
+}
+
+.msg.user {
+  width: auto;
+  max-width: min(76%, 760px);
+}
+
+.msg.assistant {
+  width: 100%;
+}
+
+.msg.assistant .msg-body {
+  max-width: calc(100% - 40px);
+}
+
+.msg-avatar {
+  width: 30px;
+  height: 30px;
+}
+
+/* Long analysis is a document surface, not a stack of floating cards. */
+.msg.assistant .msg-bubble {
+  width: 100%;
+  max-width: var(--workspace-reading-max);
+  padding: 16px 20px 17px;
+  border-color: var(--color-border);
+  border-left-width: 2px;
+  border-left-color: color-mix(in srgb, var(--color-primary) 46%, var(--color-border));
+  border-radius: var(--radius-md);
+  font-size: 14px;
+  line-height: 1.72;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, .035);
+}
+
+.msg.assistant .msg-bubble:hover {
+  border-left-color: var(--color-primary);
+  box-shadow: 0 2px 8px rgba(15, 23, 42, .055);
+  transform: none;
+}
+
+.msg.user .msg-bubble {
+  padding: 9px 13px;
+  font-size: 14px;
+  line-height: 1.55;
+  border-radius: 13px 13px 4px 13px;
+  box-shadow: 0 2px 6px rgba(37, 99, 235, .18);
+}
+
+.msg.user .msg-bubble:hover {
+  transform: none;
+  box-shadow: 0 3px 9px rgba(37, 99, 235, .24);
+}
+
+.msg-bubble h1,
+.msg-bubble h2,
+.msg-bubble h3 {
+  letter-spacing: -.015em;
+}
+
+.msg-bubble table {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  border-radius: var(--radius-sm);
+}
+
+.msg-actions {
+  margin-top: 4px;
+}
+
+.msg.assistant:focus-within .msg-actions {
+  opacity: 1;
+}
+
+/* ── Tool activity: compact timeline, colour only where meaningful ── */
+.tool-steps {
+  width: 100%;
+  max-width: var(--workspace-reading-max);
+  gap: 5px;
+  padding: 2px 0 2px 17px;
+  margin: 2px 0;
+}
+
+.tool-steps::before {
+  left: 5px;
+  top: 4px;
+  bottom: 4px;
+  width: 1px;
+  background: var(--color-border);
+}
+
+.tool-step {
+  width: 100%;
+  min-height: 36px;
+  padding: 8px 11px;
+  border: 1px solid var(--color-border);
+  border-left: 2px solid var(--color-success);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--color-surface-2) 68%, var(--color-surface));
+  color: var(--color-text-soft);
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+}
+
+.tool-step::before {
+  left: -16px;
+  width: 7px;
+  height: 7px;
+  box-shadow: 0 0 0 3px var(--color-bg);
+}
+
+.tool-step:hover,
+.tool-step.done:hover {
+  border-color: color-mix(in srgb, var(--color-success) 42%, var(--color-border));
+  border-left-color: var(--color-success);
+  background: var(--color-surface-2);
+}
+
+.tool-step.running {
+  border-color: color-mix(in srgb, var(--color-primary) 34%, var(--color-border));
+  border-left-color: var(--color-primary);
+  background: color-mix(in srgb, var(--color-primary-soft) 46%, var(--color-surface));
+  color: color-mix(in srgb, var(--color-primary) 64%, var(--color-text));
+}
+
+.tool-step.done {
+  border-color: var(--color-border);
+  border-left-color: var(--color-success);
+  background: color-mix(in srgb, var(--color-surface-2) 68%, var(--color-surface));
+  color: var(--color-text-soft);
+}
+
+.tool-step-head {
+  align-items: center;
+}
+
+.tool-step-head::before {
+  margin-top: 0;
+  color: var(--color-text-dim);
+}
+
+.tool-step-detail {
+  margin-top: 7px;
+  padding: 9px 11px;
+  border-color: var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text-mute);
+  font-size: var(--fs-xs);
+}
+
+.reasoning-block {
+  max-width: var(--workspace-reading-max);
+  border-color: var(--color-border);
+  background: color-mix(in srgb, var(--color-accent-soft) 38%, var(--color-surface));
+}
+
+/* A team-less workspace needs one useful empty state, not two large blank panes. */
+.teams-modal:has(.teams-sidebar > .teams-empty) {
+  width: min(620px, 94vw);
+  height: auto;
+  min-height: 0;
+  resize: none;
+}
+
+.teams-grid:has(.teams-sidebar > .teams-empty) {
+  flex: 0 1 auto;
+  min-height: 180px;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.teams-grid:has(.teams-sidebar > .teams-empty) .teams-main {
+  display: none;
+}
+
+.teams-grid:has(.teams-sidebar > .teams-empty) .teams-sidebar {
+  min-height: 180px;
+}
+
+.teams-grid:has(.teams-sidebar > .teams-empty) .teams-empty {
+  margin: auto;
+}
+
+/* ── Composer: same rail and calmer elevation ────────────────── */
+.input-area {
+  padding: 10px var(--workspace-gutter) 18px;
+  background: linear-gradient(180deg, transparent 0%, var(--color-bg) 16%, var(--color-bg) 100%);
+}
+
+.composer-shell {
+  width: min(var(--workspace-content-max), 100%);
+  border-radius: 18px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, .075), 0 1px 3px rgba(15, 23, 42, .05);
+}
+
+.composer-shell:focus-within {
+  box-shadow: 0 10px 28px rgba(15, 23, 42, .09), 0 0 0 3px rgba(59, 130, 246, .07);
+}
+
+.composer-shell .input-card {
+  min-height: 98px;
+}
+
+.composer-shell #msg-input,
+.prompt-suggestion-ghost {
+  font-size: 15px;
+}
+
+.composer-shell #msg-input {
+  min-height: 42px;
+  padding: 12px 18px 2px;
+}
+
+.prompt-suggestion-ghost {
+  left: 18px;
+  right: 18px;
+  top: 12px;
+}
+
+.composer-toolbar {
+  min-height: 50px;
+  padding: 5px 9px 8px 11px;
+}
+
+.composer-tool,
+.composer-model,
+.composer-icon-tool,
+.composer-permission {
+  height: 34px;
+  border-radius: 9px;
+}
+
+.composer-model-mark {
+  width: 24px;
+  height: 24px;
+}
+
+.composer-toolbar .send-btn {
+  flex-basis: 38px;
+  width: 38px;
+  height: 38px;
+}
+
+/* ── Sidebar / drawer behavior ───────────────────────────────── */
+.sidebar-hub {
+  flex: 0 0 auto;
+}
+
+.sb-main {
+  width: var(--workspace-sidebar);
+  min-width: var(--workspace-sidebar);
+}
+
+@media (max-width: 1280px) {
+  .sidebar-hub {
+    width: var(--workspace-sidebar);
+    min-width: var(--workspace-sidebar);
+    overflow: visible;
+  }
+
+  .sb-drawer {
+    position: fixed;
+    z-index: 60;
+    top: 0;
+    bottom: 0;
+    left: var(--workspace-sidebar);
+    width: min(340px, calc(100vw - var(--workspace-sidebar) - 16px));
+    min-width: 0;
+    box-shadow: 16px 0 42px rgba(0, 0, 0, .28);
+  }
+
+  .sb-drawer.collapsed {
+    width: min(340px, calc(100vw - var(--workspace-sidebar) - 16px));
+    min-width: 0;
+    transform: translateX(calc(-100% - 14px));
+  }
+}
+
+/* Tablet and compact desktop: navigation becomes an icon rail. */
+@media (max-width: 960px) {
+  .sidebar-hub {
+    width: var(--workspace-rail);
+    min-width: var(--workspace-rail);
+  }
+
+  .sb-main {
+    width: var(--workspace-rail);
+    min-width: var(--workspace-rail);
+    padding: 14px 9px 12px;
+    gap: 12px;
+  }
+
+  .sb-brand {
+    justify-content: center;
+    padding: 2px 0 12px;
+  }
+
+  .sb-brand-icon {
+    width: 34px;
+    height: 34px;
+  }
+
+  .sb-brand-text,
+  .sb-status {
+    display: none;
+  }
+
+  .sb-nav {
+    gap: 6px;
+  }
+
+  .sb-nav-item {
+    justify-content: center;
+    min-height: 44px;
+    padding: 5px;
+    border-radius: 10px;
+  }
+
+  .sb-nav-icon {
+    width: 34px;
+    height: 34px;
+    flex-basis: 34px;
+    font-size: var(--fs-sm);
+  }
+
+  .sb-nav-label,
+  .sb-footer-meta,
+  .sidebar-hub .sb-footer-actions .sb-footer-update,
+  .sidebar-hub .sb-footer-actions .sb-footer-community,
+  .sidebar-hub .sb-footer-actions .sb-footer-settings {
+    display: none;
+  }
+
+  .sidebar-hub .sb-footer-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .sidebar-hub .sb-footer-actions .sb-iconbtn {
+    height: 34px;
+    padding: 4px;
+  }
+
+  .sb-drawer {
+    left: var(--workspace-rail);
+    width: min(340px, calc(100vw - var(--workspace-rail) - 12px));
+  }
+
+  .sb-drawer.collapsed {
+    width: min(340px, calc(100vw - var(--workspace-rail) - 12px));
+  }
+
+  .messages {
+    padding-top: 20px;
+  }
+}
+
+@media (max-width: 720px) {
+  :root {
+    --workspace-rail: 60px;
+    --workspace-gutter: 12px;
+  }
+
+  .sb-main {
+    padding-inline: 7px;
+  }
+
+  .sb-nav-item {
+    min-height: 42px;
+  }
+
+  .sb-nav-icon {
+    width: 32px;
+    height: 32px;
+    flex-basis: 32px;
+  }
+
+  .chat-header {
+    min-height: 54px;
+    padding-block: 8px;
+    gap: 8px;
+  }
+
+  .chat-header-sub {
+    display: none;
+  }
+
+  .chat-header-title {
+    font-size: var(--fs-lg);
+  }
+
+  .header-btns {
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .header-btns::-webkit-scrollbar {
+    display: none;
+  }
+
+  .hdr-btn {
+    min-height: 32px;
+    padding: 5px 8px;
+    white-space: nowrap;
+    font-size: var(--fs-xs);
+  }
+
+  .messages {
+    padding: 16px 10px 12px;
+    gap: 14px;
+  }
+
+  .chat-vue-list {
+    gap: 14px;
+  }
+
+  .msg {
+    gap: 7px;
+  }
+
+  .msg-avatar {
+    width: 26px;
+    height: 26px;
+  }
+
+  .msg.assistant .msg-body {
+    max-width: calc(100% - 33px);
+  }
+
+  .msg.user {
+    max-width: 92%;
+  }
+
+  .msg.assistant .msg-bubble {
+    padding: 13px 14px;
+    font-size: 13px;
+    line-height: 1.68;
+  }
+
+  .tool-steps {
+    padding-left: 14px;
+  }
+
+  .tool-step::before {
+    left: -13px;
+  }
+
+  .input-area {
+    padding: 7px 8px 10px;
+  }
+
+  .composer-shell {
+    border-radius: 15px;
+  }
+
+  .composer-shell #msg-input,
+  .prompt-suggestion-ghost {
+    font-size: 14px;
+  }
+
+  .composer-model-text {
+    width: 96px;
+  }
+
+  .overlay {
+    padding: 10px;
+  }
+
+  .modal,
+  .mcp-modal,
+  #ov-settings .modal,
+  .instruction-modal,
+  .teams-modal {
+    width: min(100%, calc(100vw - 20px)) !important;
+    min-width: 0 !important;
+    max-width: calc(100vw - 20px) !important;
+  }
+
+  .teams-grid:not(:has(.teams-sidebar > .teams-empty)) {
+    grid-template-rows: minmax(140px, 30%) minmax(260px, 1fr);
+  }
+}
+
+/* Motion should support orientation, never compete with the analysis. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+}

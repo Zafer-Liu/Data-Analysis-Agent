@@ -11,6 +11,9 @@ from .models import CommandDef, CommandSource, CommandType
 MAX_COMMAND_BYTES = 100_000
 MAX_PROMPT_CHARS = 50_000
 _FRONTMATTER_RE = re.compile(r"\A---\s*\r?\n(.*?)\r?\n---\s*(?:\r?\n|\Z)", re.DOTALL)
+_TRUSTED_ONLY_FIELDS = frozenset({
+    "handler-key", "uses-model", "confirmation",
+})
 
 
 class CommandError(ValueError):
@@ -60,10 +63,26 @@ def parse_command_file(
     command_type = str(meta.get("type", "prompt")).strip().lower()
     if not allow_trusted_types and command_type != CommandType.PROMPT.value:
         raise CommandError("custom Markdown commands may only use type: prompt")
+    if not allow_trusted_types:
+        forbidden = sorted(field for field in _TRUSTED_ONLY_FIELDS if field in meta)
+        if forbidden:
+            raise CommandError(
+                "custom Markdown commands cannot declare trusted fields: "
+                + ", ".join(forbidden)
+            )
     try:
         resolved_type = CommandType(command_type)
     except ValueError as exc:
         raise CommandError(f"invalid command type: {command_type}") from exc
+    hidden = meta.get("hidden", False)
+    uses_model = meta.get("uses-model", False)
+    if not isinstance(hidden, bool):
+        raise CommandError("hidden must be a boolean")
+    if not isinstance(uses_model, bool):
+        raise CommandError("uses-model must be a boolean")
+    default_arguments = (
+        "optional" if resolved_type is CommandType.PROMPT else "none"
+    )
 
     try:
         return CommandDef(
@@ -73,11 +92,21 @@ def parse_command_file(
             aliases=tuple(item.strip().lower() for item in aliases),
             usage=str(meta.get("usage", "")).strip(),
             argument_hint=str(meta.get("argument-hint", "")).strip(),
+            arguments=str(meta.get("arguments", default_arguments)).strip().lower(),
             icon=str(meta.get("icon", "⌘")).strip() or "⌘",
             category=str(meta.get("category", "custom")).strip() or "custom",
             prompt=body,
-            handler_key=str(meta.get("handler-key", "")).strip(),
+            handler_key=(
+                str(meta.get("handler-key", "")).strip()
+                if allow_trusted_types else ""
+            ),
+            hidden=hidden,
             protected=allow_trusted_types,
+            uses_model=uses_model if allow_trusted_types else False,
+            confirmation=(
+                str(meta.get("confirmation", "none")).strip().lower()
+                if allow_trusted_types else "none"
+            ),
             source=source,
             path=path,
         )

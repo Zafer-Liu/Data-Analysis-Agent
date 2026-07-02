@@ -22,9 +22,36 @@ def _ensure_dir() -> None:
     _KB_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _scope_context() -> tuple[str, str]:
+    """Resolve the trusted user plus the session's stable Workspace identity."""
+    body = request.get_json(silent=True) if request.is_json else {}
+    sid = str(
+        request.args.get("session_id")
+        or request.form.get("session_id")
+        or (body or {}).get("session_id")
+        or ""
+    )
+    user_id = str(
+        request.headers.get("X-BAA-User-ID")
+        or request.args.get("user_id")
+        or (body or {}).get("user_id")
+        or "local-default"
+    ).strip()[:200]
+    from data.workspace import workspace_manager
+    workspace_id = str(workspace_manager.workspace_id_for_session(sid) or "")
+    return workspace_id, user_id
+
+
+def _kb_dir() -> Path:
+    from Function.Knowledge.knowledge_base import knowledge_scope_dir
+    workspace_id, user_id = _scope_context()
+    return knowledge_scope_dir(workspace_id=workspace_id, user_id=user_id)
+
+
 def _kb():
     from Function.Knowledge.knowledge_base import KnowledgeBase
-    return KnowledgeBase()
+    workspace_id, user_id = _scope_context()
+    return KnowledgeBase(workspace_id=workspace_id, user_id=user_id)
 
 
 def _get_client(sid: str, provider: str = ""):
@@ -54,7 +81,8 @@ def _get_client(sid: str, provider: str = ""):
 @bp.post("/api/knowledge/parse")
 def parse_file():
     """Upload docx/xlsx, keep the file in uploads/knowledge/, return preview."""
-    _ensure_dir()
+    scope_dir = _kb_dir()
+    scope_dir.mkdir(parents=True, exist_ok=True)
 
     if "file" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
@@ -72,7 +100,7 @@ def parse_file():
     safe_stem = "".join(c if c.isalnum() or c in "-_." else "_"
                         for c in Path(original_name).stem)[:60]
     filename = f"{uuid.uuid4().hex[:8]}_{safe_stem}{ext}"
-    save_path = _KB_DIR / filename
+    save_path = scope_dir / filename
     f.save(str(save_path))
 
     try:
@@ -94,9 +122,10 @@ def parse_file():
 @bp.get("/api/knowledge/files")
 def list_files():
     """Return metadata of all uploaded source files in uploads/knowledge/."""
-    _ensure_dir()
+    scope_dir = _kb_dir()
+    scope_dir.mkdir(parents=True, exist_ok=True)
     files = []
-    for p in sorted(_KB_DIR.iterdir(), key=lambda f: f.stat().st_mtime, reverse=True):
+    for p in sorted(scope_dir.iterdir(), key=lambda f: f.stat().st_mtime, reverse=True):
         if p.suffix.lower() in _ALLOWED_EXTS:
             files.append({
                 "filename": p.name,
@@ -111,7 +140,7 @@ def delete_file(filename: str):
     """Delete a source file from uploads/knowledge/."""
     # Security: strip any path separators
     filename = Path(filename).name
-    target = _KB_DIR / filename
+    target = _kb_dir() / filename
     if not target.exists():
         return jsonify({"error": "File not found"}), 404
     target.unlink()
@@ -136,7 +165,7 @@ def confirm_records():
         counts = kb.bulk_insert(records) if records else {"metrics": 0, "rules": 0, "notes": 0}
         rag = {"chunks": 0}
         if filename:
-            source_path = _KB_DIR / filename
+            source_path = _kb_dir() / filename
             if source_path.exists() and source_path.suffix.lower() in _ALLOWED_EXTS:
                 from Function.Knowledge.file_parser import extract_text
                 text = extract_text(str(source_path))

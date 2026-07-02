@@ -414,7 +414,12 @@ class WorkspaceManager:
     lock. Job leases are intentionally deferred to C3.
     """
 
-    def __init__(self, metadata_store: Optional[WorkspaceMetadataStore] = None):
+    def __init__(
+        self,
+        metadata_store: Optional[WorkspaceMetadataStore] = None,
+        *,
+        remember_mounts_by_default: bool = True,
+    ):
         self._runtimes_by_workspace: Dict[str, WorkspaceRuntime] = {}
         self._path_authorizations: Dict[
             str, tuple[int, WorkspacePathAuthorization]
@@ -423,6 +428,7 @@ class WorkspaceManager:
         self._session_permissions: Dict[str, str] = {}
         self._lock = threading.RLock()
         self.metadata_store = metadata_store or workspace_metadata_store
+        self.remember_mounts_by_default = bool(remember_mounts_by_default)
         # 默认额外根目录（uploads/knowledge，项目级）
         self._default_extra_roots: List[Path] = [
             data_path("uploads"),
@@ -440,7 +446,14 @@ class WorkspaceManager:
         """Return a bounded metadata summary for the logical system Workspace."""
         return self.system_workspace.summary()
 
-    def mount(self, session_id: str, workdir_path: str, permission: str = "read_only") -> tuple[bool, str, Optional[WorkspaceRuntime]]:
+    def mount(
+        self,
+        session_id: str,
+        workdir_path: str,
+        permission: str = "read_only",
+        *,
+        remember: Optional[bool] = None,
+    ) -> tuple[bool, str, Optional[WorkspaceRuntime]]:
         """为 session 挂载工作目录。
 
         返回 (ok, message, runtime)。
@@ -453,7 +466,14 @@ class WorkspaceManager:
             return False, "工作目录权限无效。", None
 
         try:
-            metadata = self.metadata_store.open_or_create(resolved, permission)
+            metadata = self.metadata_store.open_or_create(
+                resolved,
+                permission,
+                remember=(
+                    self.remember_mounts_by_default
+                    if remember is None else bool(remember)
+                ),
+            )
         except (OSError, RuntimeError) as e:
             return False, f"无法挂载工作目录：{e}", None
 
@@ -702,4 +722,4 @@ class WorkspaceManager:
 
 
 # 模块级单例（由 api/state.py 导入）
-workspace_manager = WorkspaceManager()
+workspace_manager = WorkspaceManager(remember_mounts_by_default=True)

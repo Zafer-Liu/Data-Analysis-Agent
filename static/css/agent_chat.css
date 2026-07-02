@@ -1,6 +1,6 @@
-/* Entry point — load order matters: tokens (vars) → layout (frame) → chat (main content) → modals (overlays) → kb (specialised modal). */
+/* Entry point — load order matters: tokens (vars) → layout (frame) → chat (main content + workspace) → modals (overlays) → kb (specialised modal). */
 @import "parts/tokens.css";
 @import "parts/layout.css";
-@import "parts/chat.css?v=b15q4";
+@import "parts/chat.css?v=fe2-workspace-merged";
 @import "parts/modals.css";
 @import "parts/kb.css";

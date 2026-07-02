@@ -3,12 +3,23 @@
 import logging
 import re
 import sqlite3
+from contextlib import nullcontext
+from pathlib import Path
 from typing import Any
 
 log = logging.getLogger(__name__)
 
 _TIME_SERIES_PREFIX = "Time_Series_"
 _ANALYSIS_JOB_ROW_THRESHOLD = 1000
+_CHART_JOB_ROW_THRESHOLD = 50_000
+_PROFILE_JOB_ROW_THRESHOLD = 50_000
+_PROFILE_JOB_COLUMN_THRESHOLD = 50
+_CLEAN_JOB_ROW_THRESHOLD = 50_000
+_QUERY_JOB_ROW_THRESHOLD = 100_000
+
+
+def _quote_ident(name: str) -> str:
+    return '"' + str(name).replace('"', '""') + '"'
 
 
 def _execute_analysis(
@@ -44,10 +55,18 @@ class DataToolsMixin:
     # ── Knowledge base lookup ─────────────────────────────────────────────────
 
     def _tool_query_knowledge_results(self, question: str) -> dict:
+        if not bool(getattr(self, "_knowledge_allowed_this_turn", False)):
+            return {"error": "Knowledge lookup is not allowed for this request."}
         try:
             from Function.Knowledge.knowledge_base import KnowledgeBase
-            kb = KnowledgeBase()
-            return kb.search(question)
+            kb = KnowledgeBase(
+                workspace_id=getattr(self, "_workspace_id", ""),
+                user_id=getattr(self, "_user_id", ""),
+            )
+            try:
+                return kb.search(question, limit=5)
+            finally:
+                kb.close()
         except Exception as e:
             return {"error": f"Knowledge base unavailable: {e}"}
 
@@ -86,7 +105,7 @@ class DataToolsMixin:
             score_part = f" | score={score}" if score != "" else ""
             content = (d.get("content") or "").strip()
             lines.append(f"[Document] {source}#chunk-{idx}{score_part}")
-            lines.append(content[:1800])
+            lines.append(content[:1200])
 
         return "\n".join(lines)
 
@@ -321,6 +340,118 @@ class DataToolsMixin:
                  getattr(src, "name", "?"), len(df), sql_preview)
         return src.format_result(df), self._data_refs_for_sql(sql, src, len(df))
 
+    def _query_data_job_connection_info(self, src):
+        """Return (db_path, lock) for sources that are safe to query from a worker."""
+        db_path = getattr(src, "_db_path", None)
+        if not db_path or not hasattr(src, "_db_lock"):
+            return None, None
+        try:
+            db_path = Path(db_path)
+        except TypeError:
+            return None, None
+        if not db_path.exists():
+            return None, None
+        return db_path, getattr(src, "_db_lock", None)
+
+    def _estimate_query_rows_for_job(self, db_path: Path, sql: str, lock=None) -> int | None:
+        """Estimate result size using a fresh DuckDB connection."""
+        import duckdb
+
+        query = (sql or "").strip().rstrip(";")
+        if not query:
+            return None
+        guard = lock or nullcontext()
+        try:
+            with guard:
+                conn = duckdb.connect(str(db_path))
+                try:
+                    row = conn.execute(
+                        f"SELECT COUNT(*) FROM ({query}) AS _baa_query_count"
+                    ).fetchone()
+                    return int(row[0]) if row else None
+                finally:
+                    conn.close()
+        except Exception as exc:
+            log.info("[tools] query_data row estimate skipped: %s", exc)
+            return None
+
+    def _execute_query_in_fresh_db(self, db_path: Path, sql: str, lock=None):
+        import duckdb
+        import pandas as pd
+
+        conn = None
+        try:
+            guard = lock or nullcontext()
+            with guard:
+                conn = duckdb.connect(str(db_path))
+                return conn.execute(sql).df(), ""
+        except Exception as exc:
+            return pd.DataFrame(), str(exc)
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    def _tool_query_data_with_jobs(self, sql: str):
+        sql_preview = sql.replace("\n", " ")[:120]
+        src, rewritten_sql = self._route_query(sql)
+        if not src:
+            log.warning("[tools] query_data  no data source  sql=%.80r", sql_preview)
+            return "No data source. Please connect a database or upload an Excel file first.", []
+
+        db_path, db_lock = self._query_data_job_connection_info(src)
+        can_job = self._job_runner is not None and db_path is not None
+        estimated_rows = (
+            self._estimate_query_rows_for_job(db_path, rewritten_sql, db_lock)
+            if can_job else None
+        )
+        if not can_job or estimated_rows is None or estimated_rows < _QUERY_JOB_ROW_THRESHOLD:
+            return self._tool_query_data_with_refs(sql)
+
+        result_holder = {}
+        sql_snapshot = str(rewritten_sql or "")
+        db_path_snapshot = Path(db_path)
+
+        def _worker(ctx):
+            ctx.set_progress(10, "正在准备查询")
+            ctx.check_canceled()
+            ctx.set_progress(45, "正在执行 SQL 查询")
+            df, error = self._execute_query_in_fresh_db(
+                db_path_snapshot, sql_snapshot, db_lock
+            )
+            ctx.check_canceled()
+            if error:
+                result_holder["error"] = error
+            else:
+                result_holder["df"] = df
+            ctx.set_progress(100, "查询完成")
+            return {
+                "rows": 0 if error else len(df),
+                "source": getattr(src, "name", ""),
+                "estimated_rows": estimated_rows,
+            }
+
+        job = yield from self._run_as_job(
+            _worker,
+            job_type="query_data",
+            label=f"{estimated_rows} rows",
+        )
+        refs = self._data_refs_for_sql(sql, src, None)
+        if job.get("status") == "canceled":
+            return "查询已取消。", refs
+        if job.get("status") != "succeeded":
+            return f"SQL Error: {job.get('error') or 'background job failed'}", refs
+        if result_holder.get("error"):
+            return f"SQL Error: {result_holder['error']}", refs
+        df = result_holder.get("df")
+        if df is None:
+            return "SQL Error: background result unavailable", refs
+        log.info("[tools] query_data job  source=%s  rows=%d  sql=%.80r",
+                 getattr(src, "name", "?"), len(df), sql_preview)
+        return src.format_result(df), self._data_refs_for_sql(sql, src, len(df))
+
     def _tool_create_analysis_table(self, sql: str, table_name: str = "analysis_data") -> str:
         result, _refs = self._tool_create_analysis_table_with_refs(sql, table_name)
         return result
@@ -339,6 +470,179 @@ class DataToolsMixin:
         refs[0]["type"] = "分析表"
         refs[0]["title"] = table_name
         return result, refs
+
+    def _tool_create_analysis_table_with_jobs(
+        self, sql: str, table_name: str = "analysis_data"
+    ):
+        src, rewritten_sql = self._route_query(sql)
+        if not src:
+            return "No data source connected.", []
+
+        refs = self._data_refs_for_sql(sql, src, None)
+        refs[0]["type"] = "分析表"
+        refs[0]["title"] = table_name
+
+        can_job = self._job_runner is not None and hasattr(src, "_db_lock")
+        if not can_job:
+            result = src.create_analysis_table(rewritten_sql, table_name)
+            self._schema_cache = None
+            log.info("[tools] create_analysis_table  table=%s  source=%s",
+                     table_name, getattr(src, "name", "?"))
+            return result, refs
+
+        result_holder = {}
+        table_snapshot = str(table_name or "analysis_data")
+        sql_snapshot = str(rewritten_sql or "")
+
+        def _worker(ctx):
+            ctx.set_progress(10, "正在准备分析表")
+            ctx.check_canceled()
+            ctx.set_progress(40, "正在执行建表 SQL")
+            result = src.create_analysis_table(sql_snapshot, table_snapshot)
+            ctx.check_canceled()
+            result_holder["text"] = result
+            ctx.set_progress(100, "分析表创建完成")
+            return {"table": table_snapshot, "source": getattr(src, "name", "")}
+
+        job = yield from self._run_as_job(
+            _worker,
+            job_type="create_analysis_table",
+            label=table_snapshot,
+        )
+        if job.get("status") == "canceled":
+            return "分析表创建已取消。", refs
+        if job.get("status") != "succeeded":
+            return f"Error building analysis table: {job.get('error') or 'background job failed'}", refs
+        self._schema_cache = None
+        log.info("[tools] create_analysis_table job  table=%s  source=%s",
+                 table_snapshot, getattr(src, "name", "?"))
+        return result_holder.get(
+            "text", "Error building analysis table: background result unavailable"
+        ), refs
+
+    def _analysis_table_connection(self, src, table_name: str):
+        """Return (conn, lock, cleanup_callback) when table is safe to DROP."""
+        table_name = str(table_name or "").strip()
+        if not table_name:
+            return None, None, None, "empty table name"
+
+        list_tables = getattr(src, "list_tables", None)
+        try:
+            existing = set(list_tables() or []) if callable(list_tables) else set()
+        except Exception:
+            existing = set()
+        if existing and table_name not in existing:
+            return None, None, None, "table not found"
+
+        # SQLDataSource and fallback in-memory analysis tables.
+        cache_tables = getattr(src, "_cache_tables", None)
+        if isinstance(cache_tables, set) and table_name in cache_tables:
+            conn = getattr(src, "_duck", None) or getattr(src, "_conn", None) or getattr(src, "_cache_conn", None)
+            if conn is None:
+                return None, None, None, "analysis table connection unavailable"
+
+            def cleanup():
+                cache_tables.discard(table_name)
+
+            return conn, getattr(src, "_lock", None), cleanup, ""
+
+        # MergedDataSource tracks derived tables separately.
+        analysis_tables = getattr(src, "_analysis_tables", None)
+        if isinstance(analysis_tables, list) and table_name in analysis_tables:
+            conn = getattr(src, "_conn", None)
+            if conn is None:
+                return None, None, None, "analysis table connection unavailable"
+
+            def cleanup():
+                while table_name in analysis_tables:
+                    analysis_tables.remove(table_name)
+
+            return conn, getattr(src, "_lock", None), cleanup, ""
+
+        # WorkspacePersistentDataSource: registered source tables are listed in
+        # registry.json; unregistered tables are derived/analysis objects.
+        db_path = getattr(src, "_db_path", None)
+        conn = getattr(src, "_conn", None)
+        if db_path is not None and conn is not None:
+            registry_path = Path(db_path).parent / "registry.json"
+            registered = set()
+            try:
+                import json
+                if registry_path.is_file():
+                    raw = json.loads(registry_path.read_text(encoding="utf-8"))
+                    if isinstance(raw, dict):
+                        registered = {str(key) for key in raw.keys()}
+            except Exception as exc:
+                return None, None, None, f"registry unavailable; refusing to delete: {exc}"
+            if table_name in registered:
+                return None, None, None, "registered source table is protected"
+            if not existing or table_name in existing:
+                return conn, getattr(src, "_db_lock", None), None, ""
+
+        return None, None, None, "not a known analysis/derived table"
+
+    def _drop_analysis_table(self, src, table_name: str) -> tuple[bool, str]:
+        conn, lock, cleanup, reason = self._analysis_table_connection(src, table_name)
+        if conn is None:
+            return False, reason
+
+        def run_drop():
+            conn.execute(f"DROP TABLE IF EXISTS {_quote_ident(table_name)}")
+            if cleanup:
+                cleanup()
+
+        try:
+            if lock is not None:
+                with lock:
+                    run_drop()
+            else:
+                run_drop()
+            return True, "deleted"
+        except Exception as exc:
+            return False, str(exc)
+
+    def _tool_delete_analysis_tables(
+        self, table_names: list, confirm: bool = False,
+    ) -> str:
+        if not confirm:
+            return "❌ 删除分析表需要 confirm=true。"
+        if not self.data_source:
+            return "❌ 请先连接数据源。"
+        clean_names = []
+        seen = set()
+        for name in table_names or []:
+            value = str(name or "").strip()
+            if value and value not in seen:
+                clean_names.append(value)
+                seen.add(value)
+        if not clean_names:
+            return "❌ 请提供至少一个要删除的分析表名。"
+
+        deleted = []
+        skipped = []
+        for name in clean_names:
+            ok, message = self._drop_analysis_table(self.data_source, name)
+            if ok:
+                deleted.append(name)
+            else:
+                skipped.append((name, message))
+        if deleted:
+            self._schema_cache = None
+
+        lines = ["🗑️ 表清理结果"]
+        if deleted:
+            lines.extend(["", "已删除的分析表："])
+            lines.extend(f"- `{name}`" for name in deleted)
+        if skipped:
+            lines.extend(["", "未删除的表："])
+            lines.extend(f"- `{name}`：{reason}" for name, reason in skipped)
+        if not skipped:
+            lines.append("")
+            lines.append("✅ 指定分析表已清理完成。")
+        else:
+            lines.append("")
+            lines.append("说明：只允许删除可证明为分析/派生表的对象；原始源表和无法判定的表会被保护。")
+        return "\n".join(lines)
 
     # ── DataFrame → DataSource writer (backward-compatible) ──────────────────
 
@@ -652,17 +956,9 @@ class DataToolsMixin:
 
     # ── Chart tool ────────────────────────────────────────────────────────────
 
-    def _tool_generate_chart(
-        self, chart_type: str, sql: str, field_mapping: dict, title: str = ""
+    def _render_chart_from_df(
+        self, df, chart_type: str, field_mapping: dict, title: str = "",
     ) -> dict:
-        if not self.data_source:
-            return {"error": "No data source connected."}
-        df, error = self.data_source.execute_query(sql)
-        if error:
-            return {"error": f"Data query failed: {error}"}
-        if df.empty:
-            return {"error": "Query returned no rows — cannot generate chart."}
-
         from chart_generate import generate_chart as _gen
 
         options = {"title": title} if title else {}
@@ -676,6 +972,66 @@ class DataToolsMixin:
         if "error" in result:
             return {"error": result["error"]}
         return {"html": result.get("html", ""), "chart_type": chart_type}
+
+    def _tool_generate_chart(
+        self, chart_type: str, sql: str, field_mapping: dict, title: str = ""
+    ) -> dict:
+        if not self.data_source:
+            return {"error": "No data source connected."}
+        df, error = self.data_source.execute_query(sql)
+        if error:
+            return {"error": f"Data query failed: {error}"}
+        if df.empty:
+            return {"error": "Query returned no rows — cannot generate chart."}
+        return self._render_chart_from_df(df, chart_type, field_mapping, title)
+
+    def _tool_generate_chart_with_jobs(
+        self, chart_type: str, sql: str, field_mapping: dict, title: str = ""
+    ):
+        if not self.data_source:
+            return {"error": "No data source connected."}
+        df, error = self.data_source.execute_query(sql)
+        if error:
+            return {"error": f"Data query failed: {error}"}
+        if df.empty:
+            return {"error": "Query returned no rows — cannot generate chart."}
+
+        should_job = self._job_runner is not None and len(df) >= _CHART_JOB_ROW_THRESHOLD
+        if not should_job:
+            return self._render_chart_from_df(df, chart_type, field_mapping, title)
+
+        df_snapshot = df.copy(deep=True)
+        mapping_snapshot = dict(field_mapping or {})
+        title_snapshot = str(title or "")
+        chart_type_snapshot = str(chart_type or "Bar_Chart")
+        result_holder = {}
+
+        def _worker(ctx):
+            ctx.set_progress(10, "正在准备图表数据")
+            ctx.check_canceled()
+            ctx.set_progress(35, "正在渲染图表")
+            result = self._render_chart_from_df(
+                df_snapshot, chart_type_snapshot, mapping_snapshot, title_snapshot
+            )
+            ctx.check_canceled()
+            result_holder["chart"] = result
+            ctx.set_progress(100, "图表生成完成")
+            return {
+                "chart_type": chart_type_snapshot,
+                "input_rows": len(df_snapshot),
+                "ok": "html" in result,
+            }
+
+        job = yield from self._run_as_job(
+            _worker,
+            job_type="chart_generation",
+            label=f"{chart_type_snapshot} · {len(df_snapshot)} rows",
+        )
+        if job.get("status") == "canceled":
+            return {"error": "Chart generation canceled."}
+        if job.get("status") != "succeeded":
+            return {"error": job.get("error") or "background job failed"}
+        return result_holder.get("chart", {"error": "background result was not available"})
 
     # ── Table discovery helpers ───────────────────────────────────────────────
 
@@ -703,6 +1059,11 @@ class DataToolsMixin:
 
     # ── Profile & clean ───────────────────────────────────────────────────────
 
+    def _profile_dataframe(self, df, table_name: str, columns: list = None) -> dict:
+        from Function.Clean.data_profile import profile
+        text, charts = profile(df, columns or None)
+        return {"text": f"### 数据概况 · `{table_name}`\n\n" + text, "charts": charts}
+
     def _tool_profile_data(self, table_name: str = "", columns: list = None) -> dict:
         if not self.data_source:
             return {"text": "❌ 请先连接数据源。", "charts": []}
@@ -716,11 +1077,92 @@ class DataToolsMixin:
             return {"text": f"❌ 读取表 '{tname}' 失败：{err}", "charts": []}
 
         try:
-            from Function.Clean.data_profile import profile
-            text, charts = profile(df, columns or None)
-            return {"text": f"### 数据概况 · `{tname}`\n\n" + text, "charts": charts}
+            return self._profile_dataframe(df, tname, columns)
         except Exception as exc:
             return {"text": f"❌ 数据概况生成失败：{exc}", "charts": []}
+
+    def _tool_profile_data_with_jobs(self, table_name: str = "", columns: list = None):
+        if not self.data_source:
+            return {"text": "❌ 请先连接数据源。", "charts": []}
+
+        tname = table_name or self._get_first_raw_table()
+        if not tname:
+            return {"text": "❌ 数据源中没有可用的表格。", "charts": []}
+
+        df, err = self.data_source.execute_query(f'SELECT * FROM "{tname}"')
+        if err or df is None or df.empty:
+            return {"text": f"❌ 读取表 '{tname}' 失败：{err}", "charts": []}
+
+        should_job = (
+            self._job_runner is not None
+            and (
+                len(df) >= _PROFILE_JOB_ROW_THRESHOLD
+                or len(df.columns) >= _PROFILE_JOB_COLUMN_THRESHOLD
+            )
+        )
+        if not should_job:
+            try:
+                return self._profile_dataframe(df, tname, columns)
+            except Exception as exc:
+                return {"text": f"❌ 数据概况生成失败：{exc}", "charts": []}
+
+        df_snapshot = df.copy(deep=True)
+        columns_snapshot = list(columns or [])
+        table_snapshot = str(tname)
+        result_holder = {}
+
+        def _worker(ctx):
+            ctx.set_progress(10, "正在准备数据概况")
+            ctx.check_canceled()
+            ctx.set_progress(40, "正在计算字段统计")
+            result = self._profile_dataframe(df_snapshot, table_snapshot, columns_snapshot)
+            ctx.check_canceled()
+            result_holder["profile"] = result
+            ctx.set_progress(100, "数据概况生成完成")
+            return {
+                "table": table_snapshot,
+                "input_rows": len(df_snapshot),
+                "input_columns": len(df_snapshot.columns),
+                "charts": len(result.get("charts", [])),
+            }
+
+        job = yield from self._run_as_job(
+            _worker,
+            job_type="data_profile",
+            label=f"{table_snapshot} · {len(df_snapshot)} rows",
+        )
+        if job.get("status") == "canceled":
+            return {"text": "数据概况生成已取消。", "charts": []}
+        if job.get("status") != "succeeded":
+            return {"text": f"❌ 数据概况生成失败：{job.get('error') or 'background job failed'}", "charts": []}
+        return result_holder.get("profile", {"text": "❌ 数据概况生成失败：后台结果不可用。", "charts": []})
+
+    def _clean_dataframe(
+        self,
+        df,
+        operation: str,
+        columns=None,
+        fill_method: str = "mean",
+        lower_pct: float = 1.0,
+        upper_pct: float = 99.0,
+        trim_column: str = "",
+        min_val=None,
+        max_val=None,
+    ):
+        if operation == "fill_na":
+            from Function.Clean.missing_handler import fill_missing
+            return fill_missing(df, fill_method, columns)
+        if operation == "winsorize":
+            from Function.Clean.winsorize import winsorize
+            return winsorize(df, lower_pct, upper_pct, columns)
+        if operation == "trimming":
+            if not trim_column:
+                raise ValueError("trimming 操作需要指定 trim_column。")
+            if min_val is None or max_val is None:
+                raise ValueError("trimming 操作需要同时指定 min_val 和 max_val。")
+            from Function.Clean.trimming import trim
+            return trim(df, trim_column, float(min_val), float(max_val))
+        raise ValueError(f"未知操作 '{operation}'，支持：fill_na / winsorize / trimming")
 
     def _tool_clean_data(
         self,
@@ -747,23 +1189,109 @@ class DataToolsMixin:
             return f"❌ 读取表 '{tname}' 失败：{err}"
 
         try:
-            if operation == "fill_na":
-                from Function.Clean.missing_handler import fill_missing
-                cleaned_df, summary = fill_missing(df, fill_method, columns)
-            elif operation == "winsorize":
-                from Function.Clean.winsorize import winsorize
-                cleaned_df, summary = winsorize(df, lower_pct, upper_pct, columns)
-            elif operation == "trimming":
-                if not trim_column:
-                    return "❌ trimming 操作需要指定 trim_column。"
-                if min_val is None or max_val is None:
-                    return "❌ trimming 操作需要同时指定 min_val 和 max_val。"
-                from Function.Clean.trimming import trim
-                cleaned_df, summary = trim(df, trim_column, float(min_val), float(max_val))
-            else:
-                return f"❌ 未知操作 '{operation}'，支持：fill_na / winsorize / trimming"
+            cleaned_df, summary = self._clean_dataframe(
+                df, operation, columns, fill_method, lower_pct, upper_pct,
+                trim_column, min_val, max_val,
+            )
         except Exception as exc:
             return f"❌ 清洗失败：{exc}"
+
+        try:
+            self._write_analysis_df(cleaned_df, output_table)
+            self._schema_cache = None
+        except Exception as exc:
+            return summary + f"\n\n⚠️ 结果表写入失败：{exc}"
+
+        return (
+            summary
+            + f"\n\n✅ 清洗结果已保存为表 `{output_table}`，可直接用于后续分析和图表生成。"
+        )
+
+    def _tool_clean_data_with_jobs(
+        self,
+        operation: str,
+        table_name: str = "",
+        columns=None,
+        fill_method: str = "mean",
+        lower_pct: float = 1.0,
+        upper_pct: float = 99.0,
+        trim_column: str = "",
+        min_val=None,
+        max_val=None,
+        output_table: str = "cleaned_data",
+    ):
+        if not self.data_source:
+            return "❌ 请先连接数据源。"
+
+        tname = table_name or self._get_first_raw_table()
+        if not tname:
+            return "❌ 数据源中没有可用的表格。"
+
+        df, err = self.data_source.execute_query(f'SELECT * FROM "{tname}"')
+        if err or df is None or df.empty:
+            return f"❌ 读取表 '{tname}' 失败：{err}"
+
+        should_job = self._job_runner is not None and len(df) >= _CLEAN_JOB_ROW_THRESHOLD
+        if not should_job:
+            try:
+                cleaned_df, summary = self._clean_dataframe(
+                    df, operation, columns, fill_method, lower_pct, upper_pct,
+                    trim_column, min_val, max_val,
+                )
+            except Exception as exc:
+                return f"❌ 清洗失败：{exc}"
+        else:
+            df_snapshot = df.copy(deep=True)
+            columns_snapshot = list(columns or [])
+            params = {
+                "operation": operation,
+                "fill_method": fill_method,
+                "lower_pct": lower_pct,
+                "upper_pct": upper_pct,
+                "trim_column": trim_column,
+                "min_val": min_val,
+                "max_val": max_val,
+            }
+            result_holder = {}
+
+            def _worker(ctx):
+                ctx.set_progress(10, "正在准备清洗数据")
+                ctx.check_canceled()
+                ctx.set_progress(45, "正在执行清洗计算")
+                cleaned, summary_text = self._clean_dataframe(
+                    df_snapshot,
+                    params["operation"],
+                    columns_snapshot,
+                    params["fill_method"],
+                    params["lower_pct"],
+                    params["upper_pct"],
+                    params["trim_column"],
+                    params["min_val"],
+                    params["max_val"],
+                )
+                ctx.check_canceled()
+                result_holder["cleaned_df"] = cleaned
+                result_holder["summary"] = summary_text
+                ctx.set_progress(100, "清洗计算完成")
+                return {
+                    "operation": params["operation"],
+                    "input_rows": len(df_snapshot),
+                    "output_rows": len(cleaned),
+                }
+
+            job = yield from self._run_as_job(
+                _worker,
+                job_type="data_cleaning",
+                label=f"{operation} · {len(df_snapshot)} rows",
+            )
+            if job.get("status") == "canceled":
+                return "数据清洗已取消。"
+            if job.get("status") != "succeeded":
+                return f"❌ 清洗失败：{job.get('error') or 'background job failed'}"
+            cleaned_df = result_holder.get("cleaned_df")
+            summary = result_holder.get("summary", "")
+            if cleaned_df is None:
+                return "❌ 清洗失败：后台结果不可用。"
 
         try:
             self._write_analysis_df(cleaned_df, output_table)

@@ -502,15 +502,15 @@ to switch between models.
 
 # 🗺️ Project Milestones
 
-> **Current version `v1.0.0 LTS`** · June 20, 2026
+> **Current version `v1.1.0 LTS`** · July 2, 2026
 
-This update focuses on multi‑data‑source joint analysis and the stability experience of data ingestion.
+This release introduces the **Slash Command System, File Timeline Rewind, Hooks Automation, and AI Prompt Suggestions**, while significantly improving the chat interface and Dashboard experience. It is the next Long-Term Support (LTS) version following v1.0 LTS.
 
-1. Enhanced cross‑data‑source joint analysis
-2. Excel data ingestion fixes
-3. Optimized data‑source disconnection prompts
-4. Improved model testing experience
-
+1. All-New Slash Command System
+2. Hooks — User Automation
+3. AI Prompt Suggestion
+4. Workspace File Timeline Rewind
+5. Enhanced Workspace Management
 ---
 
 ## 📖 Detailed Changelog

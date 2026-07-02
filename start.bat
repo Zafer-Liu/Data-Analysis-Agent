@@ -17,7 +17,7 @@ rem =========================================================
 set "APP_FILE=app.py"
 set "REQUIREMENTS_FILE=requirements.txt"
 set "VENV_DIR=.venv"
-set "PORT=5001"
+set "PORT=5005"
 set "PIP_MIRROR=https://pypi.tuna.tsinghua.edu.cn/simple"
 set "PY_CMD="
 

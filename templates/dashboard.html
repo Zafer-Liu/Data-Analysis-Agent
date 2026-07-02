@@ -3,44 +3,39 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Dashboard — 智析Agent</title>
+<title>Dashboard</title>
+<script src="{{ url_for('static', filename='js/theme_bootstrap.js', v='fe0') }}"></script>
 <link rel="stylesheet" href="{{ url_for('static', filename='css/parts/tokens.css') }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='vendor/gridstack.min.css') }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}">
 <script defer src="{{ url_for('static', filename='js/modules/desktop_lifecycle.js', v='desktop-lease-1') }}"></script>
-<script>
-(function(){
-  var t = localStorage.getItem("baa_theme");
-  if (t === "dark") document.documentElement.setAttribute("data-theme", "dark");
-})();
-</script>
 </head>
 <body>
 
 <!-- ── Top Nav ── -->
 <nav class="db-nav">
-  <button class="btn-back-nav" id="btn-back" title="返回">←</button>
+  <button class="btn-back-nav" id="btn-back" title="">←</button>
   <div class="nav-brand">
     <span class="nav-brand-icon">📊</span>
-    <span>智析Agent</span>
+    <span id="nav-brand-label"></span>
   </div>
   <div class="nav-title" id="db-name">Dashboard</div>
   <div class="nav-meta" id="db-meta"></div>
   <div class="nav-actions">
     <div class="nav-refresh-group">
       <select class="nav-refresh-sel" id="auto-refresh-sel">
-        <option value="0">手动刷新</option>
-        <option value="30">30 秒</option>
-        <option value="60">1 分钟</option>
-        <option value="300">5 分钟</option>
-        <option value="600">10 分钟</option>
+        <option value="0" id="opt-manual"></option>
+        <option value="30" id="opt-30s"></option>
+        <option value="60" id="opt-1m"></option>
+        <option value="300" id="opt-5m"></option>
+        <option value="600" id="opt-10m"></option>
       </select>
       <button class="btn-nav attached-r" id="btn-refresh">
-        <span id="refresh-icon">↻</span> 刷新数据
+        <span id="refresh-icon">↻</span> <span id="btn-refresh-label"></span>
       </button>
     </div>
     <span class="db-refresh-countdown" id="refresh-countdown" style="display:none;"></span>
-    <button class="btn-nav primary" id="btn-save-layout" disabled>💾 保存布局</button>
+    <button class="btn-nav primary" id="btn-save-layout" disabled></button>
   </div>
 </nav>
 
@@ -65,8 +60,8 @@
   <!-- Empty state -->
   <div class="db-empty" id="empty-state" style="display:none;">
     <div class="db-empty-icon">📊</div>
-    <div class="db-empty-title">看板为空</div>
-    <div class="db-empty-desc">该看板没有任何图表组件</div>
+    <div class="db-empty-title" id="empty-title"></div>
+    <div class="db-empty-desc" id="empty-desc"></div>
   </div>
 
 </div><!-- /.db-page -->
@@ -74,14 +69,12 @@
 <!-- ── Session-ID Modal ── -->
 <div class="modal-backdrop" id="sid-modal" style="display:none;">
   <div class="modal-box">
-    <div class="modal-title">🔗 连接数据源</div>
-    <div class="modal-desc">
-      刷新看板需要有效的对话 Session ID（聊天页面地址栏可找到），以便重新查询数据。
-    </div>
-    <input class="modal-input" id="sid-input" type="text" placeholder="输入 Session ID…">
+    <div class="modal-title" id="sid-modal-title"></div>
+    <div class="modal-desc" id="sid-modal-desc"></div>
+    <input class="modal-input" id="sid-input" type="text" placeholder="">
     <div class="modal-actions">
-      <button class="btn-modal" id="sid-cancel">取消</button>
-      <button class="btn-modal primary" id="sid-ok">确认</button>
+      <button class="btn-modal" id="sid-cancel"></button>
+      <button class="btn-modal primary" id="sid-ok"></button>
     </div>
   </div>
 </div>
@@ -91,5 +84,9 @@
 
 <script src="{{ url_for('static', filename='vendor/gridstack-all.js') }}"></script>
 <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+<!-- dashboard 页面为纯原生 JS，无 Vue island；vite 入口（仅注入 BAA.api）
+     在 dashboard 上无消费者，故不引用。chat 页面才有 Vue island。
+     <script type="module" src="{{ url_for('static', filename='dist/dashboard.js') }}"></script>
+-->
 </body>
 </html>

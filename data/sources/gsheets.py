@@ -28,6 +28,9 @@ class GoogleSheetsDataSource(DataSource):
         import gspread
         from google.oauth2.service_account import Credentials
 
+        self._creds_dict = creds_dict
+        self._spreadsheet_ref = spreadsheet_url_or_id
+
         scopes = [
             "https://www.googleapis.com/auth/spreadsheets.readonly",
             "https://www.googleapis.com/auth/drive.readonly",

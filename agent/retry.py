@@ -21,6 +21,21 @@ log = logging.getLogger(__name__)
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
 
+def is_context_length_error(exc: Exception) -> bool:
+    """Return True for provider variants of context-window overflow errors."""
+    message = str(exc).lower().replace("-", "_").replace(" ", "_")
+    markers = (
+        "prompt_too_long",
+        "context_length_exceeded",
+        "maximum_context_length",
+        "max_context_length",
+        "context_window_exceeded",
+        "too_many_input_tokens",
+        "request_too_large_for_model",
+    )
+    return any(marker in message for marker in markers)
+
+
 def is_retryable(exc: Exception) -> Tuple[bool, float]:
     """Return (should_retry, base_wait_seconds) for an exception.
 
@@ -28,6 +43,9 @@ def is_retryable(exc: Exception) -> Tuple[bool, float]:
     the actual sleep, so values here are the *first attempt* delay only.
     """
     msg = str(exc).lower()
+    # Context overflow needs compaction, not exponential network retries.
+    if is_context_length_error(exc):
+        return False, 0.0
     # Rate limit: respect Retry-After if present (not parsed yet — just back off more)
     if "429" in msg or "rate limit" in msg or "too many requests" in msg:
         return True, 5.0

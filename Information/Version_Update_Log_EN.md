@@ -1,5 +1,39 @@
 # Version Development Log
 
+## v1.1.0 LTS
+**July 2, 2026**
+
+This release introduces the **Slash Command System, File Timeline Rewind, Hooks Automation, and AI Prompt Suggestions**, while significantly improving the chat interface and Dashboard experience. It is the next Long-Term Support (LTS) version following v1.0 LTS.
+
+### 1. All-New Slash Command System
+- Rebuilt slash commands with new system commands: `/new` (new session), `/stop` (stop response), `/data` (data preview), `/jobs` (task history), `/compact` (compress context), and more
+- Supports alias search, Tab completion, and argument hints; use `/help <command>` for detailed descriptions
+- Custom Prompt Commands: place a Markdown file in `.baa/commands/` inside your workspace to add custom commands
+
+### 2. Hooks — User Automation
+- New Hooks v1: trigger automated actions at key points in the AI session (session start, before/after each turn, before/after tool calls)
+- Edit, validate, and test Hooks configuration directly from the app settings panel
+- The Agent can read public documentation or API descriptions and automatically generate a Hooks configuration for you
+
+### 3. AI Prompt Suggestion
+- After each AI reply, the system automatically predicts and pre-fills a suggested next message into the input box
+- Pre-fill only applies when the input box is empty; typing, sending, or switching sessions clears the suggestion
+- Press Enter to send the suggestion directly, or edit it first
+
+### 4. Workspace File Timeline Rewind
+- A snapshot is automatically created before each message is sent; file versions are backed up before any write operation
+- `/checkpoint` opens a timeline panel showing each snapshot's trigger message and number of modified files
+- Three rewind modes: restore files + conversation, conversation only, or files only
+
+### 5. Enhanced Workspace Management
+- The workspace panel now shows a history list — switch back to previously used directories with one click
+- Rename the display name of any workspace without affecting the actual file path
+- "Remove from list" hides a workspace entry while keeping all local files intact
+- New storage cleanup tool: automatically identifies and removes stale caches to free disk space
+
+
+---
+
 ## v1.0 LTS
 **June/20/2026**
 - The project officially released its first stable version

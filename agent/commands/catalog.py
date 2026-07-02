@@ -5,6 +5,7 @@ only MewCode-style application control commands.
 """
 from __future__ import annotations
 
+from functools import lru_cache
 from pathlib import Path
 
 from .models import CommandDef, CommandType
@@ -25,6 +26,11 @@ _FALLBACK = (
     ("checkpoint", "查看对话快照并回退文件、对话或两者", "⏪", "tools"),
     ("status", "查看当前模型、数据源和 Token 上下文状态", "📡", "tools"),
     ("skills", "查看、选择或刷新数据分析 Skill", "🧩", "tools"),
+    ("new", "新建一个干净的分析会话", "✨", "session"),
+    ("stop", "停止当前正在生成的回复", "⏹️", "session"),
+    ("data", "打开当前数据源和数据表预览", "🗂️", "tools"),
+    ("jobs", "打开任务历史和运行状态", "🕘", "tools"),
+    ("teams", "打开分析团队和沟通记录", "👥", "tools"),
 )
 
 _FALLBACK_ACTIONS = {
@@ -32,8 +38,19 @@ _FALLBACK_ACTIONS = {
     "sessions": "session", "knowledge": "memory", "workspace": "permission",
     "checkpoint": "rewind", "skills": "skill",
 }
+_FALLBACK_ALIASES = {
+    "help": ("h", "?"), "status": ("s",), "compact": ("c",),
+    "instruction": ("i",), "sessions": ("session",), "knowledge": ("kb",),
+    "workspace": ("ws",), "checkpoint": ("cp",), "skills": ("sk",),
+    "new": ("n",),
+}
+_FALLBACK_LOCAL = frozenset({"help", "status"})
+_FALLBACK_OPTIONAL_ARGS = frozenset({
+    "help", "compact", "instruction", "sessions", "skills",
+})
 
 
+@lru_cache(maxsize=1)
 def builtin_commands() -> tuple[CommandDef, ...]:
     if PROJECT_COMMANDS_DIR.is_dir():
         loaded: list[CommandDef] = []
@@ -52,10 +69,22 @@ def builtin_commands() -> tuple[CommandDef, ...]:
     # Packaging fallback for installations missing the command content folder.
     commands: list[CommandDef] = []
     for name, description, icon, category in _FALLBACK:
+        if name == "compact":
+            command_type = CommandType.BACKEND
+            handler_key = "server:compact"
+        elif name in _FALLBACK_LOCAL:
+            command_type = CommandType.LOCAL
+            handler_key = f"client:{_FALLBACK_ACTIONS.get(name, name)}"
+        else:
+            command_type = CommandType.LOCAL_UI
+            handler_key = f"client:{_FALLBACK_ACTIONS.get(name, name)}"
         commands.append(CommandDef(
-            name=name, description=description, type=CommandType.LOCAL,
+            name=name, description=description, type=command_type,
             icon=icon, category=category,
-            handler_key=f"client:{_FALLBACK_ACTIONS.get(name, name)}",
+            aliases=_FALLBACK_ALIASES.get(name, ()),
+            arguments=("optional" if name in _FALLBACK_OPTIONAL_ARGS else "none"),
+            handler_key=handler_key,
             protected=True,
+            uses_model=(name == "compact"),
         ))
     return tuple(commands)

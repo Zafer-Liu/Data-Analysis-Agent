@@ -45,15 +45,25 @@ class TestWorkspaceTools(unittest.TestCase):
         workspace_manager.metadata_store = self.original_metadata_store
         self.tmp.cleanup()
 
-    def test_system_file_tools_are_always_exposed(self):
+    def test_system_file_tools_are_discovered_on_demand(self):
         system_only = _names(filter_tools_for_turn(
             AGENT_TOOLS, has_data_source=False, has_workspace=False, include_mcp=False
         ))
-        visible = _names(filter_tools_for_turn(
-            AGENT_TOOLS, has_data_source=False, has_workspace=True, include_mcp=False
+        requested = {
+            "workspace_read_file", "workspace_write_file",
+            "workspace_delete_file", "workspace_move_file", "workspace_bash",
+        }
+        system_discovered = _names(filter_tools_for_turn(
+            AGENT_TOOLS, has_data_source=False, has_workspace=False,
+            discovered_tools=requested, include_mcp=False,
         ))
-        self.assertIn("workspace_read_file", system_only)
+        visible = _names(filter_tools_for_turn(
+            AGENT_TOOLS, has_data_source=False, has_workspace=True,
+            discovered_tools=requested, include_mcp=False,
+        ))
+        self.assertNotIn("workspace_read_file", system_only)
         self.assertNotIn("task_create", system_only)
+        self.assertIn("workspace_read_file", system_discovered)
         self.assertIn("workspace_read_file", visible)
         self.assertIn("workspace_write_file", visible)
         self.assertIn("workspace_delete_file", visible)

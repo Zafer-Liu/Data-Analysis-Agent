@@ -3,6 +3,7 @@
 """In-memory session management for the business analyst agent."""
 import logging
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field, fields, MISSING
 from datetime import datetime
@@ -67,6 +68,20 @@ class ChatSession:
     total_input_tokens: int = 0
     total_output_tokens: int = 0
     last_prompt_tokens: int = 0      # most recent call's prompt size (for context bar)
+    total_cached_input_tokens: int = 0
+    total_cache_write_tokens: int = 0
+    usage_breakdowns: List[Dict[str, Any]] = field(default_factory=list)
+    # Bounded, content-free Slash Command execution telemetry.
+    command_metrics: List[Dict[str, Any]] = field(default_factory=list)
+    # Mutable, session-owned auto-compaction circuit state. BusinessAgent keeps
+    # a reference to this dict so failures survive across user turns.
+    compaction_state: Dict[str, Any] = field(default_factory=lambda: {
+        "consecutive_failures": 0,
+        "last_failure_type": "",
+        "circuit_open": False,
+        "last_attempt_at": 0.0,
+        "last_success_at": 0.0,
+    })
     # Cancellation flag — set by POST /api/session/<sid>/stop
     cancel_requested: bool = False
     # IDs of every chart generated in this session (appended by api/chat.py)
@@ -101,6 +116,14 @@ class ChatSession:
     # Typed activation audit, kept outside LLM message history so provider
     # payloads never receive application-only fields.
     turn_activations: List[Dict[str, Any]] = field(default_factory=list)
+    # D6: low-frequency tools discovered from user language stay available in
+    # this session, while data/workspace guards are still evaluated per turn.
+    discovered_tools: List[str] = field(default_factory=list)
+    # Phase 2: bounded MCP full-schema discovery cache. Names are ordered from
+    # least to most recently discovered/used.
+    discovered_mcp_tools: List[str] = field(default_factory=list)
+    mcp_tool_last_used: Dict[str, float] = field(default_factory=dict)
+    mcp_catalog_version: str = ""
     # C4.0 source lifecycle. Removed/switched sources remain usable by the
     # conversation snapshots that leased them, then close at the last release.
     _source_lock: threading.RLock = field(
@@ -108,6 +131,9 @@ class ChatSession:
     )
     _source_lease_counts: Dict[int, int] = field(default_factory=dict, repr=False)
     _retired_sources: Dict[int, Any] = field(default_factory=dict, repr=False)
+    _usage_lock: threading.RLock = field(
+        default_factory=threading.RLock, repr=False, compare=False,
+    )
 
     # ── Multi-source API ───────────────────────────────────────────────────────
 
@@ -440,7 +466,7 @@ class ChatSession:
             self.recent_artifacts.append({
                 k: artifact.get(k) for k in (
                     "type", "artifact_id", "name", "uri", "url", "size_bytes", "sha256",
-                    "workspace_id",
+                    "workspace_id", "session_id",
                 ) if artifact.get(k) not in (None, "")
             })
             self.recent_artifacts = self.recent_artifacts[-20:]
@@ -455,6 +481,59 @@ class ChatSession:
         })
         self.turn_activations.append(record)
         self.turn_activations = self.turn_activations[-100:]
+
+    def record_discovered_tools(self, message: str) -> List[str]:
+        from agent.tools.exposure import discover_tool_names_for_query
+
+        discovered = sorted(discover_tool_names_for_query(message))
+        if not discovered:
+            return []
+        existing = list(self.discovered_tools or [])
+        seen = set(existing)
+        added = []
+        for tool in discovered:
+            if tool not in seen:
+                existing.append(tool)
+                seen.add(tool)
+                added.append(tool)
+        self.discovered_tools = existing[-100:]
+        return added
+
+    def record_discovered_mcp_tools(
+        self,
+        names,
+        catalog_version: str,
+        *,
+        used: bool = False,
+    ) -> List[str]:
+        """Synchronize MCP catalog identity and update the 10-name LRU."""
+        version = str(catalog_version or "")
+        with self._usage_lock:
+            if version != self.mcp_catalog_version:
+                self.discovered_mcp_tools = []
+                self.mcp_tool_last_used = {}
+                self.mcp_catalog_version = version
+            existing = list(self.discovered_mcp_tools or [])
+            added: List[str] = []
+            now = time.time()
+            for raw_name in names or ():
+                name = str(raw_name or "")
+                if not name.startswith("mcp__"):
+                    continue
+                if name in existing:
+                    existing.remove(name)
+                else:
+                    added.append(name)
+                existing.append(name)
+                if used:
+                    self.mcp_tool_last_used[name] = now
+            self.discovered_mcp_tools = existing[-10:]
+            retained = set(self.discovered_mcp_tools)
+            self.mcp_tool_last_used = {
+                name: value for name, value in self.mcp_tool_last_used.items()
+                if name in retained
+            }
+            return added
 
     def build_recovery_context(self, workspace_status: Optional[Dict[str, Any]] = None) -> str:
         """Build a small system context that survives compaction and reload."""
@@ -505,9 +584,24 @@ class ChatSession:
         self.total_input_tokens = 0
         self.total_output_tokens = 0
         self.last_prompt_tokens = 0
+        self.total_cached_input_tokens = 0
+        self.total_cache_write_tokens = 0
+        self.usage_breakdowns.clear()
+        self.command_metrics.clear()
+        self.compaction_state = {
+            "consecutive_failures": 0,
+            "last_failure_type": "",
+            "circuit_open": False,
+            "last_attempt_at": 0.0,
+            "last_success_at": 0.0,
+        }
         self.recent_sql.clear()
         self.recent_artifacts.clear()
         self.turn_activations.clear()
+        self.discovered_tools.clear()
+        self.discovered_mcp_tools.clear()
+        self.mcp_tool_last_used.clear()
+        self.mcp_catalog_version = ""
 
     def capture_rewind_state(self) -> Dict[str, Any]:
         """Return the conversation-owned state restored by file history."""
@@ -519,9 +613,18 @@ class ChatSession:
             "total_input_tokens": self.total_input_tokens,
             "total_output_tokens": self.total_output_tokens,
             "last_prompt_tokens": self.last_prompt_tokens,
+            "total_cached_input_tokens": self.total_cached_input_tokens,
+            "total_cache_write_tokens": self.total_cache_write_tokens,
+            "usage_breakdowns": self.usage_breakdowns,
+            "command_metrics": self.command_metrics,
+            "compaction_state": self.compaction_state,
             "recent_sql": self.recent_sql,
             "recent_artifacts": self.recent_artifacts,
             "turn_activations": self.turn_activations,
+            "discovered_tools": self.discovered_tools,
+            "discovered_mcp_tools": self.discovered_mcp_tools,
+            "mcp_tool_last_used": self.mcp_tool_last_used,
+            "mcp_catalog_version": self.mcp_catalog_version,
         })
 
     def restore_rewind_state(self, state: Dict[str, Any]) -> None:
@@ -533,14 +636,97 @@ class ChatSession:
         self.total_input_tokens = int(state.get("total_input_tokens") or 0)
         self.total_output_tokens = int(state.get("total_output_tokens") or 0)
         self.last_prompt_tokens = int(state.get("last_prompt_tokens") or 0)
+        self.total_cached_input_tokens = int(
+            state.get("total_cached_input_tokens") or 0
+        )
+        self.total_cache_write_tokens = int(
+            state.get("total_cache_write_tokens") or 0
+        )
+        self.usage_breakdowns = copy.deepcopy(
+            list(state.get("usage_breakdowns") or [])
+        )[-100:]
+        self.command_metrics = copy.deepcopy(
+            list(state.get("command_metrics") or [])
+        )[-200:]
+        self.compaction_state = copy.deepcopy(dict(state.get("compaction_state") or {
+            "consecutive_failures": 0,
+            "last_failure_type": "",
+            "circuit_open": False,
+            "last_attempt_at": 0.0,
+            "last_success_at": 0.0,
+        }))
         self.recent_sql = copy.deepcopy(list(state.get("recent_sql") or []))[-5:]
         self.recent_artifacts = copy.deepcopy(list(state.get("recent_artifacts") or []))[-20:]
         self.turn_activations = copy.deepcopy(list(state.get("turn_activations") or []))[-100:]
+        self.discovered_tools = copy.deepcopy(list(state.get("discovered_tools") or []))[-100:]
+        self.discovered_mcp_tools = copy.deepcopy(
+            list(state.get("discovered_mcp_tools") or [])
+        )[-10:]
+        self.mcp_tool_last_used = {
+            str(name): float(value or 0)
+            for name, value in dict(state.get("mcp_tool_last_used") or {}).items()
+            if str(name) in self.discovered_mcp_tools
+        }
+        self.mcp_catalog_version = str(state.get("mcp_catalog_version") or "")
 
-    def record_usage(self, prompt_tokens: int, completion_tokens: int):
-        self.total_input_tokens += prompt_tokens
-        self.total_output_tokens += completion_tokens
-        self.last_prompt_tokens = prompt_tokens
+    def record_usage(
+        self,
+        prompt_tokens: int,
+        completion_tokens: int,
+        *,
+        breakdown: Optional[Dict[str, Any]] = None,
+        cached_input_tokens: int = 0,
+        cache_write_tokens: int = 0,
+        update_last_prompt: bool = True,
+    ):
+        prompt_tokens = int(prompt_tokens or 0)
+        completion_tokens = int(completion_tokens or 0)
+        cached_input_tokens = int(cached_input_tokens or 0)
+        cache_write_tokens = int(cache_write_tokens or 0)
+        with self._usage_lock:
+            self.total_input_tokens += prompt_tokens
+            self.total_output_tokens += completion_tokens
+            if update_last_prompt:
+                self.last_prompt_tokens = prompt_tokens
+            self.total_cached_input_tokens += cached_input_tokens
+            self.total_cache_write_tokens += cache_write_tokens
+            if isinstance(breakdown, dict):
+                self.usage_breakdowns.append(dict(breakdown))
+                self.usage_breakdowns = self.usage_breakdowns[-100:]
+
+    def record_command_metric(
+        self,
+        *,
+        command: str,
+        command_type: str,
+        outcome: str,
+        duration_ms: int = 0,
+        error_code: str = "",
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cached_input_tokens: int = 0,
+        compression_ratio: float | None = None,
+    ) -> None:
+        """Record bounded command telemetry without arguments or Prompt text."""
+        item = {
+            "command": str(command or "")[:80],
+            "command_type": str(command_type or "")[:20],
+            "outcome": str(outcome or "")[:20],
+            "duration_ms": max(0, min(int(duration_ms or 0), 86_400_000)),
+            "error_code": str(error_code or "")[:80],
+            "input_tokens": max(0, int(input_tokens or 0)),
+            "output_tokens": max(0, int(output_tokens or 0)),
+            "cached_input_tokens": max(0, int(cached_input_tokens or 0)),
+            "recorded_at": time.time(),
+        }
+        if compression_ratio is not None:
+            item["compression_ratio"] = round(
+                max(0.0, min(float(compression_ratio), 1.0)),
+                4,
+            )
+        with self._usage_lock:
+            self.command_metrics.append(item)
+            self.command_metrics = self.command_metrics[-200:]
 
     def _ensure_fields(self):
         """Backfill any dataclass field missing on objects created by an
