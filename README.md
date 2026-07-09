@@ -89,32 +89,33 @@
 
 感谢以下赞助商对本项目的支持！
 
-<table>
-<tr>
-<td width="50%" align="center" valign="top">
-<a href="https://doloffer.com/"><img src="./Information/assets/DolOffer.png" alt="DolOffer logo" height="80" /></a>
-<br>
-<a href="https://doloffer.com/"><strong>DolOffer</strong></a>
-<br>
-<br>
-<p align="left">
-感谢 DolOffer 对本项目的支持！DolOffer 是一个专注于数字产品推荐与优惠分享的平台，帮助用户快速发现值得关注的工具、服务和限时福利。平台提供 YouTube Premium、Claude、ChatGPT Plus、Spotify、Apple Music 等多种热门订阅服务，价格低至官方价的 3 折甚至更低，正版稳定，售后无忧。现在通过我们的专属链接注册，并在充值时输入优惠码 <strong>AI8888</strong>，即可额外享受 9 折优惠。
-</p>
-<a href="https://github.com/Doloffer-g/guide">了解更多 →</a>
-</td>
-<td width="50%" align="center" valign="top">
-<a href="https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=data-analysis-agent"><img src="./Information/assets/ATLAS%20CLOUD.png" alt="Atlas Cloud logo" height="80" /></a>
-<br>
-<a href="https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=data-analysis-agent"><strong>Atlas Cloud</strong></a>
-<br>
-<br>
-<p align="left">
+## ☁️ 赞助 · Sponsored by Bloome
+
+<a href="https://bloome.im/login?ref=ZaferLiu"><img src="./Information/assets/bloome.png" alt="Bloome banner" /></a>
+
+感谢 Bloome 对本项目的赞助！Bloome 让多个 AI agent（Claude、ChatGPT、DeepSeek 等）在同一个对话里协作——零配置、云端运行，网页和手机都能用，还能把配好的 agent 分享给团队。
+
+👉 **试试 Bloome：[https://bloome.im/login?ref=ZaferLiu](https://bloome.im/login?ref=ZaferLiu)**
+
+---
+
+## ☁️ 赞助 · Sponsored by DolOffer
+
+<div align="center"><a href="https://doloffer.com/"><img src="./Information/assets/DolOffer.png" alt="DolOffer logo" height="80" /></a></div>
+
+感谢 DolOffer 对本项目的支持！DolOffer 是一个专注于数字产品推荐与优惠分享的平台，帮助用户快速发现值得关注的工具、服务和限时福利。平台提供 YouTube Premium、Claude、ChatGPT Plus、Spotify、Apple Music 等多种热门订阅服务，价格低至官方价的 3 折甚至更低，正版稳定，售后无忧。现在通过我们的专属链接注册，并在充值时输入优惠码 **AI8888**，即可额外享受 9 折优惠。
+
+👉 **了解更多：[https://github.com/Doloffer-g/guide](https://github.com/Doloffer-g/guide)**
+
+---
+
+## ☁️ 赞助 · Sponsored by Atlas Cloud
+
+<p align="center"><a href="https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=data-analysis-agent"><img src="./Information/assets/ATLAS%20CLOUD.png" alt="Atlas Cloud logo" height="80" /></a></p>
+
 感谢 Atlas Cloud 对本项目的支持！Atlas Cloud 是一个全模态 AI 推理平台，为开发者提供统一的 AI API 接口，涵盖视频生成、图像生成和大语言模型 API。您无需分别集成多个供应商，只需一次连接即可统一访问 300 多个精选的全模态模型。快来查看 Atlas Cloud 新推出的编程套餐推广活动，获取更经济实惠的 API 访问。
-</p>
-<a href="https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=data-analysis-agent">了解更多 →</a>
-</td>
-</tr>
-</table>
+
+👉 **了解更多：[https://www.atlascloud.ai](https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=data-analysis-agent)**
 
 ---
 

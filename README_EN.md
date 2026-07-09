@@ -90,28 +90,33 @@ This release introduces the **Slash Command System, File Timeline Rewind, Hooks 
 
 Thank you to the following sponsors for supporting this project!
 
-<table>
-<tr>
-<td width="50%" align="center" valign="top">
-<a href="https://doloffer.com/"><strong>DolOffer</strong></a>
-<br>
-<br>
-<p align="left">
-Thank you to DolOffer for supporting this project! DolOffer is a platform focused on digital product recommendations and deal sharing, helping users quickly discover useful tools, services, and limited-time offers. The platform provides popular subscription services such as YouTube Premium, Claude, ChatGPT Plus, Spotify, Apple Music, and more, with prices as low as 30% of the official price or even lower. All services are genuine, stable, and backed by reliable after-sales support. Register through our exclusive link and use the coupon code <strong>AI8888</strong> when topping up to enjoy an additional 10% discount.
-</p>
-<a href="https://github.com/Doloffer-g/guide">Learn more →</a>
-</td>
-<td width="50%" align="center" valign="top">
-<a href="https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=data-analysis-agent"><strong>Atlas Cloud</strong></a>
-<br>
-<br>
-<p align="left">
+## ☁️ Sponsored by Bloome
+
+<a href="https://bloome.im/login?ref=ZaferLiu"><img src="./Information/assets/bloome.png" alt="Bloome banner" /></a>
+
+Thank you to Bloome for sponsoring this project! Bloome lets multiple AI agents (Claude, ChatGPT, DeepSeek, etc.) collaborate in a single conversation — zero setup, cloud-based, works on web and mobile, and you can share your configured agents with your team.
+
+👉 **Try Bloome: [https://bloome.im/login?ref=ZaferLiu](https://bloome.im/login?ref=ZaferLiu)**
+
+---
+
+## ☁️ Sponsored by DolOffer
+
+<p align="center"><a href="https://doloffer.com/"><img src="./Information/assets/DolOffer.png" alt="DolOffer logo" height="80" /></a></p>
+
+Thank you to DolOffer for supporting this project! DolOffer is a platform focused on digital product recommendations and deal sharing, helping users quickly discover useful tools, services, and limited-time offers. The platform provides popular subscription services such as YouTube Premium, Claude, ChatGPT Plus, Spotify, Apple Music, and more, with prices as low as 30% of the official price or even lower. All services are genuine, stable, and backed by reliable after-sales support. Register through our exclusive link and use the coupon code **AI8888** when topping up to enjoy an additional 10% discount.
+
+👉 **Learn more: [https://github.com/Doloffer-g/guide](https://github.com/Doloffer-g/guide)**
+
+---
+
+## ☁️ Sponsored by Atlas Cloud
+
+<div align="center"><a href="https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=data-analysis-agent"><img src="./Information/assets/ATLAS%20CLOUD.png" alt="Atlas Cloud logo" height="80" /></a></div>
+
 Thank you to Atlas Cloud for supporting this project! Atlas Cloud is an all-modal AI inference platform that provides developers with a unified AI API interface, covering video generation, image generation, and large language model APIs. Instead of integrating multiple providers separately, you can connect once and access more than 300 carefully selected all-modal models through a single interface. Check out Atlas Cloud’s newly launched coding plan promotion to get more cost-effective API access.
-</p>
-<a href="https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=data-analysis-agent">Learn more →</a>
-</td>
-</tr>
-</table>
+
+👉 **Learn more: [https://www.atlascloud.ai](https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=data-analysis-agent)**
 
 ---
 
@@ -755,5 +760,8 @@ Leave the process to Business Analytics Agent, and save your time for thinking.
 ⭐️ If this project helps you, please give it a star!
 
 Made with ❤️ by [Zafer-Liu](https://github.com/Zafer-Liu)
+
+</div>
+� by [Zafer-Liu](https://github.com/Zafer-Liu)
 
 </div>
