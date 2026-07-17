@@ -69,13 +69,13 @@
 
 > **Current version [`v1.2.0 LTS`](https://github.com/Zafer-Liu/Data-Analysis-Agent/releases/latest)** · July 17, 2026 · [📦 Download Installer](https://github.com/Zafer-Liu/Data-Analysis-Agent/releases/latest)
 
-This release introduces the **Slash Command System, File Timeline Rewind, Hooks Automation, and AI Prompt Suggestions**, while significantly improving the chat interface and Dashboard experience. It is the next Long-Term Support (LTS) version following v1.0 LTS.
+v1.2.0 LTS focuses on a smoother, more reliable data-analysis experience:
 
-1. All-New Slash Command System
-2. Hooks — User Automation
-3. AI Prompt Suggestion
-4. Workspace File Timeline Rewind
-5. Enhanced Workspace Management
+1. **AI Team Collaboration**: Break complex work into tasks for specialist Agents, with progress and results clearly visible.
+2. **Business Canvas and Skills**: Map business relationships, reuse proven analysis methods, and create dashboards and visual results faster.
+3. **More Reliable Data Processing**: Long-running tasks and local-data workflows are more dependable and reassuring.
+4. **Local Data Cleanup**: Review storage and cleanup candidates in **Settings → Storage**; files go to the Recycle Bin first and important data remains protected.
+5. **Refined Everyday Experience**: Chat, workspace, and frequent actions are clearer and easier to use.
 
 ## 📖 Detailed Changelog
 
