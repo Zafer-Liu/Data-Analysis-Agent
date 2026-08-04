@@ -135,6 +135,11 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
+      - name: Install macOS ODBC runtime
+        shell: bash
+        run: |
+          brew install unixodbc
+          test -f "$(brew --prefix unixodbc)/lib/libodbc.2.dylib"
       - name: Resolve package version
         shell: bash
         run: |
@@ -158,6 +163,7 @@ jobs:
             python -m pip install -r requirements.txt
           fi
           python -m pip install -r requirements-build.txt
+          python -c "import pyodbc; print('pyodbc:', pyodbc.version)"
       - name: Build audited macOS DMG
         shell: bash
         run: bash packaging/build_macos.sh --version "$PACKAGE_VERSION"
