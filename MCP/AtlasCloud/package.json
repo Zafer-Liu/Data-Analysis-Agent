@@ -14,7 +14,7 @@
     "clean": "rm -rf dist"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20.18.1"
   },
   "keywords": [
     "mcp",
@@ -33,7 +33,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
-    "tsx": "^4.19.2",
+    "tsx": "^4.23.5",
     "typescript": "^5.7.2"
   }
 }
