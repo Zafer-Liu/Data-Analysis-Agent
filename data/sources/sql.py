@@ -42,7 +42,15 @@ class SQLDataSource(DataSource):
     def __init__(self, connection_string: str, display_name: str = ""):
         from sqlalchemy import create_engine, text, inspect as sa_inspect
 
-        self._engine = create_engine(connection_string, pool_pre_ping=True)
+        # SQL Server connections otherwise use the ODBC driver's long default
+        # login timeout.  Keep the UI responsive when the host/port is wrong.
+        # `timeout` is a pyodbc-specific connect argument, so never pass it to
+        # the other SQLAlchemy dialects.
+        is_sql_server = connection_string.lower().startswith("mssql")
+        engine_options = {"pool_pre_ping": True}
+        if is_sql_server:
+            engine_options["connect_args"] = {"timeout": 10}
+        self._engine = create_engine(connection_string, **engine_options)
         with self._engine.connect() as conn:
             conn.execute(text("SELECT 1"))
 

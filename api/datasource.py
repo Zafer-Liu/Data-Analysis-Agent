@@ -56,6 +56,32 @@ def _friendly_conn_error(exc: Exception, service: str) -> str:
         cur = cur.__cause__ or cur.__context__
     text = "  ".join(f"{type(c).__name__}: {c}" for c in chain).lower()
 
+    # — SQL Server client prerequisites —
+    if "no module named 'pyodbc'" in text or "no module named \"pyodbc\"" in text:
+        return (
+            "SQL Server 驱动未安装：请升级或重新运行本程序以安装 pyodbc，"
+            "并在此电脑安装 Microsoft ODBC Driver 17 或 18 for SQL Server 后重试。"
+        )
+    if any(k in text for k in (
+        "data source name not found", "no default driver specified",
+        "can't open lib 'odbc driver", "cannot open lib 'odbc driver",
+    )):
+        return (
+            "未找到 SQL Server ODBC 驱动：请安装 Microsoft ODBC Driver 17 或 18 for SQL Server，"
+            "并在连接串中指定已安装的驱动名称。"
+        )
+
+    # — SQL Server reachability / instance discovery —
+    if any(k in text for k in (
+        "server is not found or not accessible", "named pipes provider",
+        "tcp provider", "sql server does not exist", "error: 258", "10060",
+        "08001", "08s01",
+    )):
+        return (
+            "无法连接 SQL Server：请确认服务器地址/实例名和端口正确，SQL Server 已启用 TCP/IP，"
+            "防火墙已放行端口（通常为 1433），且客户端网络可访问该服务器。"
+        )
+
     # — Network unreachable / connection reset (proxy, GFW, offline) —
     if any(k in text for k in (
         "10054", "connection aborted", "connection reset", "connectionreseterror",

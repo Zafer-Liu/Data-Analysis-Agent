@@ -592,8 +592,6 @@ xattr -d com.apple.quarantine /你的路径/start.command
 
 </details>
 
-</details>
-
 ---
 
 <details>
@@ -626,6 +624,27 @@ xattr -d com.apple.quarantine /你的路径/start.command
 ---
 
 <details>
+<summary><b>为什么 MySQL 能连接，但 SQL Server 无法连接？</b></summary>
+
+SQL Server 连接除本程序安装的 `pyodbc` Python 包外，还依赖 Windows 中的
+[Microsoft ODBC Driver 17 或 18 for SQL Server](https://learn.microsoft.com/sql/connect/odbc/download-odbc-driver-for-sql-server)。
+`pyodbc` 仅负责让 Python 调用 ODBC；实际的 SQL Server 认证、加密和网络通信由 Microsoft ODBC Driver 完成。
+
+安装驱动并重启程序后，使用与已安装驱动版本一致的连接串。例如安装 ODBC Driver 18：
+
+```text
+mssql+pyodbc://用户名:密码@服务器:1433/数据库名?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes
+```
+
+如果仍不能连接，请依次确认：SQL Server 已启用 TCP/IP；地址和端口正确（通常为 `1433`）；
+服务器防火墙已放行该端口；以及用户名、密码和数据库访问权限有效。命名实例建议改填实际 TCP 端口，
+例如 `服务器:1433`，避免实例发现被网络策略阻断。
+
+</details>
+
+---
+
+<details>
 <summary><b>🗄️ 数据库连接</b></summary>
 
 <br>
@@ -638,6 +657,16 @@ xattr -d com.apple.quarantine /你的路径/start.command
 ```text
 mysql+pymysql://用户名:密码@主机:端口/数据库名
 ```
+
+SQL Server（Windows）请使用 ODBC 连接串；首次使用还需安装
+[Microsoft ODBC Driver 17 或 18 for SQL Server](https://learn.microsoft.com/sql/connect/odbc/download-odbc-driver-for-sql-server)：
+
+```text
+mssql+pyodbc://用户名:密码@服务器:1433/数据库名?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes
+```
+
+若使用命名实例，请优先在 SQL Server 配置管理器中启用 TCP/IP，并填写实际 TCP 端口，
+例如 `服务器:1433`，以避免实例发现被网络或防火墙阻断。
 
 示例：
 

@@ -54,6 +54,7 @@ pmdarima>=2.0.0
 sqlalchemy>=2.0.0
 pymysql>=1.0.0        # MySQL driver
 psycopg2-binary>=2.9  # PostgreSQL driver
+pyodbc>=5.0.0         # SQL Server driver (requires Microsoft ODBC Driver 17/18 on the host)
 
 # SQL parsing (AST-level validation & table-name extraction)
 sqlglot>=23.0.0

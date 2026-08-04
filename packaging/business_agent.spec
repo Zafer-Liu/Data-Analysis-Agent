@@ -81,8 +81,10 @@ hiddenimports = [
     "duckdb",
     "pymysql",
     "psycopg2",
+    "pyodbc",
     "sqlalchemy.dialects.mysql.pymysql",
     "sqlalchemy.dialects.postgresql.psycopg2",
+    "sqlalchemy.dialects.mssql.pyodbc",
     # Analyze modules are source-loaded and import these lazily.
     "pmdarima",
     "statsmodels.tsa.api",
