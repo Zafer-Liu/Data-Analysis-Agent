@@ -8,14 +8,19 @@ import uuid
 
 from flask import Blueprint, request, Response, jsonify
 
-from .state import session_manager, config_manager, chart_store
+from .state import session_manager, config_manager, chart_store, check_session_ownership
 from agent.activation import ActivationContext, INTERNAL_ACTIONS
 from agent.agent import BusinessAgent
 from agent.commands import CommandLoader, CommandType
+from agent.memory import (
+    maybe_schedule_consolidation as _maybe_schedule_memory_consolidation,
+    schedule_extraction as _schedule_memory_extraction,
+)
 from agent.prompts import get_system_prompt
 from agent.reasoning import split_reasoning_tags
 from agent.retry import call_with_retry as _call_with_retry
 from agent.skills import SkillLoader
+from infrastructure.artifact_lifecycle import register_artifact
 
 log = logging.getLogger(__name__)
 bp = Blueprint("chat", __name__)
@@ -459,7 +464,13 @@ def _build_agent(
 
 @bp.post("/api/session/new")
 def new_session():
-    sess = session_manager.create()
+    owner_user_id = ""
+    if bool(os.environ.get("RAILWAY_PROJECT_ID")) or os.environ.get("VERCEL") == "1":
+        from .auth import current_user
+        auth_user = current_user()
+        if auth_user:
+            owner_user_id = auth_user["id"]
+    sess = session_manager.create(owner_user_id=owner_user_id)
     try:
         from agent.hooks.models import HookContext
         from data.hooks_store import load_engine
@@ -470,12 +481,30 @@ def new_session():
         )
     except Exception as exc:
         log.debug("[hooks] session_start skipped sid=%s error=%s", sess.session_id, exc)
+    # Governance: trigger the 24h consolidation check on every new session.
+    # workspace_id is not yet known here, so only user-level records are in
+    # scope; workspace-level consolidation continues to fire at turn-end.
+    try:
+        _start_user_id = owner_user_id or str(
+            request.headers.get("X-BAA-User-ID") or "local-default"
+        ).strip()[:200]
+        _maybe_schedule_memory_consolidation(
+            provider=config_manager.get_default_provider() or "",
+            session_id=sess.session_id,
+            user_id=_start_user_id,
+            workspace_id="",
+        )
+    except Exception as exc:
+        log.debug("[memory] session_start consolidation skipped sid=%s: %s", sess.session_id, exc)
     log.info("[session] created  sid=%s", sess.session_id)
     return jsonify({"session_id": sess.session_id})
 
 
 @bp.get("/api/session/<sid>/ping")
 def ping_session(sid: str):
+    allowed, _uid = check_session_ownership(sid)
+    if not allowed:
+        return jsonify({"error": "无权访问此会话", "code": "forbidden"}), 403
     sess = session_manager.get(sid)
     if not sess:
         log.debug("[session] ping  sid=%s  alive=False", sid)
@@ -488,6 +517,9 @@ def ping_session(sid: str):
 
 @bp.get("/api/session/<sid>/load-current")
 def load_current_session(sid: str):
+    allowed, _uid = check_session_ownership(sid)
+    if not allowed:
+        return jsonify({"error": "无权访问此会话", "code": "forbidden"}), 403
     sess = session_manager.get(sid)
     if not sess:
         log.warning("[session] load-current  sid=%s  not found", sid)
@@ -509,6 +541,9 @@ def load_current_session(sid: str):
 @bp.get("/api/session/<sid>/token-metrics")
 def get_token_metrics(sid: str):
     """Return bounded per-call Token diagnostics without prompt contents."""
+    allowed, _uid = check_session_ownership(sid)
+    if not allowed:
+        return jsonify({"error": "无权访问此会话", "code": "forbidden"}), 403
     sess = session_manager.get(sid)
     if not sess:
         return jsonify({"error": "session not found"}), 404
@@ -549,6 +584,9 @@ def get_token_metrics(sid: str):
 
 @bp.post("/api/session/<sid>/clear")
 def clear_history(sid: str):
+    allowed, _uid = check_session_ownership(sid)
+    if not allowed:
+        return jsonify({"error": "无权访问此会话", "code": "forbidden"}), 403
     sess = session_manager.get_or_create(sid)
     old_count = len(sess.history)
     sess.clear_history()
@@ -571,6 +609,9 @@ def serve_chart(chart_id: str):
 
 @bp.post("/api/session/<sid>/stop")
 def stop_session(sid: str):
+    allowed, _uid = check_session_ownership(sid)
+    if not allowed:
+        return jsonify({"error": "无权访问此会话", "code": "forbidden"}), 403
     sess = session_manager.get(sid)
     if sess:
         sess.cancel_requested = True
@@ -593,6 +634,9 @@ def stop_session(sid: str):
 @bp.post("/api/session/<sid>/prompt-suggestion")
 def prompt_suggestion(sid: str):
     log.debug("[prompt-suggestion] called sid=%s", sid)
+    allowed, _uid = check_session_ownership(sid)
+    if not allowed:
+        return jsonify({"error": "无权访问此会话", "code": "forbidden"}), 403
     sess = session_manager.get(sid)
     if not sess:
         log.warning("[prompt-suggestion] session not found sid=%s", sid)
@@ -668,6 +712,14 @@ def chat_stream(sid: str):
         if not auth_user:
             return jsonify({"error": "请先登录", "needs_auth": True}), 401
         user_id = auth_user["id"]
+        # Ownership check: refuse access when another user owns this session
+        owner = getattr(sess, "owner_user_id", "")
+        if owner and owner != user_id:
+            log.warning("[security] session ownership mismatch sid=%s owner=%s requester=%s",
+                       sid, owner, user_id)
+            return jsonify({"error": "无权访问此会话", "code": "forbidden"}), 403
+        if not owner:
+            sess.owner_user_id = user_id
         quota = check_quota(user_id)
         if quota["exceeded"]:
             return jsonify({
@@ -1164,6 +1216,34 @@ def chat_stream(sid: str):
                     "chart_ids": turn_chart_ids,
                     "activation": activation.to_record(),
                 })
+                if not sess.cancel_requested:
+                    try:
+                        _schedule_memory_extraction(
+                            provider=sess.model_provider
+                            or config_manager.get_default_provider()
+                            or "",
+                            session_id=sid,
+                            user_id=user_id,
+                            workspace_id=fixed_workspace_id,
+                            user_message=message,
+                            assistant_message=final_answer,
+                            runner=runner,
+                        )
+                        # Governance piggybacks on turn end: the 24h lock-file
+                        # gate makes this a cheap stat() on most turns.
+                        _maybe_schedule_memory_consolidation(
+                            provider=sess.model_provider
+                            or config_manager.get_default_provider()
+                            or "",
+                            session_id=sid,
+                            user_id=user_id,
+                            workspace_id=fixed_workspace_id,
+                        )
+                    except Exception as exc:
+                        log.warning(
+                            "[memory] extraction scheduling failed sid=%s: %s",
+                            sid, exc,
+                        )
 
             elapsed = time.monotonic() - _turn_start
             reply_preview = "".join(collected)[:120].replace("\n", " ")

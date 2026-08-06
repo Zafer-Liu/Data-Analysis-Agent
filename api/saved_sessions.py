@@ -8,7 +8,7 @@ from pathlib import Path
 
 from flask import Blueprint, request, jsonify
 
-from .state import session_manager, config_manager
+from .state import session_manager, config_manager, require_session_ownership
 from data.connector import ExcelDataSource, CSVDataSource
 from agent.reasoning import split_reasoning_tags
 from infrastructure.artifact_lifecycle import register_session_file, soft_delete_session_group
@@ -21,6 +21,28 @@ bp = Blueprint("saved_sessions", __name__)
 SAVE_DIR = data_path("outputs", "Session")
 
 SAVE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _is_cloud() -> bool:
+    return bool(os.environ.get("RAILWAY_PROJECT_ID")) or os.environ.get("VERCEL") == "1"
+
+
+def _scoped_save_dir() -> Path:
+    """Return user-scoped session save directory in cloud mode."""
+    if not _is_cloud():
+        return SAVE_DIR
+    try:
+        from api.auth import current_user
+        auth_user = current_user()
+        if auth_user:
+            import hashlib
+            uid_hash = hashlib.sha256(auth_user["id"].encode("utf-8")).hexdigest()[:24]
+            d = SAVE_DIR / uid_hash
+            d.mkdir(parents=True, exist_ok=True)
+            return d
+    except Exception:
+        pass
+    return SAVE_DIR
 
 
 def _visible_msg_count(history: list) -> int:
@@ -64,6 +86,33 @@ def _normalize_reasoning_history(history: list) -> list:
             prior = (msg.get("reasoning") or "").strip()
             msg["reasoning"] = "\n\n".join(x for x in (prior, embedded) if x)
     return history
+
+
+def _repair_message_chain(history: list) -> tuple[list, int]:
+    """Drop the tail after the first assistant tool_call without full results.
+
+    A crash mid-turn can persist an assistant message whose tool_calls never
+    received their role=tool results; replaying that to the model produces a
+    dangling-call API error. Returns (repaired history, messages dropped).
+    """
+    index = 0
+    while index < len(history):
+        msg = history[index] if isinstance(history[index], dict) else {}
+        calls = msg.get("tool_calls") or []
+        if msg.get("role") == "assistant" and calls:
+            pending = {
+                str(call.get("id") or "") for call in calls if isinstance(call, dict)
+            }
+            cursor = index + 1
+            while cursor < len(history) and history[cursor].get("role") == "tool":
+                pending.discard(str(history[cursor].get("tool_call_id") or ""))
+                cursor += 1
+            if pending:
+                return history[:index], len(history) - index
+            index = cursor
+        else:
+            index += 1
+    return history, 0
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -128,7 +177,8 @@ def _recovery_state(sess) -> dict:
 
 def sync_autosave_after_rewind(sess) -> None:
     """Replace stale future autosave content after conversation time travel."""
-    path = SAVE_DIR / f"autosave_{sess.session_id}.json"
+    save_dir = _scoped_save_dir()
+    path = save_dir / f"autosave_{sess.session_id}.json"
     if not sess.history:
         path.unlink(missing_ok=True)
         return
@@ -182,7 +232,8 @@ def _restore_ds(info: dict):
 
 def _list_files() -> list[dict]:
     # Include both manual saves and autosave files; autosaves are flagged is_autosave=True
-    files = sorted(SAVE_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    save_dir = _scoped_save_dir()
+    files = sorted(save_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
     result = []
     for f in files:
         try:
@@ -203,8 +254,8 @@ def _list_files() -> list[dict]:
 
 
 def _session_file(filename: str) -> Path:
-    """Resolve a saved-session filename inside SAVE_DIR."""
-    return SAVE_DIR / Path(filename).name
+    """Resolve a saved-session filename inside the scoped SAVE_DIR."""
+    return _scoped_save_dir() / Path(filename).name
 
 
 # ── API endpoints ──────────────────────────────────────────────────────────
@@ -215,6 +266,7 @@ def list_sessions():
 
 
 @bp.post("/api/session/<sid>/autosave")
+@require_session_ownership
 def autosave_session(sid: str):
     """Silent auto-save — overwrites a single per-session autosave file.
 
@@ -250,13 +302,14 @@ def autosave_session(sid: str):
     # If the user loaded from an existing file, overwrite that file directly
     # so no new entry appears in the list.
     # Otherwise fall back to the per-session autosave file.
+    save_dir = _scoped_save_dir()
     if target_file:
         safe = Path(target_file).name          # strip any path traversal
-        path = SAVE_DIR / safe
+        path = save_dir / safe
         if not path.exists():                  # guard: don't create arbitrary files
-            path = SAVE_DIR / f"autosave_{sid}.json"
+            path = save_dir / f"autosave_{sid}.json"
     else:
-        path = SAVE_DIR / f"autosave_{sid}.json"
+        path = save_dir / f"autosave_{sid}.json"
 
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     register_session_file(path, session_id=sid, autosave=True)
@@ -266,9 +319,11 @@ def autosave_session(sid: str):
 
 
 @bp.get("/api/session/<sid>/autosave")
+@require_session_ownership
 def get_autosave(sid: str):
     """Check whether an autosave exists for this session."""
-    path = SAVE_DIR / f"autosave_{sid}.json"
+    save_dir = _scoped_save_dir()
+    path = save_dir / f"autosave_{sid}.json"
     if not path.exists():
         return jsonify({"exists": False})
     try:
@@ -284,6 +339,7 @@ def get_autosave(sid: str):
 
 
 @bp.post("/api/session/<sid>/save")
+@require_session_ownership
 def save_session(sid: str):
     sess = session_manager.get(sid)
     if not sess:
@@ -311,7 +367,8 @@ def save_session(sid: str):
 
     stem = _safe_stem(name)
     ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = SAVE_DIR / f"{stem}_{ts}.json"
+    save_dir = _scoped_save_dir()
+    path = save_dir / f"{stem}_{ts}.json"
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     register_session_file(path, session_id=sid, autosave=False)
 
@@ -321,6 +378,7 @@ def save_session(sid: str):
 
 
 @bp.post("/api/session/<sid>/load")
+@require_session_ownership
 def load_session(sid: str):
     filename = (request.json or {}).get("filename", "").strip()
     if not filename:
@@ -337,6 +395,26 @@ def load_session(sid: str):
 
     sess = session_manager.get_or_create(sid)
     sess.history              = _normalize_reasoning_history(data.get("history", []))
+    sess.history, dropped_msgs = _repair_message_chain(sess.history)
+    if dropped_msgs:
+        log.warning("[session] load repaired dangling tool calls  sid=%s  dropped=%d",
+                    sid, dropped_msgs)
+    # Oversized restored histories get the cheap rule-based trim now; the
+    # per-turn semantic compaction pipeline handles the rest on first use.
+    from agent.compaction import _estimate_history_tokens, trim_oversized_tool_results
+    if _estimate_history_tokens(sess.history) > 60_000:
+        sess.history, trimmed = trim_oversized_tool_results(sess.history)
+        if trimmed:
+            log.info("[session] load trimmed %d oversized tool results  sid=%s",
+                     trimmed, sid)
+    # Stale-restore hint: surfaced via build_recovery_context on the next turn.
+    saved_at = str(data.get("saved_at") or "")
+    sess.restored_saved_at = ""
+    try:
+        if saved_at and (datetime.now() - datetime.fromisoformat(saved_at)).total_seconds() > 86_400:
+            sess.restored_saved_at = saved_at
+    except ValueError:
+        pass
     keep_provider = (request.json or {}).get("keep_provider", False)
     if not keep_provider:
         sess.model_provider = data.get("model_provider", "")
@@ -494,7 +572,7 @@ def delete_session(filename: str):
     if not path.exists() or path.suffix != ".json":
         return jsonify({"error": "文件不存在"}), 404
     try:
-        cleanup = soft_delete_session_group(SAVE_DIR, path.name)
+        cleanup = soft_delete_session_group(_scoped_save_dir(), path.name)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     return jsonify({"ok": True, **cleanup})

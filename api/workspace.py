@@ -19,7 +19,7 @@ import traceback
 from pathlib import Path
 from flask import Blueprint, request, jsonify
 
-from .state import session_manager, workspace_manager
+from .state import session_manager, workspace_manager, require_session_ownership
 from data.workspace import validate_workdir
 from data.workspace_storage import (
     build_workspace_storage_plan,
@@ -246,6 +246,7 @@ def _safe_table_name(filename: str) -> str:
 
 
 @bp.post("/api/session/<sid>/workspace/mount")
+@require_session_ownership
 def mount_workspace(sid: str):
     """挂载工作目录并自动注册目录内数据文件为 DataSource。
 
@@ -361,6 +362,7 @@ def mount_workspace(sid: str):
 
 
 @bp.post("/api/session/<sid>/workspace/jobs/<jid>/finalize")
+@require_session_ownership
 def finalize_workspace_job(sid: str, jid: str):
     """Validate a completed workspace Excel job and expose its committed tables."""
     sess = session_manager.get_or_create(sid)
@@ -393,6 +395,7 @@ def finalize_workspace_job(sid: str, jid: str):
 
 
 @bp.post("/api/session/<sid>/workspace/unmount")
+@require_session_ownership
 def unmount_workspace(sid: str):
     """卸载工作目录，并移除由工作目录注册的 DataSource。"""
     session = session_manager.get(sid)
@@ -428,6 +431,7 @@ def unmount_workspace(sid: str):
 
 
 @bp.get("/api/session/<sid>/workspace")
+@require_session_ownership
 def get_workspace(sid: str):
     """查询当前工作目录挂载状态。"""
     session = session_manager.get(sid)
@@ -438,6 +442,7 @@ def get_workspace(sid: str):
 
 
 @bp.get("/api/session/<sid>/workspaces")
+@require_session_ownership
 def list_workspaces(sid: str):
     """List known Workspace identities for the C4 management panel."""
     session = session_manager.get(sid)
@@ -562,6 +567,7 @@ def _storage_target_and_leases(sid: str, workspace_id: str):
 
 
 @bp.get("/api/session/<sid>/workspaces/<workspace_id>/remove-preview")
+@require_session_ownership
 def preview_workspace_removal(sid: str, workspace_id: str):
     """Preview a discovery-only removal; never modify the Workspace."""
     if not session_manager.get(sid):
@@ -571,6 +577,7 @@ def preview_workspace_removal(sid: str, workspace_id: str):
 
 
 @bp.delete("/api/session/<sid>/workspaces/<workspace_id>")
+@require_session_ownership
 def remove_workspace_record(sid: str, workspace_id: str):
     """Hide a safe Workspace discovery record without deleting physical data."""
     if not session_manager.get(sid):
@@ -605,6 +612,7 @@ def remove_workspace_record(sid: str, workspace_id: str):
 
 
 @bp.get("/api/session/<sid>/workspaces/<workspace_id>/storage-cleanup-preview")
+@require_session_ownership
 def preview_workspace_storage_cleanup(sid: str, workspace_id: str):
     """Read-only D4 storage inspection and cleanup dry-run."""
     if not session_manager.get(sid):
@@ -621,6 +629,7 @@ def preview_workspace_storage_cleanup(sid: str, workspace_id: str):
 
 
 @bp.post("/api/session/<sid>/workspaces/<workspace_id>/storage-cleanup")
+@require_session_ownership
 def run_workspace_storage_cleanup(sid: str, workspace_id: str):
     """Execute confirmed D4 cleanup candidates with a manifest."""
     if not session_manager.get(sid):
@@ -663,6 +672,7 @@ def run_workspace_storage_cleanup(sid: str, workspace_id: str):
 
 
 @bp.get("/api/session/<sid>/workspaces/<workspace_id>/switch-preview")
+@require_session_ownership
 def preview_workspace_switch(sid: str, workspace_id: str):
     """Preflight a stable-identity Workspace switch without changing state."""
     session = session_manager.get(sid)
@@ -710,6 +720,7 @@ def preview_workspace_switch(sid: str, workspace_id: str):
 
 
 @bp.patch("/api/session/<sid>/workspaces/<workspace_id>")
+@require_session_ownership
 def rename_workspace(sid: str, workspace_id: str):
     """Rename a Workspace display label without moving its directory."""
     if not session_manager.get(sid):
@@ -743,6 +754,7 @@ def rename_workspace(sid: str, workspace_id: str):
 
 
 @bp.get("/api/session/<sid>/workspace/checkpoints")
+@require_session_ownership
 def list_workspace_checkpoints(sid: str):
     runtime = workspace_manager.get(sid)
     if runtime is None:
@@ -758,6 +770,7 @@ def list_workspace_checkpoints(sid: str):
 
 
 @bp.post("/api/session/<sid>/workspace/checkpoints/<snapshot_id>/restore")
+@require_session_ownership
 def restore_workspace_checkpoint(sid: str, snapshot_id: str):
     sess = session_manager.get_or_create(sid)
     runtime = workspace_manager.get(sid)
@@ -808,6 +821,7 @@ def restore_workspace_checkpoint(sid: str, snapshot_id: str):
 
 
 @bp.post("/api/session/<sid>/workspace/permission")
+@require_session_ownership
 def update_workspace_permission(sid: str):
     """Update the mounted workspace's interactive file permission."""
     session = session_manager.get(sid)

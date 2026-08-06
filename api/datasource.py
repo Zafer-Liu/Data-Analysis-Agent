@@ -13,7 +13,7 @@ from urllib.parse import quote
 from flask import Blueprint, request, jsonify
 from werkzeug.utils import secure_filename
 
-from .state import session_manager, datasource_config_manager
+from .state import session_manager, datasource_config_manager, check_session_ownership, require_session_ownership
 from data.connector import ExcelDataSource, CSVDataSource, SQLDataSource, GoogleSheetsDataSource, HTTPAPIDataSource
 from data.sources.excel import excel_requires_job, parse_excel_job
 from data.sources.workspace_persistent import WorkspacePersistentSource
@@ -25,12 +25,44 @@ log = logging.getLogger(__name__)
 bp = Blueprint("datasource", __name__)
 
 # Source mode retains <project>/uploads; frozen/override mode uses user data.
-UPLOAD_DIR = data_path("uploads")
-WAREHOUSE_SAVE_DIR = data_path("outputs", "DataWarehouse")
+_BASE_UPLOAD_DIR = data_path("uploads")
+_BASE_WAREHOUSE_DIR = data_path("outputs", "DataWarehouse")
+_BASE_SESSION_DIR = data_path("outputs", "Session")
 
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-WAREHOUSE_SAVE_DIR.mkdir(parents=True, exist_ok=True)
-PARSED_EXCEL_DIR = UPLOAD_DIR / ".parsed_excel"
+_BASE_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+_BASE_WAREHOUSE_DIR.mkdir(parents=True, exist_ok=True)
+_BASE_SESSION_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _is_cloud() -> bool:
+    return bool(os.environ.get("RAILWAY_PROJECT_ID")) or os.environ.get("VERCEL") == "1"
+
+
+def _scoped_dir(base: Path, user_id: str) -> Path:
+    """Return a user-scoped subdirectory when in cloud mode."""
+    import hashlib
+    if _is_cloud() and user_id:
+        uid_hash = hashlib.sha256(user_id.encode("utf-8")).hexdigest()[:24]
+        d = base / uid_hash
+    else:
+        d = base
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _resolve_user_id() -> str:
+    """Return the current authenticated user ID in cloud mode, empty otherwise."""
+    if not _is_cloud():
+        return ""
+    from .auth import current_user
+    auth_user = current_user()
+    return auth_user["id"] if auth_user else ""
+
+
+# Global paths for backward compat (module-level usage)
+UPLOAD_DIR = _BASE_UPLOAD_DIR
+WAREHOUSE_SAVE_DIR = _BASE_WAREHOUSE_DIR
+PARSED_EXCEL_DIR = _BASE_UPLOAD_DIR / ".parsed_excel"
 PARSED_EXCEL_DIR.mkdir(parents=True, exist_ok=True)
 ALLOWED_EXTS = {".xlsx", ".xls", ".csv"}
 _finalize_lock = threading.RLock()
@@ -138,8 +170,8 @@ def _safe_stem(name: str) -> str:
     return name or "data_warehouse"
 
 
-def _warehouse_file(filename: str) -> Path:
-    return WAREHOUSE_SAVE_DIR / Path(filename).name
+def _warehouse_file(filename: str, user_id: str = "") -> Path:
+    return _scoped_dir(_BASE_WAREHOUSE_DIR, user_id) / Path(filename).name
 
 
 def _serialize_source(entry: dict, active_ids: set[str]) -> dict | None:
@@ -241,9 +273,10 @@ def _restore_source(info: dict):
     raise ValueError(f"不支持的数据源类型：{kind or 'unknown'}")
 
 
-def _list_warehouses() -> list[dict]:
+def _list_warehouses(user_id: str = "") -> list[dict]:
+    warehouse_dir = _scoped_dir(_BASE_WAREHOUSE_DIR, user_id)
     files = sorted(
-        WAREHOUSE_SAVE_DIR.glob("*.json"),
+        warehouse_dir.glob("*.json"),
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
@@ -265,7 +298,7 @@ def _list_warehouses() -> list[dict]:
     return result
 
 
-def _save_current_warehouse(sess, sid: str, name: str, *, autosaved: bool = False) -> dict:
+def _save_current_warehouse(sess, sid: str, name: str, *, autosaved: bool = False, user_id: str = "") -> dict:
     active_ids = set(sess._active_ids)
     sources = []
     skipped = []
@@ -287,7 +320,8 @@ def _save_current_warehouse(sess, sid: str, name: str, *, autosaved: bool = Fals
         "sources": sources,
         "skipped_sources": skipped,
     }
-    path = WAREHOUSE_SAVE_DIR / f"{_safe_stem(name)}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    warehouse_dir = _scoped_dir(_BASE_WAREHOUSE_DIR, user_id)
+    path = warehouse_dir / f"{_safe_stem(name)}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     log.info(
         "[warehouse] saved sid=%s name=%r file=%s sources=%d autosaved=%s",
@@ -303,7 +337,7 @@ def _save_current_warehouse(sess, sid: str, name: str, *, autosaved: bool = Fals
     }
 
 
-def _autosave_uploaded_warehouse(sess, sid: str, source_names: list[str]) -> dict | None:
+def _autosave_uploaded_warehouse(sess, sid: str, source_names: list[str], user_id: str = "") -> dict | None:
     if not source_names:
         return None
     label = "、".join(source_names[:2])
@@ -311,18 +345,24 @@ def _autosave_uploaded_warehouse(sess, sid: str, source_names: list[str]) -> dic
         label += f" 等{len(source_names)}个文件"
     name = f"上传数据_{label}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     try:
-        return _save_current_warehouse(sess, sid, name, autosaved=True)
+        return _save_current_warehouse(sess, sid, name, autosaved=True, user_id=user_id)
     except Exception as exc:
         log.warning("[warehouse] auto-save uploaded sources failed sid=%s: %s", sid, exc)
         return None
 
 
 @bp.post("/api/session/<sid>/upload")
+@require_session_ownership
 def upload_file(sid: str):
     """Upload one or more files; each is appended as a new data source."""
     files = request.files.getlist("file")
     if not files or all(not f.filename for f in files):
         return jsonify({"error": "未选择文件"}), 400
+
+    user_id = _resolve_user_id()
+    upload_dir = _scoped_dir(_BASE_UPLOAD_DIR, user_id)
+    parsed_excel_dir = _scoped_dir(_BASE_UPLOAD_DIR, user_id) / ".parsed_excel"
+    parsed_excel_dir.mkdir(parents=True, exist_ok=True)
 
     sess = session_manager.get_or_create(sid)
     added = []
@@ -338,14 +378,14 @@ def upload_file(sid: str):
         ext = Path(f.filename).suffix.lower()
         safe_stem = secure_filename(f.filename)
         safe_name = safe_stem if safe_stem else f"upload_{uuid.uuid4().hex[:8]}{ext}"
-        save_path = UPLOAD_DIR / f"{sid[:8]}_{uuid.uuid4().hex[:6]}_{safe_name}"
+        save_path = upload_dir / f"{sid[:8]}_{uuid.uuid4().hex[:6]}_{safe_name}"
         f.save(str(save_path))
         register_artifact(save_path, artifact_type="upload", session_id=sid)
         log.info("[upload] saved → %s  (display: %s)", save_path, display_name)
 
         try:
             if ext != ".csv" and excel_requires_job(str(save_path)):
-                db_path = PARSED_EXCEL_DIR / f"{sid[:8]}_{uuid.uuid4().hex}.duckdb"
+                db_path = parsed_excel_dir / f"{sid[:8]}_{uuid.uuid4().hex}.duckdb"
                 job_id = sess.job_runner.create(
                     lambda ctx, source_path=str(save_path), target=str(db_path), name=display_name:
                         parse_excel_job(ctx, source_path, target, name),
@@ -373,7 +413,7 @@ def upload_file(sid: str):
         return jsonify({"error": "; ".join(errors) or "文件解析失败"}), 400
 
     warehouse_autosave = (
-        _autosave_uploaded_warehouse(sess, sid, [item["source_name"] for item in added])
+        _autosave_uploaded_warehouse(sess, sid, [item["source_name"] for item in added], user_id=user_id)
         if added else None
     )
     payload = {
@@ -397,6 +437,7 @@ SAMPLE_DIR = Path(__file__).resolve().parents[1] / "deploy" / "samples"
 
 
 @bp.post("/api/session/<sid>/load-sample")
+@require_session_ownership
 def load_sample_data(sid: str):
     """Load a bundled sample Excel file into the session (cloud-managed only)."""
     is_cloud = bool(os.environ.get("RAILWAY_PROJECT_ID")) or os.environ.get("VERCEL") == "1"
@@ -406,6 +447,11 @@ def load_sample_data(sid: str):
     sample_path = SAMPLE_DIR / "Sample-data.xlsx"
     if not sample_path.is_file():
         return jsonify({"error": "示例数据文件未找到"}), 404
+
+    user_id = _resolve_user_id()
+    upload_dir = _scoped_dir(_BASE_UPLOAD_DIR, user_id)
+    parsed_excel_dir = _scoped_dir(_BASE_UPLOAD_DIR, user_id) / ".parsed_excel"
+    parsed_excel_dir.mkdir(parents=True, exist_ok=True)
 
     sess = session_manager.get_or_create(sid)
 
@@ -417,7 +463,7 @@ def load_sample_data(sid: str):
                             "sources": sess.list_sources()})
 
     display_name = "示例数据-10城数据包"
-    save_path = UPLOAD_DIR / f"{sid[:8]}_sample_{uuid.uuid4().hex[:6]}_Sample-data.xlsx"
+    save_path = upload_dir / f"{sid[:8]}_sample_{uuid.uuid4().hex[:6]}_Sample-data.xlsx"
     try:
         import shutil
         shutil.copy2(str(sample_path), str(save_path))
@@ -428,7 +474,7 @@ def load_sample_data(sid: str):
 
     try:
         if excel_requires_job(str(save_path)):
-            db_path = PARSED_EXCEL_DIR / f"{sid[:8]}_sample_{uuid.uuid4().hex}.duckdb"
+            db_path = parsed_excel_dir / f"{sid[:8]}_sample_{uuid.uuid4().hex}.duckdb"
             job_id = sess.job_runner.create(
                 lambda ctx, source_path=str(save_path), target=str(db_path), name=display_name:
                     parse_excel_job(ctx, source_path, target, name),
@@ -454,8 +500,13 @@ def load_sample_data(sid: str):
 
 
 @bp.post("/api/session/<sid>/upload-jobs/<jid>/finalize")
+@require_session_ownership
 def finalize_upload_job(sid: str, jid: str):
     """Attach a completed Excel parse job to the session exactly once."""
+    user_id = _resolve_user_id()
+    parsed_excel_dir = _scoped_dir(_BASE_UPLOAD_DIR, user_id) / ".parsed_excel"
+    parsed_excel_dir.mkdir(parents=True, exist_ok=True)
+
     sess = session_manager.get_or_create(sid)
     job = sess.job_runner.get_status(jid)
     if job is None or job.get("type") != "excel_parse":
@@ -469,7 +520,7 @@ def finalize_upload_job(sid: str, jid: str):
     result = job.get("result") or {}
     try:
         db_path = Path(result["db_path"]).resolve()
-        db_path.relative_to(PARSED_EXCEL_DIR.resolve())
+        db_path.relative_to(parsed_excel_dir.resolve())
     except (KeyError, OSError, RuntimeError, ValueError):
         return jsonify({"error": "解析任务产物路径无效"}), 500
     if not db_path.is_file():
@@ -500,7 +551,7 @@ def finalize_upload_job(sid: str, jid: str):
         "source_name": source.name,
         "schema_preview": schema,
     }]
-    warehouse_autosave = _autosave_uploaded_warehouse(sess, sid, [source.name])
+    warehouse_autosave = _autosave_uploaded_warehouse(sess, sid, [source.name], user_id=user_id)
     return jsonify({
         "ok": True,
         "added": added,
@@ -512,6 +563,7 @@ def finalize_upload_job(sid: str, jid: str):
 
 
 @bp.post("/api/session/<sid>/connect-db")
+@require_session_ownership
 def connect_db(sid: str):
     d = request.json or {}
     conn_str     = (d.get("connection_string") or "").strip()
@@ -544,6 +596,7 @@ def connect_db(sid: str):
 
 
 @bp.get("/api/session/<sid>/sources")
+@require_session_ownership
 def list_sources(sid: str):
     """Return the list of all connected data sources for this session."""
     sess = session_manager.get(sid)
@@ -554,11 +607,12 @@ def list_sources(sid: str):
 
 @bp.get("/api/data-warehouses")
 def list_data_warehouses():
-    """List saved data warehouse snapshots."""
-    return jsonify(_list_warehouses())
+    """List saved data warehouse snapshots (user-scoped in cloud mode)."""
+    return jsonify(_list_warehouses(user_id=_resolve_user_id()))
 
 
 @bp.post("/api/session/<sid>/data-warehouse/save")
+@require_session_ownership
 def save_data_warehouse(sid: str):
     """Save the current session's connected data sources as a reusable warehouse."""
     sess = session_manager.get(sid)
@@ -570,7 +624,7 @@ def save_data_warehouse(sid: str):
         name = datetime.now().strftime("数据仓库_%Y%m%d_%H%M%S")
 
     try:
-        saved = _save_current_warehouse(sess, sid, name)
+        saved = _save_current_warehouse(sess, sid, name, user_id=_resolve_user_id())
     except ValueError:
         return jsonify({"error": "当前数据源无法保存为数据仓库"}), 400
     return jsonify({
@@ -580,12 +634,13 @@ def save_data_warehouse(sid: str):
 
 
 @bp.post("/api/session/<sid>/data-warehouse/load")
+@require_session_ownership
 def load_data_warehouse(sid: str):
     """Replace current session data sources with a saved warehouse snapshot."""
     filename = (request.json or {}).get("filename", "").strip()
     if not filename:
         return jsonify({"error": "未指定数据仓库文件"}), 400
-    path = _warehouse_file(filename)
+    path = _warehouse_file(filename, user_id=_resolve_user_id())
     if not path.exists() or path.suffix != ".json":
         return jsonify({"error": "数据仓库不存在"}), 404
     try:
@@ -625,7 +680,7 @@ def load_data_warehouse(sid: str):
 
 @bp.delete("/api/data-warehouses/<filename>")
 def delete_data_warehouse(filename: str):
-    path = _warehouse_file(filename)
+    path = _warehouse_file(filename, user_id=_resolve_user_id())
     if not path.exists() or path.suffix != ".json":
         return jsonify({"error": "数据仓库不存在"}), 404
     path.unlink()
@@ -633,6 +688,7 @@ def delete_data_warehouse(filename: str):
 
 
 @bp.post("/api/session/<sid>/sources/<source_id>/analysis-tables")
+@require_session_ownership
 def set_sql_analysis_tables(sid: str, source_id: str):
     """Persist the server-enforced analysis scope for one remote SQL source."""
     sess = session_manager.get(sid)
@@ -657,6 +713,7 @@ def set_sql_analysis_tables(sid: str, source_id: str):
 
 
 @bp.post("/api/session/<sid>/sources/<source_id>/toggle")
+@require_session_ownership
 def toggle_source(sid: str, source_id: str):
     """Toggle a data source active/inactive (multi-select)."""
     sess = session_manager.get(sid)
@@ -667,6 +724,7 @@ def toggle_source(sid: str, source_id: str):
 
 
 @bp.delete("/api/session/<sid>/sources/<source_id>")
+@require_session_ownership
 def remove_source(sid: str, source_id: str):
     """Remove one data source from the session."""
     sess = session_manager.get(sid)
@@ -677,6 +735,7 @@ def remove_source(sid: str, source_id: str):
 
 
 @bp.get("/api/session/<sid>/preview")
+@require_session_ownership
 def preview_data(sid: str):
     """Return table metadata for all active sources. No row data — fast."""
     sess = session_manager.get(sid)
@@ -715,6 +774,7 @@ def preview_data(sid: str):
 
 
 @bp.get("/api/session/<sid>/preview-table")
+@require_session_ownership
 def preview_table(sid: str):
     """Return row data for a single table. Requires source_id when multi-source."""
     from flask import request as _req
@@ -743,6 +803,7 @@ def preview_table(sid: str):
 
 
 @bp.delete("/api/session/<sid>/datasource")
+@require_session_ownership
 def disconnect_source(sid: str):
     """Disconnect ALL data sources (clear entire list)."""
     sess = session_manager.get_or_create(sid)
@@ -751,6 +812,7 @@ def disconnect_source(sid: str):
 
 
 @bp.post("/api/session/<sid>/connect-gsheets")
+@require_session_ownership
 def connect_gsheets(sid: str):
     import json as _json
     d = request.json or {}
@@ -794,6 +856,7 @@ def connect_gsheets(sid: str):
 
 
 @bp.post("/api/session/<sid>/connect-api")
+@require_session_ownership
 def connect_api(sid: str):
     d = request.json or {}
     url = (d.get("url") or "").strip()

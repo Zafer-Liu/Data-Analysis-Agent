@@ -5,6 +5,7 @@ from flask import Blueprint, jsonify, request
 
 from agent.workflows.models import WorkflowContractError, WorkflowErrorCode
 from agent.workflows.runtime import workflow_runtime_manager
+from .state import require_session_ownership
 
 
 bp = Blueprint("workflow_runs", __name__)
@@ -27,6 +28,7 @@ def _error(error: WorkflowContractError):
 
 
 @bp.post("/api/session/<sid>/workflow-runs")
+@require_session_ownership
 def start_workflow_run(sid: str):
     body = request.get_json(silent=True) or {}
     try:
@@ -43,6 +45,7 @@ def start_workflow_run(sid: str):
 
 
 @bp.get("/api/session/<sid>/workflow-runs")
+@require_session_ownership
 def list_workflow_runs(sid: str):
     try:
         runtime = workflow_runtime_manager.get(sid)
@@ -53,6 +56,7 @@ def list_workflow_runs(sid: str):
 
 
 @bp.get("/api/session/<sid>/workflow-metrics")
+@require_session_ownership
 def get_workflow_metrics(sid: str):
     from agent.workflows.metrics import (
         workflow_metrics,
@@ -94,6 +98,7 @@ def create_workflow_optimization_draft(sid: str, suggestion_id: str):
 
 
 @bp.delete("/api/session/<sid>/workflow-runs/<run_id>")
+@require_session_ownership
 def delete_workflow_run(sid: str, run_id: str):
     try:
         result = workflow_runtime_manager.get(sid).delete_run(run_id)
@@ -103,6 +108,7 @@ def delete_workflow_run(sid: str, run_id: str):
 
 
 @bp.get("/api/session/<sid>/workflow-runs/<run_id>")
+@require_session_ownership
 def get_workflow_run(sid: str, run_id: str):
     try:
         detail = workflow_runtime_manager.get(sid).scheduler.advance(run_id)
@@ -112,6 +118,7 @@ def get_workflow_run(sid: str, run_id: str):
 
 
 @bp.get("/api/session/<sid>/workflow-runs/<run_id>/events")
+@require_session_ownership
 def get_workflow_run_events(sid: str, run_id: str):
     after = request.args.get("after_sequence", "0")
     try:
@@ -131,7 +138,40 @@ def get_workflow_run_events(sid: str, run_id: str):
     return jsonify({"ok": True, "events": events})
 
 
+@bp.get("/api/session/<sid>/workflow-runs/<run_id>/artifacts/<artifact_id>")
+@require_session_ownership
+def get_workflow_artifact_content(sid: str, run_id: str, artifact_id: str):
+    """Read the complete immutable Artifact body for progressive disclosure."""
+    try:
+        runtime = workflow_runtime_manager.get(sid)
+        if runtime.run_store.get_run(run_id) is None:
+            raise WorkflowContractError(
+                WorkflowErrorCode.RESOURCE_NOT_FOUND,
+                f"workflow run not found: {run_id}",
+            )
+        found = any(
+            str(item.get("artifact_id") or "") == artifact_id
+            for manifest in runtime.run_store.list_manifests(run_id)
+            for item in manifest.get("items", [])
+        )
+        if not found:
+            raise WorkflowContractError(
+                WorkflowErrorCode.RESOURCE_NOT_FOUND,
+                f"workflow artifact not found: {artifact_id}",
+            )
+        content = runtime.run_store.get_artifact_content(artifact_id)
+        if content is None:
+            raise WorkflowContractError(
+                WorkflowErrorCode.RESOURCE_NOT_FOUND,
+                "complete artifact content is unavailable for this legacy run",
+            )
+    except WorkflowContractError as exc:
+        return _error(exc)
+    return jsonify({"ok": True, "artifact_id": artifact_id, "content": content})
+
+
 @bp.get("/api/session/<sid>/workflow-runs/<run_id>/approvals")
+@require_session_ownership
 def list_workflow_run_approvals(sid: str, run_id: str):
     try:
         runtime = workflow_runtime_manager.get(sid)
@@ -147,6 +187,7 @@ def list_workflow_run_approvals(sid: str, run_id: str):
 
 
 @bp.post("/api/session/<sid>/workflow-runs/<run_id>/approvals/<approval_id>/decide")
+@require_session_ownership
 def decide_workflow_run_approval(sid: str, run_id: str, approval_id: str):
     body = request.get_json(silent=True) or {}
     try:
@@ -172,6 +213,7 @@ def decide_workflow_run_approval(sid: str, run_id: str, approval_id: str):
 
 
 @bp.post("/api/session/<sid>/workflow-runs/<run_id>/cancel")
+@require_session_ownership
 def cancel_workflow_run(sid: str, run_id: str):
     try:
         detail = workflow_runtime_manager.get(sid).scheduler.cancel(run_id)
@@ -179,6 +221,7 @@ def cancel_workflow_run(sid: str, run_id: str):
         return _error(exc)
     return jsonify({"ok": True, **detail})
 @bp.post("/api/session/<sid>/workflow-runs/<run_id>/resume")
+@require_session_ownership
 def resume_workflow_run(sid: str, run_id: str):
     try:
         detail = workflow_runtime_manager.get(sid).scheduler.resume(run_id)
@@ -188,6 +231,7 @@ def resume_workflow_run(sid: str, run_id: str):
 
 
 @bp.post("/api/session/<sid>/workflow-runs/<run_id>/nodes/<node_run_id>/retry")
+@require_session_ownership
 def retry_workflow_node(sid: str, run_id: str, node_run_id: str):
     try:
         detail = workflow_runtime_manager.get(sid).scheduler.retry_node(
@@ -197,7 +241,24 @@ def retry_workflow_node(sid: str, run_id: str, node_run_id: str):
         return _error(exc)
     return jsonify({"ok": True, **detail})
 
+
+@bp.post("/api/session/<sid>/workflow-runs/<run_id>/fork")
+@require_session_ownership
+def fork_workflow_run_from_checkpoint(sid: str, run_id: str):
+    body = request.get_json(silent=True) or {}
+    try:
+        detail = workflow_runtime_manager.get(sid).scheduler.fork_from_checkpoint(
+            run_id,
+            str(body.get("checkpoint_node_run_id") or ""),
+            session_id=sid,
+            started_by=str(body.get("started_by") or ""),
+        )
+    except WorkflowContractError as exc:
+        return _error(exc)
+    return jsonify({"ok": True, **detail}), 202
+
 @bp.get("/api/session/<sid>/workflow-templates")
+@require_session_ownership
 def list_workflow_templates(sid: str):
     try:
         templates = workflow_runtime_manager.get(sid).run_store.list_run_templates()
@@ -207,6 +268,7 @@ def list_workflow_templates(sid: str):
 
 
 @bp.post("/api/session/<sid>/workflow-runs/<run_id>/template")
+@require_session_ownership
 def create_workflow_run_template(sid: str, run_id: str):
     from agent.workflows.knowledge import mark_run_template
 
@@ -225,6 +287,7 @@ def create_workflow_run_template(sid: str, run_id: str):
 
 
 @bp.get("/api/session/<sid>/workflow-knowledge-candidates")
+@require_session_ownership
 def list_workflow_knowledge_candidates(sid: str):
     try:
         candidates = workflow_runtime_manager.get(
@@ -239,6 +302,7 @@ def list_workflow_knowledge_candidates(sid: str):
 
 
 @bp.post("/api/session/<sid>/workflow-runs/<run_id>/knowledge-candidates")
+@require_session_ownership
 def create_workflow_knowledge_candidates(sid: str, run_id: str):
     from agent.workflows.knowledge import generate_knowledge_candidates
 
@@ -252,6 +316,7 @@ def create_workflow_knowledge_candidates(sid: str, run_id: str):
 
 
 @bp.post("/api/session/<sid>/workflow-knowledge-candidates/<candidate_id>/decide")
+@require_session_ownership
 def decide_workflow_knowledge_candidate(sid: str, candidate_id: str):
     from agent.workflows.knowledge import decide_knowledge_candidate
 

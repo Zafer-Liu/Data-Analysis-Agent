@@ -6,7 +6,7 @@ from pathlib import Path
 
 from flask import Blueprint, request, jsonify, send_from_directory
 
-from .state import session_manager, config_manager
+from .state import session_manager, config_manager, require_session_ownership
 from infrastructure.paths import data_path
 
 log = logging.getLogger(__name__)
@@ -35,8 +35,18 @@ def _scope_context() -> tuple[str, str]:
         request.headers.get("X-BAA-User-ID")
         or request.args.get("user_id")
         or (body or {}).get("user_id")
-        or "local-default"
+        or ""
     ).strip()[:200]
+    # Cloud mode: fall back to authenticated user
+    if not user_id:
+        import os as _os
+        if bool(_os.environ.get("RAILWAY_PROJECT_ID")) or _os.environ.get("VERCEL") == "1":
+            from .auth import current_user
+            auth_user = current_user()
+            if auth_user:
+                user_id = auth_user["id"]
+    if not user_id:
+        user_id = "local-default"
     from data.workspace import workspace_manager
     workspace_id = str(workspace_manager.workspace_id_for_session(sid) or "")
     return workspace_id, user_id
@@ -459,12 +469,14 @@ def _temp_prompt_state(sess) -> dict:
 
 
 @bp.get("/api/session/<sid>/temp-prompt")
+@require_session_ownership
 def get_temp_prompt(sid: str):
     sess = session_manager.get_or_create(sid)
     return jsonify(_temp_prompt_state(sess))
 
 
 @bp.post("/api/session/<sid>/temp-prompt")
+@require_session_ownership
 def set_temp_prompt(sid: str):
     """Save the temp prompt. body: {text, raw: bool, provider?: str}
 
@@ -507,6 +519,7 @@ def set_temp_prompt(sid: str):
 
 
 @bp.post("/api/session/<sid>/temp-prompt/toggle")
+@require_session_ownership
 def toggle_temp_prompt(sid: str):
     """Flip the enabled switch. Cannot enable when there's no text to inject."""
     sess = session_manager.get_or_create(sid)

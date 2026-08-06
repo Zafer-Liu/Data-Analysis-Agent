@@ -1,10 +1,11 @@
 """Shared singletons — import from here, never instantiate elsewhere."""
 import logging
-import sys
+import os
 from pathlib import Path
 
 log = logging.getLogger(__name__)
 
+import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from data.session import SessionManager
@@ -71,3 +72,61 @@ datasource_config_manager = get_datasource_config_manager()
 chart_store: _ChartStore = _ChartStore(_CHARTS_DIR)
 
 # workspace_manager 已从 data.workspace 导入（模块级单例），直接可用
+
+
+def check_session_ownership(sid: str) -> tuple[bool, str]:
+    """Verify the authenticated user owns *sid*.  Returns (allowed, user_id).
+
+    In local / non-cloud mode all sessions are shared; returns (True, "").
+    In cloud mode the session's owner_user_id must match the Flask session uid.
+
+    Callers that already have the ChatSession object should compare
+    ``sess.owner_user_id`` directly rather than going through this helper.
+    """
+    is_cloud = bool(os.environ.get("RAILWAY_PROJECT_ID")) or os.environ.get("VERCEL") == "1"
+    if not is_cloud:
+        return True, ""
+
+    from .auth import current_user
+    auth_user = current_user()
+    if not auth_user:
+        return False, ""
+    user_id = auth_user["id"]
+
+    sess = session_manager.get(sid)
+    if sess is None:
+        # Session doesn't exist yet — allowed (GET-based lazy creation)
+        return True, user_id
+    owner = getattr(sess, "owner_user_id", "")
+    if not owner:
+        # Legacy session created before isolation was added — adopt it
+        sess.owner_user_id = user_id
+        return True, user_id
+    if owner != user_id:
+        return False, user_id
+    return True, user_id
+
+
+def require_session_ownership(f):
+    """Decorator: require that the authenticated user owns the session in *sid*.
+
+    The decorated function MUST have ``sid`` as its first argument.
+    Returns a 403 JSON error when ownership fails.
+
+    Usage::
+
+        @bp.post("/api/session/<sid>/something")
+        @require_session_ownership
+        def something(sid: str):
+            ...
+    """
+    from functools import wraps
+    from flask import jsonify
+
+    @wraps(f)
+    def wrapper(sid: str, *args, **kwargs):
+        allowed, user_id = check_session_ownership(sid)
+        if not allowed:
+            return jsonify({"error": "无权访问此会话", "code": "forbidden"}), 403
+        return f(sid, *args, **kwargs)
+    return wrapper

@@ -12,7 +12,7 @@
 import logging
 from flask import Blueprint, request, jsonify
 
-from .state import session_manager
+from .state import session_manager, require_session_ownership
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +52,7 @@ def _job_to_dict(job) -> dict:
 
 
 @bp.get("/api/session/<sid>/jobs")
+@require_session_ownership
 def list_jobs(sid: str):
     """列出会话内的任务。?active=true 只返回未完成的。"""
     sess = session_manager.get_or_create(sid)
@@ -104,6 +105,7 @@ def list_jobs(sid: str):
 
 
 @bp.delete("/api/session/<sid>/jobs")
+@require_session_ownership
 def clear_completed_jobs(sid: str):
     """Clear terminal history while preserving queued/running jobs."""
     sess = session_manager.get_or_create(sid)
@@ -116,6 +118,7 @@ def clear_completed_jobs(sid: str):
 
 
 @bp.get("/api/session/<sid>/jobs/events")
+@require_session_ownership
 def list_job_events(sid: str):
     """Return replayable events after an exclusive per-session sequence."""
     sess = session_manager.get_or_create(sid)
@@ -142,6 +145,7 @@ def list_job_events(sid: str):
 
 
 @bp.get("/api/session/<sid>/jobs/<jid>")
+@require_session_ownership
 def get_job(sid: str, jid: str):
     """查询单个任务状态。"""
     sess = session_manager.get_or_create(sid)
@@ -162,6 +166,7 @@ def get_job(sid: str, jid: str):
 
 
 @bp.post("/api/session/<sid>/jobs/<jid>/cancel")
+@require_session_ownership
 def cancel_job(sid: str, jid: str):
     """请求取消任务。返回 accepted=true 表示请求已受理。
 
@@ -175,6 +180,14 @@ def cancel_job(sid: str, jid: str):
     if job.get("type") == "filehistory_rewind" and job.get("status") == "running":
         return jsonify({
             "error": "文件历史正在执行回退，当前阶段不能取消。",
+            "id": jid,
+            "status": job["status"],
+        }), 409
+    if job.get("type") == "memory_extraction":
+        # Extraction runs on its own worker without cooperative cancel checks;
+        # accepting would strand the job in "canceling" forever.
+        return jsonify({
+            "error": "记忆提取为后台短任务，不支持取消。",
             "id": jid,
             "status": job["status"],
         }), 409

@@ -11,7 +11,7 @@ from agent.commands import (
     CommandAvailabilityContext, CommandLoader, CommandType,
     availability_provider,
 )
-from .state import config_manager, session_manager
+from .state import config_manager, session_manager, require_session_ownership
 
 bp = Blueprint("commands", __name__)
 log = logging.getLogger(__name__)
@@ -111,6 +111,9 @@ def _compact_command(sess, arguments: str = "") -> tuple[dict, int]:
             "code": "model_required",
             "error": "请先配置并选择模型。",
         }, 400
+    hook_engine = None
+    hook_context = None
+    compaction_succeeded = False
     try:
         from LLM.llm_config_manager import get_llm_client
         from agent.compaction import (
@@ -124,6 +127,26 @@ def _compact_command(sess, arguments: str = "") -> tuple[dict, int]:
         client = get_llm_client(provider)
         before_messages = len(sess.history)
         before_tokens = _estimate_history_tokens(sess.history)
+        try:
+            from agent.hooks.models import HookContext
+            from data.hooks_store import load_engine
+
+            hook_engine = load_engine()
+            hook_context = HookContext(
+                event_name="pre_compact",
+                session_id=str(getattr(sess, "session_id", "") or ""),
+                message=arguments,
+                model_provider=provider,
+                model=str(getattr(cfg, "model", "") or ""),
+                extra={
+                    "manual": True,
+                    "before_messages": before_messages,
+                    "before_tokens": before_tokens,
+                },
+            )
+            hook_engine.run_hooks("pre_compact", hook_context)
+        except Exception:
+            log.exception("[hooks] manual pre_compact hook failed")
         usages = []
         compacted, changed = compact_history(
             sess.history,
@@ -189,6 +212,7 @@ def _compact_command(sess, arguments: str = "") -> tuple[dict, int]:
         )
         sess.history = compacted
         sess.last_prompt_tokens = after_tokens
+        compaction_succeeded = True
         return {
             "ok": True,
             "command": "compact",
@@ -221,6 +245,23 @@ def _compact_command(sess, arguments: str = "") -> tuple[dict, int]:
             "code": "command_failed",
             "error": "上下文压缩失败，请检查模型连接后重试。",
         }, 502
+    finally:
+        if hook_engine and hook_context:
+            try:
+                hook_engine.run_hooks(
+                    "post_compact",
+                    hook_context.child(
+                        event_name="post_compact",
+                        extra={
+                            **hook_context.extra,
+                            "compacted": compaction_succeeded,
+                            "after_messages": len(sess.history),
+                            "after_tokens": _estimate_history_tokens(sess.history),
+                        },
+                    ),
+                )
+            except Exception:
+                log.exception("[hooks] manual post_compact hook failed")
 
 
 _BACKEND_HANDLERS = {
@@ -314,6 +355,7 @@ def _execute_backend(sid: str, name: str, arguments: str = "") -> tuple[dict, in
 
 
 @bp.post("/api/session/<sid>/commands/<name>/execute")
+@require_session_ownership
 def execute_backend_command(sid: str, name: str):
     body = request.get_json(silent=True)
     if body is None:
@@ -336,6 +378,7 @@ def execute_backend_command(sid: str, name: str):
 
 
 @bp.post("/api/session/<sid>/commands/compact")
+@require_session_ownership
 def compact_conversation(sid: str):
     """Compatibility endpoint for clients predating the generic route."""
     enabled = os.getenv("BAA_ENABLE_LEGACY_COMPACT_ROUTE", "1").strip().lower()
@@ -358,6 +401,7 @@ def compact_conversation(sid: str):
 
 
 @bp.get("/api/session/<sid>/command-metrics")
+@require_session_ownership
 def get_command_metrics(sid: str):
     sess = session_manager.get(sid)
     if sess is None:
@@ -393,6 +437,7 @@ def get_command_metrics(sid: str):
 
 
 @bp.post("/api/session/<sid>/command-metrics")
+@require_session_ownership
 def record_client_command_metric(sid: str):
     body = request.get_json(silent=True)
     if not isinstance(body, dict):

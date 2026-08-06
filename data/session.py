@@ -56,6 +56,7 @@ class DataSourceSnapshot:
 @dataclass
 class ChatSession:
     session_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    owner_user_id: str = ""             # Cloud-mode user isolation
     workspace_id: str = ""
     history: List[Dict[str, str]] = field(default_factory=list)
     # ── Multi-source support ───────────────────────────────────────────────────
@@ -97,6 +98,8 @@ class ChatSession:
     temp_prompt_enabled: bool = False
     # TTL tracking — updated on every access
     last_accessed: datetime = field(default_factory=datetime.now)
+    # Set when a saved session older than 24h is restored (stale-data hint).
+    restored_saved_at: str = ""
     # Last turn's reasoning chain summary — injected into the next turn's messages
     last_reasoning: str = ""
     # ── JobRunner (A6) ──────────────────────────────────────────────────────────
@@ -563,6 +566,12 @@ class ChatSession:
                 f"{item.get('uri') or item.get('url', '')}"
                 for item in self.recent_artifacts[-8:]
             ))
+        if self.restored_saved_at:
+            lines.append(
+                f"Restored from a session saved at {self.restored_saved_at} (more than "
+                "24h ago). Data sources, files, and previews may have changed since; "
+                "re-verify source status before relying on earlier previews or results."
+            )
         return "\n".join(lines)[:6000]
 
     def add_assistant(self, text: str, reasoning: str = "", chart_ids: list = None):
@@ -584,6 +593,7 @@ class ChatSession:
     def clear_history(self):
         self.history.clear()
         self.last_reasoning = ""
+        self.restored_saved_at = ""
         self.chart_ids.clear()
         self.total_input_tokens = 0
         self.total_output_tokens = 0
@@ -779,8 +789,8 @@ class SessionManager:
         self._store: Dict[str, ChatSession] = {}
         self._start_cleanup_daemon()
 
-    def create(self) -> ChatSession:
-        s = ChatSession()
+    def create(self, owner_user_id: str = "") -> ChatSession:
+        s = ChatSession(owner_user_id=owner_user_id)
         self._store[s.session_id] = s
         return s
 
@@ -814,6 +824,9 @@ class SessionManager:
         # initialization while still releasing the C1 session reference.
         try:
             from data.workspace import workspace_manager
+            from agent.workflows.runtime import workflow_runtime_manager
+            workflow_runtime_manager.close_session(sid)
+            workspace_manager.release_workflow_session(sid)
             workspace_manager.unmount(sid)
         except Exception:
             log.exception("[session] workspace release error sid=%s", sid)
