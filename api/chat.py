@@ -1,6 +1,7 @@
 """Blueprint: conversation (SSE streaming) and chart serving."""
 import json
 import logging
+import os
 import re
 import time
 import uuid
@@ -659,6 +660,23 @@ def chat_stream(sid: str):
         or d.get("user_id")
         or "local-default"
     ).strip()[:200]
+    # Cloud mode: use authenticated user and enforce token quota
+    if bool(os.environ.get("RAILWAY_PROJECT_ID")) or os.environ.get("VERCEL") == "1":
+        from .auth import current_user
+        from data.auth_store import check_quota
+        auth_user = current_user()
+        if not auth_user:
+            return jsonify({"error": "请先登录", "needs_auth": True}), 401
+        user_id = auth_user["id"]
+        quota = check_quota(user_id)
+        if quota["exceeded"]:
+            return jsonify({
+                "error": "今日免费额度已用尽（{} tokens）。您可以在设置中配置自己的 API Key 继续使用，"
+                         "或明天再试。已用 {}/{}".format(
+                             quota["limit"], quota["used"], quota["limit"]),
+                "code": "quota_exceeded",
+                "quota": quota,
+            }), 403
     try:
         activation, active_skill, active_command = _resolve_activation(sess, d)
     except ActivationRequestError as exc:
@@ -1079,6 +1097,12 @@ def chat_stream(sid: str):
                         cached_input_tokens=event.get("cached_input_tokens", 0),
                         cache_write_tokens=event.get("cache_write_tokens", 0),
                     )
+                    # Cloud mode: record per-user daily token usage
+                    if bool(os.environ.get("RAILWAY_PROJECT_ID")) or os.environ.get("VERCEL") == "1":
+                        from data.auth_store import add_usage
+                        _total = (event.get("prompt_tokens", 0) or 0) + (event.get("completion_tokens", 0) or 0)
+                        if _total > 0:
+                            add_usage(user_id, _total)
                     cfg = config_manager.get_config(sess.model_provider)
                     enriched = {
                         **event,

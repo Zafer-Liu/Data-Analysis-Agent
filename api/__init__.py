@@ -43,7 +43,8 @@ def create_app() -> Flask:
         template_folder=str(resource_path("templates")),
         static_folder=str(resource_path("static")),
     )
-    app.secret_key = os.urandom(32)
+    from .auth import SECRET_KEY as _AUTH_SECRET, is_cloud_managed as _is_cloud
+    app.secret_key = os.environ.get("BAA_SECRET_KEY", _AUTH_SECRET)
     local_origins = [
         r"http://localhost(?::\d+)?",
         r"http://127\.0\.0\.1(?::\d+)?",
@@ -80,6 +81,7 @@ def create_app() -> Flask:
     from .business_canvas import bp as business_canvas_bp
     from .workflows       import bp as workflows_bp
     from .workflow_runs   import bp as workflow_runs_bp
+    from .auth             import bp as auth_bp
 
     app.register_blueprint(models_bp)
     app.register_blueprint(datasource_bp)
@@ -103,6 +105,7 @@ def create_app() -> Flask:
     app.register_blueprint(business_canvas_bp)
     app.register_blueprint(workflows_bp)
     app.register_blueprint(workflow_runs_bp)
+    app.register_blueprint(auth_bp)
     _run_startup_hooks()
 
     @app.before_request
@@ -123,13 +126,35 @@ def create_app() -> Flask:
             abort(403, description="Cross-origin write rejected")
         return None
 
+    @app.before_request
+    def cloud_auth_guard():
+        """In cloud mode, require authentication for API routes."""
+        if not _is_cloud():
+            return None
+        path = request.path
+        # Exempt auth endpoints, health check, static files, and the login page
+        if (path.startswith("/api/auth/") or path == "/api/health"
+                or path.startswith("/static/") or path == "/login"
+                or path == "/favicon.ico"):
+            return None
+        if not path.startswith("/api/"):
+            return None
+        from .auth import current_user
+        if not current_user():
+            return jsonify({"error": "请先登录", "needs_auth": True}), 401
+        return None
+
     @app.get("/")
     def index():
-        is_cloud_managed = bool(os.environ.get("RAILWAY_PROJECT_ID")) or os.environ.get("VERCEL") == "1"
+        cloud = _is_cloud()
+        if cloud:
+            from .auth import current_user
+            if not current_user():
+                return render_template("login.html", quota_limit=__import__("data.auth_store", fromlist=["DAILY_TOKEN_LIMIT"]).DAILY_TOKEN_LIMIT)
         resp = render_template(
             "agent_chat.html",
             desktop_lifecycle_enabled=os.environ.get("BAA_DESKTOP_LIFECYCLE") == "1",
-            is_cloud_managed=is_cloud_managed,
+            is_cloud_managed=cloud,
         )
         from flask import make_response
         resp = make_response(resp)
@@ -186,6 +211,18 @@ def create_app() -> Flask:
             response.headers["Cache-Control"] = "no-store, must-revalidate"
             response.headers["Pragma"] = "no-cache"
             response.headers["Expires"] = "0"
+        elif request.path == "/login":
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'self'; "
+                "script-src 'self' 'unsafe-inline'; "
+                "style-src 'self' 'unsafe-inline'; "
+                "img-src 'self' data:; "
+                "font-src 'self' data:; "
+                "connect-src 'self'; "
+                "base-uri 'self'; "
+                "form-action 'self'; "
+                "frame-ancestors 'none'"
+            )
         else:
             response.headers["Content-Security-Policy"] = (
                 "default-src 'self'; "

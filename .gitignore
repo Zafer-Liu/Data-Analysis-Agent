@@ -47,6 +47,9 @@ uploads/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+auth.db
+auth.db-wal
+auth.db-shm
 
 # ---- Local-only tests ----
 # Keep the tests already tracked by Git for GitHub Actions, but do not add
@@ -118,3 +121,4 @@ memory/
 scripts/
 # Untracked assets
 Information/assets/LOGO.png
+PRODUCT.md

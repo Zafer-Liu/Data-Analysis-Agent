@@ -814,6 +814,15 @@ import { loadSavedList } from "../legacy/sessions.js";
       });
       if (!resp.ok) {
         const failure = await resp.json().catch(() => ({}));
+        if (failure.needs_auth) { window.location.href = "/login"; return; }
+        if (failure.code === "quota_exceeded") {
+          const sysErr = document.createElement("div");
+          sysErr.className = "msg msg-sys";
+          sysErr.innerHTML = '<span style="color:#f59e0b">⚠️ ' + (failure.error || "今日免费额度已用尽") + "</span>";
+          if (stepsEl) stepsEl.appendChild(sysErr);
+          else if (bubbleEl) bubbleEl.appendChild(sysErr);
+          return;
+        }
         throw new Error(failure.error || `Chat request failed (${resp.status})`);
       }
       if (!resp.body) throw new Error(`Chat request failed (${resp.status})`);
@@ -888,6 +897,7 @@ import { loadSavedList } from "../legacy/sessions.js";
       window.BAA.slash?.loadCommands?.().catch(() => {});
       if (!stoppedByUser && !continuingAfterAppend && !streamHadIssue && !state.isStreaming) {
         setTimeout(_requestPromptSuggestion, 120);
+        _pollMemoryNotices();
       }
       state._stopRequested = false;
     }
@@ -1380,11 +1390,37 @@ import { loadSavedList } from "../legacy/sessions.js";
     bar._currentText = markdownText;
   }
 
+  // Background memory extraction finishes a few seconds after the stream
+  // ends, so poll briefly for "remembered" notices instead of holding SSE.
+  function _pollMemoryNotices() {
+    if (!state.SID) return;
+    const sid = state.SID;
+    let attempts = 0;
+    const poll = async () => {
+      if (sid !== state.SID || state.isStreaming) return;
+      attempts += 1;
+      try {
+        const resp = await fetch(`/api/memory-notices?session_id=${encodeURIComponent(sid)}`);
+        const data = await resp.json();
+        const notices = Array.isArray(data.notices) ? data.notices : [];
+        if (notices.length) {
+          notices.forEach(text => window.BAA.ui?.toast?.(text));
+          return;
+        }
+      } catch (_) { /* best-effort — never surface polling errors */ }
+      if (attempts < 3) setTimeout(poll, attempts * 6000);
+    };
+    setTimeout(poll, 4000);
+  }
+
   function _onUsage(ev) {
     state.tokenState.promptTokens  = ev.prompt_tokens || 0;
     state.tokenState.totalInput    = ev.session_total_input  || 0;
     state.tokenState.totalOutput   = ev.session_total_output || 0;
     state.tokenState.contextWindow = ev.context_window || state.tokenState.contextWindow;
+    const breakdown = ev.prompt_breakdown || {};
+    state.tokenState.memoryTokens      = breakdown.memory_tokens_est || 0;
+    state.tokenState.instructionTokens = breakdown.project_instruction_tokens_est || 0;
     updateTokenBar();
   }
 

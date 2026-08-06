@@ -1,6 +1,25 @@
 // Compatibility bootstrap + global event delegation.
 // Replaces all HTML inline on* handlers. Modules under /static/js/modules/ register
 // their public API on window.BAA.* and (where needed) on window.* for back-compat.
+
+// Global 401 handler — redirect to /login when session expires (cloud mode)
+(function () {
+  const _fetch = window.fetch;
+  if (!_fetch || _fetch.__authWrapped) return;
+  const wrapped = function (input, init) {
+    return _fetch.call(this, input, init).then(function (resp) {
+      if (resp.status === 401) {
+        resp.clone().json().then(function (d) {
+          if (d && d.needs_auth) window.location.href = "/login";
+        }).catch(function () {});
+      }
+      return resp;
+    });
+  };
+  wrapped.__authWrapped = true;
+  window.fetch = wrapped;
+})();
+
 import * as appSettings from "./app_settings.js";
 import * as autosave from "./autosave.js";
 import * as datasource from "./datasource.js";

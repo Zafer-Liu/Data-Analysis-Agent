@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>智析Agent — 云端演示登录</title>
+  <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}">
+  <style>
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh;display:flex;align-items:center;justify-content:center}
+    .login-card{background:#1e293b;border:1px solid #334155;border-radius:16px;padding:40px;width:380px;max-width:90vw;box-shadow:0 20px 60px rgba(0,0,0,.4)}
+    .login-logo{font-size:28px;font-weight:700;text-align:center;margin-bottom:8px;background:linear-gradient(135deg,#60a5fa,#818cf8);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+    .login-subtitle{text-align:center;font-size:13px;color:#94a3b8;margin-bottom:28px}
+    .form-group{margin-bottom:16px}
+    .form-label{display:block;font-size:13px;color:#cbd5e1;margin-bottom:6px}
+    .form-input{width:100%;padding:10px 14px;background:#0f172a;border:1px solid #475569;border-radius:8px;color:#e2e8f0;font-size:14px;outline:none;transition:border .15s}
+    .form-input:focus{border-color:#6366f1}
+    .btn{width:100%;padding:11px;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;transition:background .15s,opacity .15s}
+    .btn-primary{background:#6366f1;color:#fff}
+    .btn-primary:hover{background:#4f46e5}
+    .btn:disabled{opacity:.5;cursor:not-allowed}
+    .btn-secondary{background:transparent;color:#94a3b8;border:1px solid #475569;margin-top:8px}
+    .btn-secondary:hover{background:#1e293b;color:#e2e8f0}
+    .form-error{color:#f87171;font-size:13px;text-align:center;min-height:20px;margin-bottom:8px}
+    .quota-info{text-align:center;font-size:12px;color:#64748b;margin-top:20px;padding-top:16px;border-top:1px solid #334155}
+    .quota-info strong{color:#94a3b8}
+    .tab-row{display:flex;gap:0;margin-bottom:24px;border:1px solid #334155;border-radius:8px;overflow:hidden}
+    .tab-btn{flex:1;padding:10px;background:transparent;border:none;color:#94a3b8;font-size:14px;cursor:pointer;transition:background .15s}
+    .tab-btn.active{background:#334155;color:#e2e8f0}
+    .spinner{display:inline-block;width:14px;height:14px;border:2px solid #6366f1;border-top-color:transparent;border-radius:50%;animation:spin .6s linear infinite}
+    @keyframes spin{to{transform:rotate(360deg)}}
+  </style>
+</head>
+<body>
+  <div class="login-card">
+    <div class="login-logo">智析Agent</div>
+    <div class="login-subtitle">v1.2.0 LTS · 云端演示</div>
+
+    <div class="tab-row">
+      <button class="tab-btn active" id="tab-login" onclick="switchTab('login')">登录</button>
+      <button class="tab-btn" id="tab-register" onclick="switchTab('register')">注册</button>
+    </div>
+
+    <div id="form-login">
+      <div class="form-group">
+        <label class="form-label">用户名</label>
+        <input class="form-input" id="login-username" type="text" autocomplete="username" placeholder="输入用户名">
+      </div>
+      <div class="form-group">
+        <label class="form-label">密码</label>
+        <input class="form-input" id="login-password" type="password" autocomplete="current-password" placeholder="输入密码">
+      </div>
+      <div class="form-error" id="login-error"></div>
+      <button class="btn btn-primary" id="login-btn" onclick="doLogin()">登录</button>
+    </div>
+
+    <div id="form-register" style="display:none">
+      <div class="form-group">
+        <label class="form-label">用户名</label>
+        <input class="form-input" id="reg-username" type="text" autocomplete="username" placeholder="2 个字符以上">
+      </div>
+      <div class="form-group">
+        <label class="form-label">密码</label>
+        <input class="form-input" id="reg-password" type="password" autocomplete="new-password" placeholder="4 个字符以上">
+      </div>
+      <div class="form-error" id="reg-error"></div>
+      <button class="btn btn-primary" id="reg-btn" onclick="doRegister()">注册</button>
+    </div>
+
+    <div class="quota-info">
+      每日免费额度 <strong>{{ quota_limit }}</strong> tokens / 用户
+    </div>
+  </div>
+
+  <script>
+    function switchTab(tab) {
+      document.getElementById('form-login').style.display = tab === 'login' ? '' : 'none';
+      document.getElementById('form-register').style.display = tab === 'register' ? '' : 'none';
+      document.getElementById('tab-login').classList.toggle('active', tab === 'login');
+      document.getElementById('tab-register').classList.toggle('active', tab === 'register');
+    }
+
+    async function doLogin() {
+      const btn = document.getElementById('login-btn');
+      const errEl = document.getElementById('login-error');
+      const username = document.getElementById('login-username').value.trim();
+      const password = document.getElementById('login-password').value;
+      errEl.textContent = '';
+      if (!username || !password) { errEl.textContent = '请输入用户名和密码'; return; }
+      btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>';
+      try {
+        const r = await fetch('/api/auth/login', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({username, password})
+        });
+        const d = await r.json();
+        if (d.error) { errEl.textContent = d.error; btn.disabled = false; btn.textContent = '登录'; return; }
+        window.location.href = '/';
+      } catch(e) {
+        errEl.textContent = '网络错误'; btn.disabled = false; btn.textContent = '登录';
+      }
+    }
+
+    async function doRegister() {
+      const btn = document.getElementById('reg-btn');
+      const errEl = document.getElementById('reg-error');
+      const username = document.getElementById('reg-username').value.trim();
+      const password = document.getElementById('reg-password').value;
+      errEl.textContent = '';
+      if (!username || !password) { errEl.textContent = '请填写用户名和密码'; return; }
+      btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>';
+      try {
+        const r = await fetch('/api/auth/register', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({username, password})
+        });
+        const d = await r.json();
+        if (d.error) { errEl.textContent = d.error; btn.disabled = false; btn.textContent = '注册'; return; }
+        window.location.href = '/';
+      } catch(e) {
+        errEl.textContent = '网络错误'; btn.disabled = false; btn.textContent = '注册';
+      }
+    }
+
+    document.getElementById('login-password').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+    document.getElementById('reg-password').addEventListener('keydown', e => { if (e.key === 'Enter') doRegister(); });
+  </script>
+</body>
+</html>
