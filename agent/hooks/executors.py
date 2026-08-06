@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shlex
 import subprocess
 import urllib.request
 
@@ -24,9 +26,15 @@ def execute_action(action: Action, ctx: HookContext, *, allow_command: bool = Fa
 def _execute_command(action: Action, ctx: HookContext) -> ActionResult:
     command = ctx.expand(action.command)
     try:
+        args = shlex.split(command, posix=os.name != "nt")
+    except ValueError as exc:
+        return ActionResult(output=f"invalid command syntax: {exc}", success=False)
+    if not args:
+        return ActionResult(output="command is empty", success=False)
+    try:
         completed = subprocess.run(
-            command,
-            shell=True,
+            args,
+            shell=False,
             capture_output=True,
             text=True,
             timeout=action.timeout,
@@ -39,6 +47,8 @@ def _execute_command(action: Action, ctx: HookContext) -> ActionResult:
 
 def _execute_http(action: Action, ctx: HookContext) -> ActionResult:
     url = ctx.expand(action.url)
+    if not url.startswith(("http://", "https://")):
+        return ActionResult(output="http action only supports http:// and https:// URLs", success=False)
     method = (action.method or "POST").upper()
     body = ctx.expand(action.body)
     data = None
