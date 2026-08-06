@@ -66,6 +66,9 @@ Test/*
 Test/local_*.py
 Test/test_workspace_storage_cleanup.py
 
+# Keep all development tests local.
+Test/
+
 # ---- IDE / editor ----
 .idea/
 .vscode/
