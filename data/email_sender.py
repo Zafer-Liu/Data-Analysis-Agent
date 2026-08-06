@@ -77,6 +77,8 @@ def _send_via_resend(to_email: str, code: str) -> bool:
         headers={
             "Authorization": f"Bearer {_RESEND_API_KEY}",
             "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "BAA-Auth/1.0 (+https://zaferliu.me)",
         },
         method="POST",
     )
