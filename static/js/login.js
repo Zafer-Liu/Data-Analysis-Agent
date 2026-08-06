@@ -65,9 +65,21 @@ async function sendCode() {
   }
 }
 
+/* ---- agreement check ---- */
+
+function isAgreed() {
+  var cb = document.getElementById('agree-check');
+  if (cb && !cb.checked) {
+    alert('请先阅读并同意用户协议');
+    return false;
+  }
+  return true;
+}
+
 /* ---- login ---- */
 
 async function doLogin() {
+  if (!isAgreed()) return;
   var btn = document.getElementById('login-btn');
   var errEl = document.getElementById('login-error');
   var email = document.getElementById('login-email').value.trim();
@@ -91,6 +103,7 @@ async function doLogin() {
 /* ---- register ---- */
 
 async function doRegister() {
+  if (!isAgreed()) return;
   var btn = document.getElementById('reg-btn');
   var errEl = document.getElementById('reg-error');
   var email = document.getElementById('reg-email').value.trim();
@@ -123,3 +136,15 @@ document.getElementById('login-btn').addEventListener('click', doLogin);
 document.getElementById('reg-btn').addEventListener('click', doRegister);
 document.getElementById('login-password').addEventListener('keydown', function(e) { if (e.key === 'Enter') doLogin(); });
 document.getElementById('reg-password').addEventListener('keydown', function(e) { if (e.key === 'Enter') doRegister(); });
+
+/* ---- agreement modal ---- */
+
+document.getElementById('agree-link').addEventListener('click', function() {
+  document.getElementById('agreement-overlay').classList.add('show');
+});
+document.getElementById('agree-close-btn').addEventListener('click', function() {
+  document.getElementById('agreement-overlay').classList.remove('show');
+});
+document.getElementById('agreement-overlay').addEventListener('click', function(e) {
+  if (e.target === this) this.classList.remove('show');
+});

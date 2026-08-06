@@ -33,11 +33,23 @@
     .tab-btn.active{background:#334155;color:#e2e8f0}
     .spinner{display:inline-block;width:14px;height:14px;border:2px solid #6366f1;border-top-color:transparent;border-radius:50%;animation:spin .6s linear infinite}
     @keyframes spin{to{transform:rotate(360deg)}}
+    .agree-row{display:flex;align-items:flex-start;gap:8px;margin-top:16px;font-size:12px;color:#94a3b8}
+    .agree-row input{margin-top:2px;accent-color:#6366f1}
+    .agree-row a{color:#818cf8;text-decoration:none;cursor:pointer}
+    .agree-row a:hover{text-decoration:underline}
+    .agreement-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:100;padding:20px}
+    .agreement-overlay.show{display:flex}
+    .agreement-box{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:32px;max-width:520px;max-height:70vh;overflow-y:auto;font-size:13px;line-height:1.7;color:#cbd5e1}
+    .agreement-box h3{color:#e2e8f0;font-size:16px;margin-bottom:16px}
+    .agreement-box h4{color:#818cf8;font-size:14px;margin:16px 0 6px}
+    .agreement-box p{margin-bottom:8px}
+    .agreement-box .close-btn{margin-top:20px;width:100%;padding:9px;background:#6366f1;border:none;border-radius:8px;color:#fff;font-size:14px;cursor:pointer}
+    .agreement-box .close-btn:hover{background:#4f46e5}
   </style>
 </head>
 <body>
   <div class="login-card">
-    <img src="/static/Images/icon.png" alt="智析 Agent" style="width:56px;height:56px;border-radius:14px;display:block;margin:0 auto 12px">
+    <img src="/static/Images/icon-sm.png" alt="智析 Agent" width="56" height="56" style="border-radius:14px;display:block;margin:0 auto 12px" loading="eager">
     <div class="login-logo">智析Agent</div>
     <div class="login-subtitle">v1.2.0 LTS · <a href="https://www.zaferliu.me" target="_blank" rel="noopener noreferrer">@Zafer_Liu</a></div>
 
@@ -81,6 +93,35 @@
 
     <div class="quota-info">
       每日免费额度 <strong>{{ quota_limit }}</strong> tokens / 用户
+    </div>
+
+    <label class="agree-row">
+      <input type="checkbox" id="agree-check">
+      <span>我已阅读并同意<a id="agree-link">《智析Agent用户协议》</a></span>
+    </label>
+  </div>
+
+  <div class="agreement-overlay" id="agreement-overlay">
+    <div class="agreement-box">
+      <h3>智析Agent 用户协议</h3>
+      <p>本协议适用于智析Agent云端演示环境（以下简称"本服务"）。注册即视为您已阅读并同意以下条款。</p>
+
+      <h4>1. 服务说明</h4>
+      <p>本服务为基于 AI 的商业数据分析工具，支持自然语言对话查询、图表生成、数据上传等功能。本服务由开发者提供免费云端演示，每个用户每日享有 {{ quota_limit }} tokens 的免费使用额度。</p>
+
+      <h4>2. 数据与隐私</h4>
+      <p>注册仅需提供邮箱地址，用于身份验证，不会向第三方共享。您上传的数据文件、对话记录及分析结果存储于云端服务器。本服务明确声明：请勿上传涉及商业机密、个人隐私或法律法规禁止的数据。使用完毕后建议删除会话记录以保护数据安全。</p>
+
+      <h4>3. 使用限制</h4>
+      <p>每日 token 额度用尽后，系统将暂停 AI 服务。您可在设置中配置自有 API Key 继续使用。禁止利用本服务从事违法活动、恶意攻击或干扰其他用户。</p>
+
+      <h4>4. 免责声明</h4>
+      <p>本服务为免费演示环境，按"现状"提供，不保证服务的可用性、准确性或持续性。AI 生成分析结果仅供参考，不构成任何商业决策建议。开发者不对因使用本服务产生的任何损失承担责任。</p>
+
+      <h4>5. 变更与终止</h4>
+      <p>开发者保留随时变更或终止本服务的权利。如需长时间稳定使用，建议本地部署或配置自有 API Key。</p>
+
+      <button class="close-btn" id="agree-close-btn">我已阅读</button>
     </div>
   </div>
 

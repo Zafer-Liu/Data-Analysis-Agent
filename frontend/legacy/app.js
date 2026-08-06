@@ -131,6 +131,7 @@ if (globalThis.__baaAppDelegationRegistered) {
     connectDB:         () => datasource.connectDB(),
     connectGSheets:    () => datasource.connectGSheets(),
     connectAPI:        () => datasource.connectAPI(),
+    cloudLogout:       () => { fetch("/api/auth/logout", {method:"POST"}).finally(() => { window.location.href = "/login"; }); },
 
     // Settings — model providers
     toggleAddCustom:   () => window.BAA.models.toggleAddCustom(),
