@@ -33,12 +33,13 @@
 </head>
 <body>
   <div class="login-card">
+    <img src="/static/Images/icon.png" alt="智析 Agent" style="width:56px;height:56px;border-radius:14px;display:block;margin:0 auto 12px">
     <div class="login-logo">智析Agent</div>
-    <div class="login-subtitle">v1.2.0 LTS · 云端演示</div>
+    <div class="login-subtitle">v1.2.0 LTS · <a href="https://www.zaferliu.me" target="_blank" rel="noopener noreferrer" style="color:#818cf8;text-decoration:none;font-weight:700">@Zafer_Liu</a></div>
 
     <div class="tab-row">
-      <button class="tab-btn active" id="tab-login" onclick="switchTab('login')">登录</button>
-      <button class="tab-btn" id="tab-register" onclick="switchTab('register')">注册</button>
+      <button class="tab-btn active" id="tab-login" data-tab="login">登录</button>
+      <button class="tab-btn" id="tab-register" data-tab="register">注册</button>
     </div>
 
     <div id="form-login">
@@ -51,7 +52,7 @@
         <input class="form-input" id="login-password" type="password" autocomplete="current-password" placeholder="输入密码">
       </div>
       <div class="form-error" id="login-error"></div>
-      <button class="btn btn-primary" id="login-btn" onclick="doLogin()">登录</button>
+      <button class="btn btn-primary" id="login-btn">登录</button>
     </div>
 
     <div id="form-register" style="display:none">
@@ -64,7 +65,7 @@
         <input class="form-input" id="reg-password" type="password" autocomplete="new-password" placeholder="4 个字符以上">
       </div>
       <div class="form-error" id="reg-error"></div>
-      <button class="btn btn-primary" id="reg-btn" onclick="doRegister()">注册</button>
+      <button class="btn btn-primary" id="reg-btn">注册</button>
     </div>
 
     <div class="quota-info">
@@ -81,19 +82,19 @@
     }
 
     async function doLogin() {
-      const btn = document.getElementById('login-btn');
-      const errEl = document.getElementById('login-error');
-      const username = document.getElementById('login-username').value.trim();
-      const password = document.getElementById('login-password').value;
+      var btn = document.getElementById('login-btn');
+      var errEl = document.getElementById('login-error');
+      var username = document.getElementById('login-username').value.trim();
+      var password = document.getElementById('login-password').value;
       errEl.textContent = '';
       if (!username || !password) { errEl.textContent = '请输入用户名和密码'; return; }
       btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>';
       try {
-        const r = await fetch('/api/auth/login', {
+        var r = await fetch('/api/auth/login', {
           method: 'POST', headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({username, password})
+          body: JSON.stringify({username: username, password: password})
         });
-        const d = await r.json();
+        var d = await r.json();
         if (d.error) { errEl.textContent = d.error; btn.disabled = false; btn.textContent = '登录'; return; }
         window.location.href = '/';
       } catch(e) {
@@ -102,19 +103,19 @@
     }
 
     async function doRegister() {
-      const btn = document.getElementById('reg-btn');
-      const errEl = document.getElementById('reg-error');
-      const username = document.getElementById('reg-username').value.trim();
-      const password = document.getElementById('reg-password').value;
+      var btn = document.getElementById('reg-btn');
+      var errEl = document.getElementById('reg-error');
+      var username = document.getElementById('reg-username').value.trim();
+      var password = document.getElementById('reg-password').value;
       errEl.textContent = '';
       if (!username || !password) { errEl.textContent = '请填写用户名和密码'; return; }
       btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>';
       try {
-        const r = await fetch('/api/auth/register', {
+        var r = await fetch('/api/auth/register', {
           method: 'POST', headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({username, password})
+          body: JSON.stringify({username: username, password: password})
         });
-        const d = await r.json();
+        var d = await r.json();
         if (d.error) { errEl.textContent = d.error; btn.disabled = false; btn.textContent = '注册'; return; }
         window.location.href = '/';
       } catch(e) {
@@ -122,8 +123,12 @@
       }
     }
 
-    document.getElementById('login-password').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
-    document.getElementById('reg-password').addEventListener('keydown', e => { if (e.key === 'Enter') doRegister(); });
+    document.getElementById('tab-login').addEventListener('click', function() { switchTab('login'); });
+    document.getElementById('tab-register').addEventListener('click', function() { switchTab('register'); });
+    document.getElementById('login-btn').addEventListener('click', doLogin);
+    document.getElementById('reg-btn').addEventListener('click', doRegister);
+    document.getElementById('login-password').addEventListener('keydown', function(e) { if (e.key === 'Enter') doLogin(); });
+    document.getElementById('reg-password').addEventListener('keydown', function(e) { if (e.key === 'Enter') doRegister(); });
   </script>
 </body>
 </html>

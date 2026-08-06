@@ -39,7 +39,7 @@ def login_page():
         return render_template("agent_chat.html",
                               desktop_lifecycle_enabled=False,
                               is_cloud_managed=True)
-    return render_template("login.html")
+    return render_template("login.html", quota_limit=DAILY_TOKEN_LIMIT)
 
 
 @bp.post("/api/auth/register")
