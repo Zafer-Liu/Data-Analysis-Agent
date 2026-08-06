@@ -77,11 +77,13 @@ def current_user() -> dict | None:
 def _load_agreement_html() -> str:
     """Read Information/User_Agreement.md and convert to simple HTML."""
     import pathlib
+    import traceback
     md_path = pathlib.Path(__file__).resolve().parent.parent / "Information" / "User_Agreement.md"
     try:
         text = md_path.read_text(encoding="utf-8")
     except Exception:
-        return "<p>用户协议加载失败。</p>"
+        _log.exception("Failed to load user agreement from %s", md_path)
+        return f"<p>用户协议加载失败。（路径: {md_path}）</p>"
 
     lines = text.splitlines()
     html_parts = []
