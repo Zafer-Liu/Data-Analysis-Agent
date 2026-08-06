@@ -13,6 +13,7 @@ Test/
 *.md
 docs/
 Information/
+!Information/User_Agreement.md
 uploads/
 outputs/
 memory/

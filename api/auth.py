@@ -82,8 +82,8 @@ def _load_agreement_html() -> str:
     try:
         text = md_path.read_text(encoding="utf-8")
     except Exception:
-        _log.exception("Failed to load user agreement from %s", md_path)
-        return f"<p>用户协议加载失败。（路径: {md_path}）</p>"
+        log.exception("Failed to load user agreement from %s", md_path)
+        return "<p>用户协议加载失败。</p>"
 
     lines = text.splitlines()
     html_parts = []
