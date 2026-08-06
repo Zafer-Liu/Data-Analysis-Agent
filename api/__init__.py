@@ -150,7 +150,8 @@ def create_app() -> Flask:
         if cloud:
             from .auth import current_user
             if not current_user():
-                return render_template("login.html", quota_limit=__import__("data.auth_store", fromlist=["DAILY_TOKEN_LIMIT"]).DAILY_TOKEN_LIMIT)
+                from .auth import _agreement_ctx
+                return render_template("login.html", quota_limit=__import__("data.auth_store", fromlist=["DAILY_TOKEN_LIMIT"]).DAILY_TOKEN_LIMIT, **_agreement_ctx())
         resp = render_template(
             "agent_chat.html",
             desktop_lifecycle_enabled=os.environ.get("BAA_DESKTOP_LIFECYCLE") == "1",

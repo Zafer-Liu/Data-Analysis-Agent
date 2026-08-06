@@ -74,6 +74,37 @@ def current_user() -> dict | None:
     return get_user_by_id(uid)
 
 
+def _load_agreement_html() -> str:
+    """Read Information/User_Agreement.md and convert to simple HTML."""
+    import pathlib
+    md_path = pathlib.Path(__file__).resolve().parent.parent / "Information" / "User_Agreement.md"
+    try:
+        text = md_path.read_text(encoding="utf-8")
+    except Exception:
+        return "<p>用户协议加载失败。</p>"
+
+    lines = text.splitlines()
+    html_parts = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped == "---":
+            continue
+        if stripped.startswith("> "):
+            continue  # skip blockquote meta
+        if stripped.startswith("## "):
+            html_parts.append(f"<h4>{stripped[3:]}</h4>")
+        elif stripped.startswith("# "):
+            html_parts.append(f"<h3>{stripped[2:]}</h3>")
+        else:
+            html_parts.append(f"<p>{stripped}</p>")
+    return "\n".join(html_parts)
+
+
+def _agreement_ctx() -> dict:
+    """Template context dict with agreement HTML."""
+    return {"agreement_html": _load_agreement_html()}
+
+
 # ---------------------------------------------------------------------------
 #  Pages
 # ---------------------------------------------------------------------------
@@ -87,7 +118,7 @@ def login_page():
         return render_template("agent_chat.html",
                               desktop_lifecycle_enabled=False,
                               is_cloud_managed=True)
-    return render_template("login.html", quota_limit=DAILY_TOKEN_LIMIT)
+    return render_template("login.html", quota_limit=DAILY_TOKEN_LIMIT, **_agreement_ctx())
 
 
 # ---------------------------------------------------------------------------
