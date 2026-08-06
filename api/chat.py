@@ -494,13 +494,13 @@ def new_session():
                 request.headers.get("X-BAA-User-ID") or "local-default"
             ).strip()[:200]
             _maybe_schedule_memory_consolidation(
-            provider=config_manager.get_default_provider() or "",
-            session_id=sess.session_id,
-            user_id=_start_user_id,
-            workspace_id="",
-        )
-    except Exception as exc:
-        log.debug("[memory] session_start consolidation skipped sid=%s: %s", sess.session_id, exc)
+                provider=config_manager.get_default_provider() or "",
+                session_id=sess.session_id,
+                user_id=_start_user_id,
+                workspace_id="",
+            )
+        except Exception as exc:
+            log.debug("[memory] session_start consolidation skipped sid=%s: %s", sess.session_id, exc)
     log.info("[session] created  sid=%s", sess.session_id)
     return jsonify({"session_id": sess.session_id})
 
