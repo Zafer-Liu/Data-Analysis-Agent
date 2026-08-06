@@ -85,6 +85,10 @@ def _send_via_resend(to_email: str, code: str) -> bool:
             body = resp.read().decode("utf-8", errors="replace")
             log.info("[email] sent to %s via Resend (HTTP %d)", to_email, resp.status)
             return resp.status in (200, 201)
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8", errors="replace") if e.fp else ""
+        log.warning("[email] Resend failed: HTTP %d %s | body=%s", e.code, e.reason, err_body[:500])
+        return False
     except Exception as e:
         log.warning("[email] Resend failed: %s", e)
         return False
