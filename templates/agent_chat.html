@@ -118,14 +118,12 @@
 
       <footer class="sb-footer">
         {% if is_cloud_managed %}
-        <div id="cloud-quota" class="sb-quota" style="margin-bottom:8px">
-          <div style="font-size:var(--fs-xs);color:var(--color-sidebar-fg);opacity:.7;margin-bottom:4px">今日额度</div>
-          <div style="display:flex;align-items:center;gap:6px">
-            <div style="flex:1;height:6px;background:var(--color-sidebar-bg);border-radius:3px;overflow:hidden">
-              <div id="cloud-quota-bar" style="height:100%;width:0;background:#22c55e;border-radius:3px;transition:width .3s,background .3s"></div>
-            </div>
-            <span id="cloud-quota-text" style="font-size:calc(var(--fs-xs) * .85);color:var(--color-sidebar-fg);opacity:.7;white-space:nowrap">--</span>
+        <div id="cloud-quota" class="sb-quota" style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
+          <span style="font-size:var(--fs-xs);color:var(--color-sidebar-fg);opacity:.6;white-space:nowrap">今日额度</span>
+          <div style="flex:1;height:5px;background:var(--color-sidebar-bg);border-radius:3px;overflow:hidden">
+            <div id="cloud-quota-bar" style="height:100%;width:0;background:#22c55e;border-radius:3px;transition:width .3s,background .3s"></div>
           </div>
+          <span id="cloud-quota-text" style="font-size:calc(var(--fs-xs) * .8);color:var(--color-sidebar-fg);opacity:.6;white-space:nowrap">--</span>
         </div>
         {% endif %}
         <div class="sb-footer-meta" style="font-size:var(--fs-xs);font-weight:600;color:var(--color-sidebar-fg);opacity:.85">v1.2.0 LTS · <a href="https://www.zaferliu.me" target="_blank" rel="noopener noreferrer" style="color:var(--color-accent);text-decoration:none;font-weight:700;font-size:calc(var(--fs-xs) * 1.05)">@Zafer_Liu</a></div>
