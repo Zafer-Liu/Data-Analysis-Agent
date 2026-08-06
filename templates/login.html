@@ -11,16 +11,20 @@
     .login-card{background:#1e293b;border:1px solid #334155;border-radius:16px;padding:40px;width:380px;max-width:90vw;box-shadow:0 20px 60px rgba(0,0,0,.4)}
     .login-logo{font-size:28px;font-weight:700;text-align:center;margin-bottom:8px;background:linear-gradient(135deg,#60a5fa,#818cf8);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
     .login-subtitle{text-align:center;font-size:13px;color:#94a3b8;margin-bottom:28px}
+    .login-subtitle a{color:#818cf8;text-decoration:none;font-weight:700}
     .form-group{margin-bottom:16px}
     .form-label{display:block;font-size:13px;color:#cbd5e1;margin-bottom:6px}
     .form-input{width:100%;padding:10px 14px;background:#0f172a;border:1px solid #475569;border-radius:8px;color:#e2e8f0;font-size:14px;outline:none;transition:border .15s}
     .form-input:focus{border-color:#6366f1}
+    .code-row{display:flex;gap:8px}
+    .code-row .form-input{flex:1}
+    .code-btn{flex-shrink:0;padding:10px 16px;background:#334155;border:1px solid #475569;border-radius:8px;color:#94a3b8;font-size:13px;cursor:pointer;white-space:nowrap;transition:background .15s,opacity .15s}
+    .code-btn:hover:not(:disabled){background:#3e4e66;color:#e2e8f0}
+    .code-btn:disabled{opacity:.5;cursor:not-allowed}
     .btn{width:100%;padding:11px;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;transition:background .15s,opacity .15s}
     .btn-primary{background:#6366f1;color:#fff}
     .btn-primary:hover{background:#4f46e5}
     .btn:disabled{opacity:.5;cursor:not-allowed}
-    .btn-secondary{background:transparent;color:#94a3b8;border:1px solid #475569;margin-top:8px}
-    .btn-secondary:hover{background:#1e293b;color:#e2e8f0}
     .form-error{color:#f87171;font-size:13px;text-align:center;min-height:20px;margin-bottom:8px}
     .quota-info{text-align:center;font-size:12px;color:#64748b;margin-top:20px;padding-top:16px;border-top:1px solid #334155}
     .quota-info strong{color:#94a3b8}
@@ -35,7 +39,7 @@
   <div class="login-card">
     <img src="/static/Images/icon.png" alt="智析 Agent" style="width:56px;height:56px;border-radius:14px;display:block;margin:0 auto 12px">
     <div class="login-logo">智析Agent</div>
-    <div class="login-subtitle">v1.2.0 LTS · <a href="https://www.zaferliu.me" target="_blank" rel="noopener noreferrer" style="color:#818cf8;text-decoration:none;font-weight:700">@Zafer_Liu</a></div>
+    <div class="login-subtitle">v1.2.0 LTS · <a href="https://www.zaferliu.me" target="_blank" rel="noopener noreferrer">@Zafer_Liu</a></div>
 
     <div class="tab-row">
       <button class="tab-btn active" id="tab-login" data-tab="login">登录</button>
@@ -44,8 +48,8 @@
 
     <div id="form-login">
       <div class="form-group">
-        <label class="form-label">用户名</label>
-        <input class="form-input" id="login-username" type="text" autocomplete="username" placeholder="输入用户名">
+        <label class="form-label">邮箱</label>
+        <input class="form-input" id="login-email" type="email" autocomplete="email" placeholder="输入邮箱">
       </div>
       <div class="form-group">
         <label class="form-label">密码</label>
@@ -57,8 +61,15 @@
 
     <div id="form-register" style="display:none">
       <div class="form-group">
-        <label class="form-label">用户名</label>
-        <input class="form-input" id="reg-username" type="text" autocomplete="username" placeholder="2 个字符以上">
+        <label class="form-label">邮箱</label>
+        <input class="form-input" id="reg-email" type="email" autocomplete="email" placeholder="输入邮箱">
+      </div>
+      <div class="form-group">
+        <label class="form-label">验证码</label>
+        <div class="code-row">
+          <input class="form-input" id="reg-code" type="text" maxlength="6" placeholder="6 位验证码" inputmode="numeric">
+          <button class="code-btn" id="send-code-btn">发送验证码</button>
+        </div>
       </div>
       <div class="form-group">
         <label class="form-label">密码</label>
