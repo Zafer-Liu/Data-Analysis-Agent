@@ -204,10 +204,11 @@ class LLMConfigManager:
         """保存配置到文件"""
         try:
             CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-            data = {
-                provider: asdict(config)
-                for provider, config in self.configs.items()
-            }
+            data = {}
+            for provider, config in self.configs.items():
+                config_dict = asdict(config)
+                config_dict.pop('api_key', None)
+                data[provider] = config_dict
             with open(LLM_CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
             return True
