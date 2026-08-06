@@ -1,6 +1,7 @@
 """Authentication blueprint — email + verification code register / password login (cloud-only)."""
 from __future__ import annotations
 
+import logging
 import os
 import secrets
 
@@ -13,11 +14,52 @@ from data.auth_store import (
 )
 from data.email_sender import send_code as _send_email_code, is_configured as _smtp_configured
 
+log = logging.getLogger(__name__)
+
 bp = Blueprint("auth", __name__)
 
-# Flask session requires a secret key; allow env override.
-_DEFAULT_KEY = secrets.token_hex(32)
-SECRET_KEY = os.environ.get("BAA_SECRET_KEY", _DEFAULT_KEY)
+
+def get_or_create_secret_key() -> str:
+    """Resolve the Flask session secret key.
+
+    Priority:
+      1. ``BAA_SECRET_KEY`` environment variable (highest precedence).
+      2. ``{data_root}/secret_key`` file on disk (survives redeploys when
+         ``data_root`` lives on a Railway mounted volume).
+      3. Auto-generate a 64‑char hex key, persist it to disk so the next
+         cold start reads the same value, and return it.
+    """
+    # 1. Explicit override via env
+    env_val = os.environ.get("BAA_SECRET_KEY")
+    if env_val:
+        return env_val
+
+    from infrastructure.paths import data_path
+    key_file = data_path("secret_key")
+
+    # 2. Read existing key from persistent disk
+    if key_file.exists():
+        try:
+            content = key_file.read_text(encoding="utf-8").strip()
+            if len(content) >= 32:
+                return content
+            log.warning("[auth] secret_key file too short (%d chars), regenerating", len(content))
+        except Exception:
+            log.exception("[auth] failed to read secret_key file, regenerating")
+
+    # 3. First run — generate, persist, return
+    new_key = secrets.token_hex(32)  # 64 hex chars
+    try:
+        key_file.parent.mkdir(parents=True, exist_ok=True)
+        key_file.write_text(new_key, encoding="utf-8")
+        log.info("[auth] generated and persisted new secret_key to %s", key_file)
+    except Exception:
+        log.exception("[auth] could not persist secret_key to %s — key lives in memory only", key_file)
+
+    return new_key
+
+
+SECRET_KEY = get_or_create_secret_key()
 
 
 def is_cloud_managed() -> bool:

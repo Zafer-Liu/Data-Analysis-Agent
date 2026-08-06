@@ -12,10 +12,14 @@ from .state import session_manager, config_manager, chart_store, check_session_o
 from agent.activation import ActivationContext, INTERNAL_ACTIONS
 from agent.agent import BusinessAgent
 from agent.commands import CommandLoader, CommandType
-from agent.memory import (
-    maybe_schedule_consolidation as _maybe_schedule_memory_consolidation,
-    schedule_extraction as _schedule_memory_extraction,
-)
+try:
+    from agent.memory import (
+        maybe_schedule_consolidation as _maybe_schedule_memory_consolidation,
+        schedule_extraction as _schedule_memory_extraction,
+    )
+except ImportError:
+    _maybe_schedule_memory_consolidation = None   # type: ignore[assignment]
+    _schedule_memory_extraction = None            # type: ignore[assignment]
 from agent.prompts import get_system_prompt
 from agent.reasoning import split_reasoning_tags
 from agent.retry import call_with_retry as _call_with_retry
@@ -484,11 +488,12 @@ def new_session():
     # Governance: trigger the 24h consolidation check on every new session.
     # workspace_id is not yet known here, so only user-level records are in
     # scope; workspace-level consolidation continues to fire at turn-end.
-    try:
-        _start_user_id = owner_user_id or str(
-            request.headers.get("X-BAA-User-ID") or "local-default"
-        ).strip()[:200]
-        _maybe_schedule_memory_consolidation(
+    if _maybe_schedule_memory_consolidation is not None:
+        try:
+            _start_user_id = owner_user_id or str(
+                request.headers.get("X-BAA-User-ID") or "local-default"
+            ).strip()[:200]
+            _maybe_schedule_memory_consolidation(
             provider=config_manager.get_default_provider() or "",
             session_id=sess.session_id,
             user_id=_start_user_id,
@@ -1218,23 +1223,25 @@ def chat_stream(sid: str):
                 })
                 if not sess.cancel_requested:
                     try:
-                        _schedule_memory_extraction(
-                            provider=sess.model_provider
-                            or config_manager.get_default_provider()
-                            or "",
-                            session_id=sid,
-                            user_id=user_id,
-                            workspace_id=fixed_workspace_id,
-                            user_message=message,
-                            assistant_message=final_answer,
-                            runner=runner,
-                        )
+                        if _schedule_memory_extraction is not None:
+                            _schedule_memory_extraction(
+                                provider=sess.model_provider
+                                or config_manager.get_default_provider()
+                                or "",
+                                session_id=sid,
+                                user_id=user_id,
+                                workspace_id=fixed_workspace_id,
+                                user_message=message,
+                                assistant_message=final_answer,
+                                runner=runner,
+                            )
                         # Governance piggybacks on turn end: the 24h lock-file
                         # gate makes this a cheap stat() on most turns.
-                        _maybe_schedule_memory_consolidation(
-                            provider=sess.model_provider
-                            or config_manager.get_default_provider()
-                            or "",
+                        if _maybe_schedule_memory_consolidation is not None:
+                            _maybe_schedule_memory_consolidation(
+                                provider=sess.model_provider
+                                or config_manager.get_default_provider()
+                                or "",
                             session_id=sid,
                             user_id=user_id,
                             workspace_id=fixed_workspace_id,

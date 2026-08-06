@@ -44,7 +44,7 @@ def create_app() -> Flask:
         static_folder=str(resource_path("static")),
     )
     from .auth import SECRET_KEY as _AUTH_SECRET, is_cloud_managed as _is_cloud
-    app.secret_key = os.environ.get("BAA_SECRET_KEY", _AUTH_SECRET)
+    app.secret_key = _AUTH_SECRET
     local_origins = [
         r"http://localhost(?::\d+)?",
         r"http://127\.0\.0\.1(?::\d+)?",
