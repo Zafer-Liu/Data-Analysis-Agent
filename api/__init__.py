@@ -66,7 +66,10 @@ def create_app() -> Flask:
     from .dashboard       import bp as dashboard_bp
     from .knowledge       import bp as knowledge_bp
     from .workspace       import bp as workspace_bp
-    from .memory          import bp as memory_bp
+    try:
+        from .memory      import bp as memory_bp
+    except ImportError:
+        memory_bp = None
     from .jobs            import bp as jobs_bp
     from .skills          import bp as skills_bp
     from .commands        import bp as commands_bp
@@ -88,7 +91,8 @@ def create_app() -> Flask:
     app.register_blueprint(dashboard_bp)
     app.register_blueprint(knowledge_bp)
     app.register_blueprint(workspace_bp)
-    app.register_blueprint(memory_bp)
+    if memory_bp:
+        app.register_blueprint(memory_bp)
     app.register_blueprint(jobs_bp)
     app.register_blueprint(skills_bp)
     app.register_blueprint(commands_bp)
