@@ -29,6 +29,26 @@ from infrastructure.artifact_lifecycle import (
 bp = Blueprint("lifecycle", __name__)
 
 
+@bp.before_request
+def _check_auth():
+    _require_cloud_auth()
+
+
+def _require_cloud_auth():
+    """Require an authenticated user in cloud-managed deployments.
+
+    In desktop mode (no cloud env) this is a no-op so local users can still
+    manage their own storage without a login step.
+    """
+    from .auth import is_cloud_managed, current_user
+    if not is_cloud_managed():
+        return  # desktop — no auth required
+    user = current_user()
+    if not user:
+        from flask import abort
+        abort(401)
+
+
 def _retention_days() -> int:
     raw = (request.json or {}).get("retention_days", 30)
     try:
