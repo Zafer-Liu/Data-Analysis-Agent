@@ -66,6 +66,7 @@ def create_app() -> Flask:
     from .dashboard       import bp as dashboard_bp
     from .knowledge       import bp as knowledge_bp
     from .workspace       import bp as workspace_bp
+    from .memory          import bp as memory_bp
     from .jobs            import bp as jobs_bp
     from .skills          import bp as skills_bp
     from .commands        import bp as commands_bp
@@ -87,6 +88,7 @@ def create_app() -> Flask:
     app.register_blueprint(dashboard_bp)
     app.register_blueprint(knowledge_bp)
     app.register_blueprint(workspace_bp)
+    app.register_blueprint(memory_bp)
     app.register_blueprint(jobs_bp)
     app.register_blueprint(skills_bp)
     app.register_blueprint(commands_bp)
@@ -119,9 +121,11 @@ def create_app() -> Flask:
 
     @app.get("/")
     def index():
+        is_cloud_managed = bool(os.environ.get("RAILWAY_PROJECT_ID")) or os.environ.get("VERCEL") == "1"
         resp = render_template(
             "agent_chat.html",
             desktop_lifecycle_enabled=os.environ.get("BAA_DESKTOP_LIFECYCLE") == "1",
+            is_cloud_managed=is_cloud_managed,
         )
         from flask import make_response
         resp = make_response(resp)

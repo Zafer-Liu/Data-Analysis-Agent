@@ -10,6 +10,18 @@
 {% if desktop_lifecycle_enabled %}
 <script defer src="{{ url_for('static', filename='js/modules/desktop_lifecycle.js', v='desktop-lease-1') }}"></script>
 {% endif %}
+{% if is_cloud_managed %}
+<style>
+  .cloud-banner{display:flex;align-items:center;gap:10px;padding:10px 16px;background:linear-gradient(90deg,#fff3cd 0%,#ffe69c 100%);border-bottom:2px solid #ffc107;color:#664d03;font-size:13px;line-height:1.5;position:relative;z-index:50}
+  .cloud-banner-icon{font-size:18px;flex-shrink:0}
+  .cloud-banner-text{flex:1}
+  .cloud-banner-text strong{color:#75340a}
+  .cloud-banner-close{flex-shrink:0;width:24px;height:24px;border:none;background:rgba(102,77,3,.15);border-radius:50%;cursor:pointer;color:#664d03;font-size:14px;display:flex;align-items:center;justify-content:center;transition:background .15s}
+  .cloud-banner-close:hover{background:rgba(102,77,3,.3)}
+  .cloud-banner.hidden{display:none}
+</style>
+<script defer src="{{ url_for('static', filename='js/modules/cloud_banner.js', v='cloud-banner-1') }}"></script>
+{% endif %}
 </head>
 <body>
 <div class="layout">
@@ -541,6 +553,15 @@
 
   <!-- ── Main ───────────────────────────────────────────────────── -->
   <div class="main">
+    {% if is_cloud_managed %}
+    <div class="cloud-banner" id="cloudBanner">
+      <span class="cloud-banner-icon">⚠️</span>
+      <div class="cloud-banner-text">
+        <strong>云端演示环境免责声明：</strong>请勿上传敏感数据或商业机密，对话数据存储于公共服务器。<strong>使用完毕后请删除会话</strong>（侧边栏 → 已保存对话 → 删除），以免数据泄露。
+      </div>
+      <button class="cloud-banner-close" id="cloudBannerClose" title="关闭提示">×</button>
+    </div>
+    {% endif %}
     <div class="chat-header">
       <div>
         <div class="chat-header-title" data-i18n="header.title">💬 对话分析</div>
@@ -909,6 +930,12 @@
         <div class="f-ac-custom-row">
           <input type="number" id="ac-ctx"    data-i18n-ph="add_custom.ctx_ph"   placeholder="上下文窗口（默认 1000000）" class="f-item-flex">
           <input type="number" id="ac-output" data-i18n-ph="add_custom.out_ph"   placeholder="最大输出（默认 384000）"   class="f-item-flex">
+        </div>
+        <div class="model-price-fields">
+          <div class="f-ac-custom-row">
+            <input type="number" id="ac-input-price" min="0" step="any" inputmode="decimal" placeholder="输入价格（可选）" class="f-item-flex">
+            <input type="number" id="ac-output-price" min="0" step="any" inputmode="decimal" placeholder="输出价格（可选）" class="f-item-flex">
+          </div>
         </div>
         <label class="f-ac-label-row">
           <input type="checkbox" id="ac-think" data-change="toggleAcBudget">

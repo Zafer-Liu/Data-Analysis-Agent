@@ -8,6 +8,7 @@ LLM API Key 配置管理
 import os
 import json
 import logging
+import math
 from pathlib import Path
 from typing import Dict, Optional, Any, List
 from dataclasses import dataclass, asdict
@@ -53,6 +54,10 @@ class LLMConfig:
     prompt_cache_mode: Optional[str] = None
     prompt_cache_retention: str = "in_memory"
     cache_breakpoint_strategy: str = "stable_prefix"
+    # Optional USD-per-million-token rates.  They are configuration metadata,
+    # never credentials, and power the auditable Workflow cost view.
+    input_price_per_million: Optional[float] = None
+    output_price_per_million: Optional[float] = None
 
 
 class LLMConfigManager:
@@ -91,6 +96,21 @@ class LLMConfigManager:
             "supports_prompt_cache": False,
             "prompt_cache_mode": "none",
             "prompt_cache_retention": "in_memory",
+        },
+        "minimax": {
+            "base_url": "https://api.minimaxi.com/v1",
+            "model": "MiniMax-M3",
+            "env_var": "MINIMAX_API_KEY",
+            "is_custom": False,
+            "context_window": 1000000,
+            "max_output_tokens": 384000,
+            "enable_thinking": True,
+            "thinking_budget": 8000,
+            "supports_prompt_cache": None,
+            "prompt_cache_mode": None,
+            "prompt_cache_retention": "in_memory",
+            "input_price_per_million": 5.0,
+            "output_price_per_million": 5.0,
         },
         "ollama": {
             # Ollama 提供 OpenAI 兼容端点：http://localhost:11434/v1
@@ -133,7 +153,13 @@ class LLMConfigManager:
             self._load_from_env()
 
     def _load_from_env(self):
-        """从环境变量加载内置提供商配置（仅在显式开启时使用）"""
+        """从环境变量加载内置提供商配置（仅在显式开启时使用）
+
+        支持通过环境变量覆盖每个 provider 的 base_url 和 model：
+        - {PROVIDER}_BASE_URL：覆盖默认 base_url
+        - {PROVIDER}_MODEL：覆盖默认 model
+        例如 MINIMAX_BASE_URL / MINIMAX_MODEL 可自定义 MiniMax 的端点和模型。
+        """
         for provider, defaults in self.DEFAULT_CONFIGS.items():
             env_var = defaults.get("env_var")
             if not env_var:
@@ -142,13 +168,26 @@ class LLMConfigManager:
             api_key = os.environ.get(env_var)
 
             if api_key and provider not in self.configs:
+                # 支持通过 {PROVIDER}_BASE_URL / {PROVIDER}_MODEL 覆盖默认值
+                base_url = os.environ.get(
+                    f"{provider.upper()}_BASE_URL",
+                    defaults.get("base_url"),
+                )
+                model = os.environ.get(
+                    f"{provider.upper()}_MODEL",
+                    defaults.get("model"),
+                )
                 self.configs[provider] = LLMConfig(
                     provider=provider,
                     api_key=api_key.strip(),
-                    base_url=defaults.get("base_url"),
-                    model=defaults.get("model"),
+                    base_url=base_url,
+                    model=model,
                     enabled=True,
                     is_custom=False,
+                    context_window=defaults.get("context_window"),
+                    max_output_tokens=defaults.get("max_output_tokens"),
+                    enable_thinking=defaults.get("enable_thinking", False),
+                    thinking_budget=defaults.get("thinking_budget", 8000),
                     supports_prompt_cache=defaults.get("supports_prompt_cache"),
                     prompt_cache_mode=defaults.get("prompt_cache_mode"),
                     prompt_cache_retention=defaults.get(
@@ -157,6 +196,8 @@ class LLMConfigManager:
                     cache_breakpoint_strategy=defaults.get(
                         "cache_breakpoint_strategy", "stable_prefix"
                     ),
+                    input_price_per_million=defaults.get("input_price_per_million"),
+                    output_price_per_million=defaults.get("output_price_per_million"),
                 )
 
     def save_configs(self):
@@ -178,6 +219,8 @@ class LLMConfigManager:
         self, name: str, base_url: str, model_name: str, api_key: str,
         context_window: Optional[int] = None, max_output_tokens: Optional[int] = None,
         enable_thinking: bool = False, thinking_budget: int = 8000,
+        input_price_per_million: Optional[float] = None,
+        output_price_per_million: Optional[float] = None,
     ) -> tuple[bool, str]:
         if not name or not name.strip():
             return False, "模型名称不能为空"
@@ -198,6 +241,9 @@ class LLMConfigManager:
         if provider_id in self.configs:
             return False, f"模型 '{name}' 已存在"
 
+        input_price, output_price = self._price_pair(
+            input_price_per_million, output_price_per_million,
+        )
         self.configs[provider_id] = LLMConfig(
             provider=provider_id,
             api_key=api_key,
@@ -210,6 +256,8 @@ class LLMConfigManager:
             max_output_tokens=max_output_tokens,
             enable_thinking=enable_thinking,
             thinking_budget=thinking_budget,
+            input_price_per_million=input_price,
+            output_price_per_million=output_price,
         )
 
         if self.save_configs():
@@ -223,6 +271,8 @@ class LLMConfigManager:
         base_url: Optional[str] = None, model: Optional[str] = None,
         context_window: Optional[int] = None, max_output_tokens: Optional[int] = None,
         enable_thinking: bool = False, thinking_budget: int = 8000,
+        input_price_per_million: Optional[float] = None,
+        output_price_per_million: Optional[float] = None,
     ) -> bool:
         """设置内置提供商配置"""
         if provider not in self.DEFAULT_CONFIGS:
@@ -240,6 +290,9 @@ class LLMConfigManager:
         else:
             api_key = api_key.strip()
 
+        input_price, output_price = self._price_pair(
+            input_price_per_million, output_price_per_million,
+        )
         self.configs[provider] = LLMConfig(
             provider=provider,
             api_key=api_key.strip(),
@@ -259,6 +312,8 @@ class LLMConfigManager:
             cache_breakpoint_strategy=defaults.get(
                 "cache_breakpoint_strategy", "stable_prefix"
             ),
+            input_price_per_million=input_price,
+            output_price_per_million=output_price,
         )
 
         # 关键修复：不再写 os.environ，避免进程内“复活”
@@ -289,6 +344,9 @@ class LLMConfigManager:
         self, provider: str, base_url: str, model_name: str, api_key: str,
         context_window: Optional[int] = None, max_output_tokens: Optional[int] = None,
         enable_thinking: bool = False, thinking_budget: int = 8000,
+        input_price_per_million: Optional[float] = None,
+        output_price_per_million: Optional[float] = None,
+        price_configured: bool = False,
     ) -> tuple[bool, str]:
         """更新已有自定义模型配置"""
         if provider not in self.configs:
@@ -307,6 +365,12 @@ class LLMConfigManager:
             new_key = LOCAL_KEY_PLACEHOLDER
         else:
             new_key = cfg.api_key
+        input_price, output_price = (
+            self._price_pair(input_price_per_million, output_price_per_million)
+            if price_configured else (
+                cfg.input_price_per_million, cfg.output_price_per_million,
+            )
+        )
         old = self.configs[provider]
         self.configs[provider] = LLMConfig(
             provider=provider,
@@ -320,6 +384,8 @@ class LLMConfigManager:
             max_output_tokens=max_output_tokens,
             enable_thinking=enable_thinking,
             thinking_budget=thinking_budget,
+            input_price_per_million=input_price,
+            output_price_per_million=output_price,
         )
         if self.save_configs():
             return True, "配置已更新"
@@ -358,7 +424,7 @@ class LLMConfigManager:
         ]
 
     def get_default_provider(self) -> Optional[str]:
-        priority = ["deepseek", "openai", "atlascloud", "ollama", "claude"]
+        priority = ["deepseek", "minimax", "openai", "atlascloud", "ollama", "claude"]
         for provider in priority:
             if provider in self.configs and self.configs[provider].enabled:
                 return provider
@@ -388,8 +454,34 @@ class LLMConfigManager:
                 "prompt_cache_mode": config.prompt_cache_mode,
                 "prompt_cache_retention": config.prompt_cache_retention,
                 "cache_breakpoint_strategy": config.cache_breakpoint_strategy,
+                "input_price_per_million": config.input_price_per_million,
+                "output_price_per_million": config.output_price_per_million,
             }
         return result
+
+    @staticmethod
+    def _price_pair(
+        input_price_per_million: Optional[float],
+        output_price_per_million: Optional[float],
+    ) -> tuple[Optional[float], Optional[float]]:
+        """Validate optional model pricing as a complete non-negative pair."""
+        if input_price_per_million is None and output_price_per_million is None:
+            return None, None
+        if input_price_per_million is None or output_price_per_million is None:
+            raise ValueError("模型价格必须同时填写输入与输出单价")
+        try:
+            input_price = float(input_price_per_million)
+            output_price = float(output_price_per_million)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("模型价格必须是数字") from exc
+        if (
+            not math.isfinite(input_price)
+            or not math.isfinite(output_price)
+            or input_price < 0
+            or output_price < 0
+        ):
+            raise ValueError("模型价格必须是非负的有限数字")
+        return input_price, output_price
 
     def test_config(
         self, provider: str,
@@ -446,8 +538,13 @@ _config_manager = None
 def get_config_manager() -> LLMConfigManager:
     global _config_manager
     if _config_manager is None:
-        # 默认禁用 env 回灌
-        _config_manager = LLMConfigManager(load_from_env=False)
+        # 云端托管环境（Railway / Vercel）自动从环境变量加载 LLM 配置，
+        # 无需手动在 UI 中填写 API Key；本地开发保持 load_from_env=False。
+        is_managed = (
+            bool(os.environ.get("RAILWAY_PROJECT_ID"))
+            or os.environ.get("VERCEL") == "1"
+        )
+        _config_manager = LLMConfigManager(load_from_env=is_managed)
     return _config_manager
 
 
