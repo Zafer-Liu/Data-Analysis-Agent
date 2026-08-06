@@ -66,9 +66,6 @@ Test/*
 Test/local_*.py
 Test/test_workspace_storage_cleanup.py
 
-# Keep all development tests local.
-Test/
-
 # ---- IDE / editor ----
 .idea/
 .vscode/
@@ -101,17 +98,33 @@ test.bat
 *.psd
 !Banner.psd
 
-# ---- Ongoingwork ----
+# ---- Ongoing work / WIP (next-version, not ready to push) ----
 MCP/Flowchart
 MCP/mindmap
 MCP/playwright
 MCP/flowchart_server.py
-LLM/llm_config.json
-LLM/llm_config.json
 RAILWAY_DEPLOY.md
 .prettierignore
 .prettierrc.json
 config/hooks.json
+config/hooks-history.json
 frontend/README.md
 package-lock.json
 .claude
+.agents/
+.uploads/
+memory/
+scripts/
+# WIP Python modules (cross-conversation memory, AB-test, etc.)
+agent/instructions.py
+agent/memory.py
+agent/workflows/features.py
+agent/workflows/pricing.py
+api/memory.py
+data/memory_store.py
+Function/Analyze/AB_Test_Analysis/
+skills/ab-test-analysis/
+# Large reference docs
+跨会话记忆_参考.md
+# Untracked assets
+Information/assets/LOGO.png
