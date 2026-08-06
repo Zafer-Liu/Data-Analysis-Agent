@@ -762,6 +762,9 @@
     <div class="msg-err" id="xl-err"></div>
     <div class="modal-footer">
       <button class="btn-sm btn-sm-ghost"   id="xl-cancel-btn" data-action="closeOverlay:ov-excel" data-i18n="modal.cancel">取消</button>
+      {% if is_cloud_managed %}
+      <button class="btn-sm btn-sm-ghost" id="xl-sample-btn" data-action="loadSample" style="margin-right:auto">📊 加载示例数据</button>
+      {% endif %}
       <button class="btn-sm btn-sm-primary" id="xl-btn"        data-action="uploadXl" disabled       data-i18n="modal.upload">上传</button>
     </div>
   </div>

@@ -108,6 +108,7 @@ if (globalThis.__baaAppDelegationRegistered) {
 
     // Data source modals
     uploadXl:          () => datasource.uploadXl(),
+    loadSample:        () => datasource.loadSample(),
     connectDB:         () => datasource.connectDB(),
     connectGSheets:    () => datasource.connectGSheets(),
     connectAPI:        () => datasource.connectAPI(),

@@ -606,7 +606,7 @@ def prompt_suggestion(sid: str):
     provider = sess.model_provider or config_manager.get_default_provider()
     cfg = config_manager.get_config(provider) if provider else None
     if not provider or cfg is None:
-        log.warning("[prompt-suggestion] no provider/config sid=%s provider=%s cfg=%s", sid, provider, cfg)
+        log.warning("[prompt-suggestion] no provider/config sid=%s provider=%s", sid, provider)
         return jsonify({"ok": False, "suggestion": ""})
 
     log.debug("[prompt-suggestion] calling LLM sid=%s provider=%s model=%s msg_count=%d",

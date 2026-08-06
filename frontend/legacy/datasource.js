@@ -548,6 +548,70 @@ import { invalidate as invalidatePreview } from "./preview.js";
     sysMsg(t('sys.connected', { name: d.source_name }));
   }
 
+  // ── Load sample data (cloud-only) ─────────────────────────────────────────
+  async function loadSample() {
+    const btn = $("xl-sample-btn");
+    if (!btn) return;
+    btn.disabled = true;
+    const errEl = $("xl-err");
+    errEl.textContent = "";
+    const progressWrap = $("xl-progress");
+    const progressLabel = $("xl-progress-label");
+    progressWrap.classList.remove('hidden');
+    progressLabel.textContent = "正在加载示例数据…";
+    progressLabel.classList.add("indeterminate");
+
+    try {
+      const r = await fetch(`/api/session/${state.SID}/load-sample`, { method: "POST" });
+      const d = await r.json();
+      progressWrap.classList.add('hidden');
+      progressLabel.classList.remove("indeterminate");
+      btn.disabled = false;
+
+      if (d.error) { errEl.textContent = d.error; return; }
+      if (d.duplicate) {
+        closeOverlay("ov-excel");
+        toast("示例数据已加载，无需重复添加", "info");
+        return;
+      }
+
+      // Handle pending jobs (large Excel async parse)
+      const pending = d.pending_jobs || [];
+      if (pending.length) {
+        $("xl-parsing").classList.remove('hidden');
+        for (const job of pending) {
+          let terminal = null;
+          while (!terminal) {
+            await new Promise(res => setTimeout(res, 1500));
+            const sr = await fetch(`/api/session/${state.SID}/jobs/${job.id}`);
+            const sj = await sr.json();
+            if (sj.status === "succeeded" || sj.status === "failed") terminal = sj;
+          }
+          if (terminal.status === "succeeded") {
+            await fetch(`/api/session/${state.SID}/upload-jobs/${job.id}/finalize`, { method: "POST" });
+          }
+        }
+        $("xl-parsing").classList.add('hidden');
+      }
+
+      if (d.added && d.added.length > 0) {
+        state.schemaText = d.added[0].schema_preview || "";
+        $("xl-schema").textContent = state.schemaText;
+        $("xl-schema").classList.remove('hidden');
+      }
+      onSourcesUpdated(d.sources || [], "示例数据-10城数据包", 'src.hint.file');
+      await loadWarehouseList();
+      closeOverlay("ov-excel");
+      toast("示例数据加载成功", "ok");
+      sysMsg("已加载示例数据「10城数据包」，可直接开始提问");
+    } catch (err) {
+      progressWrap.classList.add('hidden');
+      progressLabel.classList.remove("indeterminate");
+      btn.disabled = false;
+      errEl.textContent = err.message || "加载示例数据失败";
+    }
+  }
+
   // ── SQL DB ─────────────────────────────────────────────────────────────────
   async function connectDB() {
     const conn = $("db-conn").value.trim();
@@ -656,7 +720,7 @@ import { invalidate as invalidatePreview } from "./preview.js";
     loadDatasourceConfigs, disconnectSrc, resetSourceState,
     openSaveWarehouseDialog, loadWarehouseList, saveDataWarehouse,
     loadDataWarehouse, deleteDataWarehouse,
-    onXlFile, uploadXl, connectDB, connectGSheets, connectAPI, toggleApiAuthValue,
+    onXlFile, uploadXl, loadSample, connectDB, connectGSheets, connectAPI, toggleApiAuthValue,
   };
 
   eventBus.on("overlay:open", ({ id }) => {

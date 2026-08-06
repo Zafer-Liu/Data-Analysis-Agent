@@ -160,7 +160,7 @@ def _serialize_source(entry: dict, active_ids: set[str]) -> dict | None:
         return payload
     if isinstance(source, SQLDataSource):
         try:
-            conn = source._engine.url.render_as_string(hide_password=False)
+            conn = source._engine.url.render_as_string(hide_password=True)
         except Exception:
             conn = ""
         return {
@@ -388,6 +388,69 @@ def upload_file(sid: str):
         "warehouse_autosave": warehouse_autosave,
     }
     return jsonify(payload), (202 if pending_jobs else 200)
+
+
+# ---------------------------------------------------------------------------
+# Cloud-only: load bundled sample data (Railway / Vercel)
+# ---------------------------------------------------------------------------
+SAMPLE_DIR = Path(__file__).resolve().parents[1] / "deploy" / "samples"
+
+
+@bp.post("/api/session/<sid>/load-sample")
+def load_sample_data(sid: str):
+    """Load a bundled sample Excel file into the session (cloud-managed only)."""
+    is_cloud = bool(os.environ.get("RAILWAY_PROJECT_ID")) or os.environ.get("VERCEL") == "1"
+    if not is_cloud:
+        return jsonify({"error": "示例数据仅在云端演示环境可用"}), 403
+
+    sample_path = SAMPLE_DIR / "Sample-data.xlsx"
+    if not sample_path.is_file():
+        return jsonify({"error": "示例数据文件未找到"}), 404
+
+    sess = session_manager.get_or_create(sid)
+
+    # Avoid duplicate loads within the same session
+    for entry in sess._sources:
+        src = entry.get("source")
+        if src and getattr(src, "file_path", "") == str(sample_path):
+            return jsonify({"ok": True, "added": [], "duplicate": True,
+                            "sources": sess.list_sources()})
+
+    display_name = "示例数据-10城数据包"
+    save_path = UPLOAD_DIR / f"{sid[:8]}_sample_{uuid.uuid4().hex[:6]}_Sample-data.xlsx"
+    try:
+        import shutil
+        shutil.copy2(str(sample_path), str(save_path))
+        register_artifact(save_path, artifact_type="upload", session_id=sid)
+    except Exception as exc:
+        log.error("[load-sample] copy failed: %s", exc)
+        return jsonify({"error": f"复制示例文件失败: {exc}"}), 500
+
+    try:
+        if excel_requires_job(str(save_path)):
+            db_path = PARSED_EXCEL_DIR / f"{sid[:8]}_sample_{uuid.uuid4().hex}.duckdb"
+            job_id = sess.job_runner.create(
+                lambda ctx, source_path=str(save_path), target=str(db_path), name=display_name:
+                    parse_excel_job(ctx, source_path, target, name),
+                job_type="excel_parse",
+                label=display_name,
+            )
+            return jsonify({"ok": True, "added": [], "pending_jobs": [{
+                "id": job_id, "type": "excel_parse",
+                "source_name": display_name, "status": "queued",
+            }], "sources": sess.list_sources()}), 202
+
+        source = ExcelDataSource(str(save_path), display_name)
+        schema = source.get_schema()
+        source_id = sess.add_source(source)
+        added = [{"source_id": source_id, "source_name": display_name,
+                  "schema_preview": schema}]
+    except Exception as exc:
+        log.error("[load-sample] parse failed: %s\n%s", exc, traceback.format_exc())
+        return jsonify({"error": f"示例数据解析失败: {exc}"}), 500
+
+    return jsonify({"ok": True, "added": added, "pending_jobs": [],
+                    "sources": sess.list_sources()})
 
 
 @bp.post("/api/session/<sid>/upload-jobs/<jid>/finalize")

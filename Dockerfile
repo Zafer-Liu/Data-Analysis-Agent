@@ -23,6 +23,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code (static/dist/ is committed, so bundles are included)
 COPY . .
 
+# Sample data for cloud demo (Railway only, not used in local dev)
+COPY deploy/samples/ /app/deploy_samples/
+
 # Railway injects PORT env var; app.py already reads it
 ENV BAA_HOST=0.0.0.0
 ENV BAA_SKIP_DEPENDENCY_CHECK=1
