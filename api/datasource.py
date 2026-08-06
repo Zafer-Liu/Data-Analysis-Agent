@@ -28,10 +28,10 @@ bp = Blueprint("datasource", __name__)
 UPLOAD_DIR = data_path("uploads")
 WAREHOUSE_SAVE_DIR = data_path("outputs", "DataWarehouse")
 
-UPLOAD_DIR.mkdir(exist_ok=True)
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 WAREHOUSE_SAVE_DIR.mkdir(parents=True, exist_ok=True)
 PARSED_EXCEL_DIR = UPLOAD_DIR / ".parsed_excel"
-PARSED_EXCEL_DIR.mkdir(exist_ok=True)
+PARSED_EXCEL_DIR.mkdir(parents=True, exist_ok=True)
 ALLOWED_EXTS = {".xlsx", ".xls", ".csv"}
 _finalize_lock = threading.RLock()
 
