@@ -1,5 +1,5 @@
 // Compatibility application settings rendered as a Vue island.
-import { state as appState } from "../core/runtime.js";
+import { state as appState, state } from "../core/runtime.js";
 import { uiRegistry } from "../core/ui-registry.js";
 import { chatStream } from "../features/chat-stream.js";
 
@@ -8,6 +8,7 @@ import { chatStream } from "../features/chat-stream.js";
   const PROMPT_SUGGESTION_KEY = "baa_prompt_suggestion_enabled";
   const TEAMS_KEY = "baa_teams_enabled";
   const AUTO_MATCH_SKILL_KEY = "baa_auto_match_skill";
+  const MEMORY_ENABLED_KEY = "baa_memory_enabled";
 
   const DEFAULT_HOOKS_TEXT = JSON.stringify({
     enabled: true,
@@ -31,6 +32,31 @@ import { chatStream } from "../features/chat-stream.js";
     "stop",
     "error",
   ];
+  const BUILTIN_HOOK_TEMPLATES = [
+    {
+      id: "safe-sql",
+      title: "破坏性 SQL 防护",
+      detail: "拦截 query_data 中的 DROP、DELETE 与 UPDATE 请求。",
+      hooks: [["safe-sql-drop", "DROP"], ["safe-sql-delete", "DELETE"], ["safe-sql-update", "UPDATE"]].map(([id, keyword]) => ({
+        id, name: `破坏性 SQL 防护（${keyword}）`, enabled: true, event: "pre_tool_use",
+        if: `tool == 'query_data' && args.sql contains '${keyword}'`, reject: true, once: false,
+        action: { type: "prompt", message: `已拦截包含 ${keyword} 的数据查询请求。请改用只读 SELECT 查询；如确需修改数据，请通过受控工作流执行。` },
+      })),
+    },
+    {
+      id: "query-review", title: "查询结果复核", detail: "每次成功查询后，提醒 Agent 检查口径、空值与异常值。",
+      hooks: [{ id: "query-result-review", name: "查询结果复核", enabled: true, event: "post_tool_use", if: "tool == 'query_data' && ok == true", action: { type: "prompt", message: "查询已成功。继续分析前，核对时间范围、统计口径、空值和异常值；回答中明确说明关键筛选条件与数据限制。" } }],
+    },
+    {
+      id: "tool-recovery", title: "工具失败恢复", detail: "工具失败时引导 Agent 阅读错误并尝试最小范围的修复。",
+      hooks: [{ id: "tool-error-recovery", name: "工具失败恢复", enabled: true, event: "post_tool_use", if: "ok == false", action: { type: "prompt", message: "刚才的工具调用失败。先根据错误信息定位参数、表名、SQL 或权限问题；优先用更小的只读查询验证，不要重复提交相同调用。" } }],
+    },
+    {
+      id: "answer-quality", title: "结论质量检查", detail: "在每轮开始时注入交付检查：结论、数字依据、限制与下一步。",
+      hooks: [{ id: "answer-quality-check", name: "结论质量检查", enabled: true, event: "turn_start", action: { type: "prompt", message: "本轮交付前检查：结论是否直接回答问题；关键数字是否有数据依据；不确定性或数据限制是否已说明；必要时给出下一步建议。" } }],
+    },
+  ];
+  const BUILTIN_HOOK_IDS = new Set(BUILTIN_HOOK_TEMPLATES.flatMap(template => template.hooks.map(hook => hook.id)));
   const LIFECYCLE_AUDIT_LABELS = {
     session_registered: "会话登记",
     session_soft_deleted: "会话软删除",
@@ -49,6 +75,10 @@ import { chatStream } from "../features/chat-stream.js";
 
   function _autoMatchSkillFromStorage() {
     return localStorage.getItem(AUTO_MATCH_SKILL_KEY) !== "0";
+  }
+
+  function _memoryEnabledFromStorage() {
+    return localStorage.getItem(MEMORY_ENABLED_KEY) !== "0";
   }
 
   function setPromptSuggestionEnabled(enabled) {
@@ -81,6 +111,19 @@ import { chatStream } from "../features/chat-stream.js";
     }
   }
 
+  function setMemoryEnabled(enabled) {
+    appState.memoryEnabled = !!enabled;
+    localStorage.setItem(MEMORY_ENABLED_KEY, appState.memoryEnabled ? "1" : "0");
+    if (uiState) {
+      uiState.memoryEnabled = appState.memoryEnabled;
+      if (!appState.memoryEnabled) {
+        uiState.memoryRecords = [];
+        uiState.memoryActivity = [];
+      }
+      draw();
+    }
+  }
+
   let uiState = null;
   let draw = () => {};
 
@@ -108,6 +151,8 @@ import { chatStream } from "../features/chat-stream.js";
       const resp = await fetch("/api/hooks");
       const data = await resp.json();
       uiState.hooksText = JSON.stringify(data.settings || JSON.parse(DEFAULT_HOOKS_TEXT), null, 2);
+      uiState.hooksRuntime = data.runtime || { enabled: false, active_hooks: [], enabled_count: 0, runnable_count: 0, pending_count: 0, configured_count: 0 };
+      await loadHookHistory();
       uiState.hooksStatus = data.ok ? "Hooks 配置已加载。" : (data.error || "Hooks 配置存在错误。");
       uiState.hooksStatusType = data.ok ? "ok" : "error";
     } catch (error) {
@@ -161,6 +206,7 @@ import { chatStream } from "../features/chat-stream.js";
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok || !data.ok) throw new Error(data.error || "保存失败");
       uiState.hooksText = JSON.stringify(data.settings || raw, null, 2);
+      await loadHooks();
       uiState.hooksStatus = "已保存，下一轮对话生效。";
       uiState.hooksStatusType = "ok";
       toast("Hooks 已保存");
@@ -205,6 +251,329 @@ import { chatStream } from "../features/chat-stream.js";
       uiState.hooksLoading = false;
       draw();
     }
+  }
+
+  async function refreshHookRuntime() {
+    const resp = await fetch("/api/hooks");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || !data.ok) throw new Error(data.error || "读取 Hook 状态失败");
+    uiState.hooksRuntime = data.runtime || uiState.hooksRuntime;
+  }
+
+  async function loadHookHistory() {
+    const response = await fetch("/api/hooks/history?limit=50");
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok) {
+      uiState.hookHistory = [];
+      uiState.hookHistoryAvailable = false;
+      return;
+    }
+    uiState.hookHistoryAvailable = true;
+    uiState.hookHistory = data.items || [];
+  }
+
+  async function clearHookHistory() {
+    if (!window.confirm("确定清空全部 Hook 触发记录吗？此操作不可恢复。")) return;
+    uiState.hookHistoryLoading = true;
+    draw();
+    try {
+      const response = await fetch("/api/hooks/history", { method: "DELETE" });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.ok) throw new Error(data.error || "清理失败");
+      uiState.hookHistory = [];
+      uiState.hooksStatus = `已清理 ${data.cleared || 0} 条触发记录。`;
+      uiState.hooksStatusType = "ok";
+    } catch (error) {
+      uiState.hooksStatus = `清理失败：${error.message || error}`;
+      uiState.hooksStatusType = "error";
+    } finally {
+      uiState.hookHistoryLoading = false;
+      draw();
+    }
+  }
+
+  async function clearHookHistoryFromStorage() {
+    if (!window.confirm("确定清空全部 Hook 触发记录吗？此操作不可恢复。")) return;
+    uiState.lifecycleStatus = "正在清理 Hook 触发记录…";
+    draw();
+    try {
+      const response = await fetch("/api/hooks/history", { method: "DELETE" });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.ok) throw new Error(data.error || "清理失败");
+      uiState.lifecycleHookHistory = [];
+      uiState.hookHistory = [];
+      uiState.lifecycleStatus = `已清理 ${data.cleared || 0} 条 Hook 触发记录。`;
+    } catch (error) {
+      uiState.lifecycleStatus = `清理失败：${error.message || error}`;
+    } finally {
+      draw();
+    }
+  }
+
+  function isBuiltinTemplateEnabled(template) {
+    const activeIds = new Set((uiState.hooksRuntime?.active_hooks || []).map(hook => hook.id));
+    return template.hooks.every(hook => activeIds.has(hook.id));
+  }
+
+  async function setBuiltinHookTemplateEnabled(template, enabled) {
+    if (uiState.hooksLoading) return;
+    uiState.hooksLoading = true;
+    draw();
+    try {
+      const response = await fetch("/api/hooks");
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.ok || !data.settings) throw new Error(data.error || "读取配置失败");
+      const settings = data.settings;
+      const hooks = Array.isArray(settings.hooks) ? settings.hooks : [];
+      const byId = new Map(hooks.map(hook => [hook?.id, hook]));
+      for (const hook of template.hooks) {
+        const existing = byId.get(hook.id);
+        byId.set(hook.id, existing ? { ...existing, name: existing.name || hook.name, enabled } : { ...hook, enabled });
+      }
+      if (enabled) settings.enabled = true;
+      settings.hooks = [...byId.values()];
+      const saveResponse = await fetch("/api/hooks", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(settings),
+      });
+      const saved = await saveResponse.json().catch(() => ({}));
+      if (!saveResponse.ok || !saved.ok) throw new Error(saved.error || "启用失败");
+      uiState.hooksText = JSON.stringify(saved.settings || settings, null, 2);
+      await refreshHookRuntime();
+      uiState.hooksStatus = enabled ? `已启用“${template.title}”。` : `已关闭“${template.title}”。`;
+      uiState.hooksStatusType = "ok";
+      toast(`${enabled ? "已启用" : "已关闭"}：${template.title}`);
+    } catch (error) {
+      uiState.hooksStatus = `${enabled ? "启用" : "关闭"}失败：${error.message || error}`;
+      uiState.hooksStatusType = "error";
+    } finally {
+      uiState.hooksLoading = false;
+      draw();
+    }
+  }
+
+  async function setCustomHookEnabled(hook, enabled) {
+    if (uiState.hooksLoading) return;
+    uiState.hooksLoading = true;
+    draw();
+    try {
+      const response = await fetch("/api/hooks");
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.ok || !data.settings) throw new Error(data.error || "读取配置失败");
+      const target = (data.settings.hooks || []).find(item => item?.id === hook.id);
+      if (!target) throw new Error("未找到该 Hook");
+      target.enabled = enabled;
+      if (enabled) data.settings.enabled = true;
+      const saveResponse = await fetch("/api/hooks", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data.settings) });
+      const saved = await saveResponse.json().catch(() => ({}));
+      if (!saveResponse.ok || !saved.ok) throw new Error(saved.error || "保存失败");
+      await loadHooks();
+      uiState.hooksStatus = `已${enabled ? "启用" : "关闭"}“${hook.name || hook.id}”。`;
+      uiState.hooksStatusType = "ok";
+    } catch (error) {
+      uiState.hooksStatus = `${enabled ? "启用" : "关闭"}失败：${error.message || error}`;
+      uiState.hooksStatusType = "error";
+    } finally {
+      uiState.hooksLoading = false;
+      draw();
+    }
+  }
+
+  function addNamedCustomHook() {
+    const name = String(uiState.customHookName || "").trim();
+    if (!name) {
+      uiState.hooksStatus = "请先填写 Hook 名称。";
+      uiState.hooksStatusType = "error";
+      draw();
+      return;
+    }
+    try {
+      const settings = JSON.parse(uiState.hooksText);
+      if (!settings || typeof settings !== "object") throw new Error("配置必须是 JSON 对象");
+      const hooks = Array.isArray(settings.hooks) ? settings.hooks : [];
+      const base = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "custom-hook";
+      const id = `${base}-${Date.now().toString(36)}`;
+      hooks.push({
+        id,
+        name,
+        enabled: true,
+        event: "turn_start",
+        action: { type: "prompt", message: "填写要在此 Hook 触发时注入给 Agent 的提示。" },
+      });
+      settings.hooks = hooks;
+      uiState.hooksText = JSON.stringify(settings, null, 2);
+      uiState.customHookName = "";
+      uiState.hooksStatus = `已添加“${name}”，请补充规则后保存。`;
+      uiState.hooksStatusType = "ok";
+    } catch (error) {
+      uiState.hooksStatus = `无法添加：${error.message || error}`;
+      uiState.hooksStatusType = "error";
+    }
+    draw();
+  }
+
+  function customHookNameValue(hook) {
+    return Object.prototype.hasOwnProperty.call(uiState.customHookNames, hook.id)
+      ? uiState.customHookNames[hook.id]
+      : (hook.name || "");
+  }
+
+  async function saveCustomHookName(hook) {
+    const name = String(customHookNameValue(hook) || "").trim();
+    if (!name) {
+      uiState.hooksStatus = "请为自定义 Hook 填写名称。";
+      uiState.hooksStatusType = "error";
+      draw();
+      return;
+    }
+    uiState.hooksLoading = true;
+    draw();
+    try {
+      const response = await fetch("/api/hooks");
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.ok || !data.settings) throw new Error(data.error || "读取配置失败");
+      const target = (data.settings.hooks || []).find(item => item?.id === hook.id);
+      if (!target) throw new Error("未找到该 Hook");
+      target.name = name;
+      const saveResponse = await fetch("/api/hooks", {
+        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data.settings),
+      });
+      const saved = await saveResponse.json().catch(() => ({}));
+      if (!saveResponse.ok || !saved.ok) throw new Error(saved.error || "保存失败");
+      uiState.customHookNames[hook.id] = name;
+      await loadHooks();
+      await loadHookHistory();
+      uiState.hooksStatus = `已将“${hook.id}”命名为“${name}”。`;
+      uiState.hooksStatusType = "ok";
+    } catch (error) {
+      uiState.hooksStatus = `保存名称失败：${error.message || error}`;
+      uiState.hooksStatusType = "error";
+    } finally {
+      uiState.hooksLoading = false;
+      draw();
+    }
+  }
+
+  function renderHookRuntime() {
+    const runtime = uiState.hooksRuntime || {};
+    const activeHooks = Array.isArray(runtime.active_hooks) ? runtime.active_hooks : [];
+    const headline = runtime.enabled ? `已启用 ${runtime.enabled_count || 0} 条规则` : "Hooks 全局开关已关闭";
+    return Vue.h("section", { class: "hooks-runtime", "aria-live": "polite" }, [
+      Vue.h("div", { class: "hooks-runtime-head" }, [
+        Vue.h("div", null, [
+          Vue.h("strong", null, headline),
+          Vue.h("span", null, runtime.enabled
+            ? `其中 ${runtime.runnable_count || 0} 条可触发${runtime.pending_count ? `，${runtime.pending_count} 条等待事件接入` : ""}。`
+            : `运行配置共 ${runtime.configured_count || 0} 项，保存并开启总开关后才会执行。`),
+        ]),
+        Vue.h("button", { class: "btn-sm btn-sm-ghost", type: "button", disabled: uiState.hooksLoading, onClick: loadHooks }, "刷新状态"),
+      ]),
+      activeHooks.length
+        ? Vue.h("div", { class: "hooks-runtime-list" }, activeHooks.map(hook =>
+          Vue.h("div", { class: "hooks-runtime-row", key: hook.id }, [
+            Vue.h("span", { class: "hooks-runtime-dot", "aria-hidden": "true" }),
+            Vue.h("div", { class: "hooks-runtime-main" }, [
+              Vue.h("strong", null, hook.name || hook.id),
+              Vue.h("span", null, hook.condition || "无条件"),
+            ]),
+            Vue.h("span", { class: "hooks-runtime-event" }, `监听：${hook.event}`),
+            Vue.h("span", { class: "hooks-runtime-action" }, `动作：${hook.action_type}`),
+            hook.event_dispatched ? null : Vue.h("span", { class: "hooks-runtime-warn" }, "等待事件接入"),
+          ])
+        ))
+        : Vue.h("p", { class: "hooks-runtime-empty" }, "暂无激活 Hook。可从下方模板添加，或在 JSON 中创建自定义规则。"),
+    ]);
+  }
+
+  function renderInternalEventEndpoints() {
+    const endpoints = Array.isArray(uiState.hooksRuntime?.internal_endpoints) ? uiState.hooksRuntime.internal_endpoints : [];
+    return endpoints.length
+      ? Vue.h("div", { class: "hooks-runtime-list" }, endpoints.map(endpoint =>
+        Vue.h("div", { class: "hooks-runtime-row", key: endpoint.id }, [
+          Vue.h("span", { class: "hooks-runtime-dot", "aria-hidden": "true" }),
+          Vue.h("div", { class: "hooks-runtime-main" }, [
+            Vue.h("strong", null, endpoint.name || endpoint.id),
+            Vue.h("span", null, endpoint.condition || "无条件"),
+          ]),
+          Vue.h("span", { class: "hooks-runtime-event" }, `事件：${endpoint.event}`),
+          Vue.h("span", { class: "hooks-runtime-action" }, `转发：${endpoint.action_type}`),
+          endpoint.event_dispatched ? null : Vue.h("span", { class: "hooks-runtime-warn" }, "等待事件接入"),
+        ])
+      ))
+      : Vue.h("p", { class: "hooks-runtime-empty" }, "暂无内部事件端点。" );
+  }
+
+  function renderBuiltinHookTemplates() {
+    return Vue.h("section", { class: "hooks-templates" }, [
+      Vue.h("div", { class: "hooks-templates-head" }, [
+        Vue.h("strong", null, "内置 Hook"),
+        Vue.h("span", null, "点击即可启用"),
+      ]),
+      Vue.h("div", { class: "hooks-template-list" }, BUILTIN_HOOK_TEMPLATES.map(template =>
+        Vue.h("div", { class: "hooks-template-row", key: template.id }, [
+          Vue.h("div", null, [Vue.h("strong", null, template.title), Vue.h("span", null, template.detail)]),
+          Vue.h("button", {
+            class: `btn-sm ${isBuiltinTemplateEnabled(template) ? "btn-sm-primary" : "btn-sm-ghost"}`,
+            type: "button",
+            disabled: uiState.hooksLoading,
+            onClick: () => setBuiltinHookTemplateEnabled(template, !isBuiltinTemplateEnabled(template)),
+          }, isBuiltinTemplateEnabled(template) ? "关闭" : "启用"),
+        ])
+      )),
+    ]);
+  }
+
+  function renderCustomHookRules() {
+    const hooks = (uiState.hooksRuntime?.configured_hooks || []).filter(hook => !BUILTIN_HOOK_IDS.has(hook.id));
+    return Vue.h("section", { class: "hooks-custom-rules" }, [
+      Vue.h("div", { class: "hooks-templates-head" }, [
+        Vue.h("strong", null, "自定义 Hook"),
+        Vue.h("span", null, "名称会用于触发记录"),
+      ]),
+      hooks.length ? Vue.h("div", { class: "hooks-template-list" }, hooks.map(hook =>
+        Vue.h("div", { class: "hooks-template-row hooks-custom-rule-row", key: hook.id }, [
+          Vue.h("div", { class: "hooks-custom-rule-info" }, [
+            Vue.h("strong", null, hook.name || "未命名 Hook"),
+            Vue.h("span", null, `ID：${hook.id} · ${hook.event} · ${hook.action_type}`),
+            Vue.h("label", { class: "hooks-custom-rule-name" }, [
+              Vue.h("span", null, "名称"),
+              Vue.h("input", {
+                type: "text", value: customHookNameValue(hook), placeholder: "填写显示名称",
+                onInput: event => { uiState.customHookNames[hook.id] = event.target.value; },
+              }),
+              Vue.h("button", { class: "btn-sm btn-sm-ghost", type: "button", disabled: uiState.hooksLoading, onClick: () => saveCustomHookName(hook) }, "保存名称"),
+            ]),
+          ]),
+          Vue.h("button", { class: `btn-sm ${hook.enabled ? "btn-sm-primary" : "btn-sm-ghost"}`, type: "button", disabled: uiState.hooksLoading, onClick: () => setCustomHookEnabled(hook, !hook.enabled) }, hook.enabled ? "关闭" : "启用"),
+        ])
+      )) : Vue.h("p", { class: "hooks-runtime-empty" }, "暂无自定义 Hook。可点击“自定义 Hook”新建规则。"),
+    ]);
+  }
+
+  function renderHookHistory() {
+    const items = uiState.hookHistory || [];
+    return Vue.h("details", { class: "hooks-history-disclosure" }, [
+      Vue.h("summary", null, uiState.hookHistoryAvailable === false ? "Hook 触发记录（重启后可用）" : `Hook 触发记录（${items.length}）`),
+      Vue.h("div", { class: "hooks-history-actions" }, [
+        Vue.h("button", { class: "btn-sm btn-sm-ghost", type: "button", disabled: uiState.hookHistoryLoading, onClick: async () => { await loadHookHistory(); draw(); } }, "刷新"),
+        Vue.h("button", { class: "btn-sm btn-sm-danger", type: "button", disabled: uiState.hookHistoryLoading || !items.length, onClick: clearHookHistory }, "清理记录"),
+      ]),
+      uiState.hookHistoryAvailable === false
+        ? Vue.h("p", { class: "hooks-runtime-empty" }, "当前后端尚未加载触发记录接口；重启应用后可查看和清理记录。")
+        : items.length ? Vue.h("div", { class: "hooks-history-list" }, items.map((item, index) =>
+        Vue.h("div", { class: `hooks-history-row ${item.ok ? "ok" : "failed"}`, key: `${item.at}-${item.hook_id}-${index}` }, [
+          Vue.h("div", { class: "hooks-history-identity" }, [
+            Vue.h("strong", null, item.hook_name || "未命名 Hook"),
+            Vue.h("span", null, `ID：${item.hook_id}`),
+            Vue.h("span", null, `${item.event} · ${item.action_type}`),
+            item.configured === false ? Vue.h("span", { class: "hooks-history-retired" }, "已删除") : null,
+          ]),
+          Vue.h("time", null, item.at?.replace("T", " ").replace("+00:00", "Z") || ""),
+          item.output ? Vue.h("small", null, item.output) : null,
+        ])
+      )) : Vue.h("p", { class: "hooks-runtime-empty" }, "暂无触发记录。"),
+    ]);
   }
 
   function renderSwitch(checked, onChange) {
@@ -259,10 +628,10 @@ import { chatStream } from "../features/chat-stream.js";
       : uiState.embedActive !== "hash";
   }
 
-  async function loadEmbedMode() {
+  async function loadEmbedMode(probe = false) {
     if (!uiState) return;
     try {
-      const resp = await fetch("/api/system/embed-mode");
+      const resp = await fetch(`/api/system/embed-mode${probe ? "?probe=1" : ""}`);
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok || !data.ok) throw new Error(data.error || "嵌入模式加载失败");
       applyEmbedInfo(data);
@@ -343,6 +712,8 @@ import { chatStream } from "../features/chat-stream.js";
       uiState.embedCloudAvailable = false;
       uiState.bgeStatus = `${test ? "连接测试" : "保存"}失败：${error.message || error}`;
       uiState.bgeStatusType = "error";
+      // 测试失败后后端已把云端标记为不可用，刷新“当前运行”徽章避免仍显示云端。
+      if (test) await loadEmbedMode();
     } finally {
       uiState.cloudSaving = false;
       draw();
@@ -357,6 +728,25 @@ import { chatStream } from "../features/chat-stream.js";
       danger: true,
     });
     if (accepted) await saveCloudConfig(false, true);
+  }
+
+  async function checkEmbedStatus() {
+    if (!uiState || uiState.embedChecking) return;
+    uiState.embedChecking = true;
+    uiState.bgeStatus = "正在检查后端状态…";
+    uiState.bgeStatusType = "ok";
+    draw();
+    try {
+      await loadEmbedMode(true);
+      const s = uiState.embedCloudStatus;
+      uiState.bgeStatus = uiState.embedCloudConfigured
+        ? (s === "available" ? "状态已刷新：云端连接正常。" : "状态已刷新：云端不可达，已按实际后端显示。")
+        : "状态已刷新。";
+      uiState.bgeStatusType = uiState.embedCloudConfigured && s !== "available" ? "error" : "ok";
+    } finally {
+      uiState.embedChecking = false;
+      draw();
+    }
   }
 
   async function setEmbedMode(mode) {
@@ -374,10 +764,11 @@ import { chatStream } from "../features/chat-stream.js";
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok || !data.ok) throw new Error(data.error || "嵌入模式切换失败");
       applyEmbedInfo(data);
+      const modeNames = { auto: "自动", cloud: "云端", local: "本地", hash: "基础" };
       const fallback = data.active === "hash" && mode !== "hash";
       uiState.bgeStatus = fallback
-        ? `已选择 ${mode}，但当前回退到 Hash；请检查模型或云端连接。`
-        : `已切换为 ${mode}，请重建向量库以统一已有文档向量。`;
+        ? `已选择${modeNames[mode] || mode}，但当前回退到基础匹配；请检查模型或云端连接。`
+        : `已切换为${modeNames[mode] || mode}模式，请重建向量库以统一已有文档向量。`;
       uiState.bgeStatusType = fallback ? "error" : "ok";
       toast("嵌入模式已切换");
     } catch (error) {
@@ -418,9 +809,24 @@ import { chatStream } from "../features/chat-stream.js";
     }
   }
 
+  // Unified panel header for all settings tabs: title + description on the
+  // left, action buttons on the right. Replaces the previously divergent
+  // settings-primary-title / embed-settings-head / lifecycle-hero styles.
+  function _renderPanelHead(title, description, actions) {
+    return Vue.h("header", { class: "settings-panel-head" }, [
+      Vue.h("div", null, [
+        Vue.h("h3", null, title),
+        description ? Vue.h("p", null, description) : null,
+      ]),
+      actions && actions.length
+        ? Vue.h("div", { class: "settings-panel-head-actions" }, actions)
+        : null,
+    ]);
+  }
+
   function renderGeneral() {
     return Vue.h("section", { class: "app-settings-panel" }, [
-      Vue.h("div", { class: "app-settings-section-title" }, "助手体验"),
+      _renderPanelHead("通用", "提示建议、团队协作与记忆功能的总开关。", null),
       Vue.h("label", { class: "app-setting-row" }, [
         Vue.h("span", { class: "app-setting-copy" }, [
           Vue.h("strong", null, "Prompt Suggestion"),
@@ -441,6 +847,13 @@ import { chatStream } from "../features/chat-stream.js";
           Vue.h("span", null, "开启后 Agent 会根据用户提问自动检索并激活匹配的分析 Skill（SWOT、漏斗等）。关闭后仅可通过 / 命令手动激活。默认开启。"),
         ]),
         renderSwitch(uiState.autoMatchSkill, setAutoMatchSkill),
+      ]),
+      Vue.h("label", { class: "app-setting-row" }, [
+        Vue.h("span", { class: "app-setting-copy" }, [
+          Vue.h("strong", null, "长期记忆"),
+          Vue.h("span", null, "自动记录你的偏好、纠正与口径结论，并在新会话开始时注入。关闭后不再提取、注入与整理记忆。默认开启。"),
+        ]),
+        renderSwitch(uiState.memoryEnabled, setMemoryEnabled),
       ]),
     ]);
   }
@@ -463,27 +876,30 @@ import { chatStream } from "../features/chat-stream.js";
     const localOk = uiState.embedLocalAvailable;
 
     const modeOptions = [
-      { key: "auto", label: "自动", detail: "云端优先，失败后使用本地，再降级 Hash" },
+      { key: "auto", label: "自动", detail: "云端优先，失败后使用本地，再回退基础匹配" },
       { key: "cloud", label: "云端", detail: "强制使用 BGE-large-zh 1024维" },
       { key: "local", label: "本地", detail: "强制使用 BGE-small-zh 512维" },
-      { key: "hash", label: "Hash", detail: "384维零依赖降级模式" },
+      { key: "hash", label: "基础", detail: "关键词匹配，无需模型与网络；语义理解能力有限" },
     ];
-    const activeLabel = active === "cloud" ? "云端" : active === "local" ? "本地" : "Hash";
+    const activeLabel = active === "cloud" ? "云端" : active === "local" ? "本地" : "基础";
     const btnLabel = downloading ? "下载中…" : installed ? "重新下载" : "下载本地模型";
     const tokenPlaceholder = uiState.cloudTokenConfigured
       ? "已配置；留空将保留原 Token"
       : "输入 Bearer Token";
 
     return Vue.h("section", { class: "app-settings-panel model-settings-panel" }, [
-      Vue.h("header", { class: "embed-settings-head" }, [
-        Vue.h("div", null, [
-          Vue.h("h3", null, "语义检索模型"),
-          Vue.h("p", null, "配置云端与本地 Embedding，并选择知识库和 Skill 检索使用的后端。"),
-        ]),
+      _renderPanelHead("知识库检索模型", "配置云端与本地 Embedding，并选择知识库和 Skill 检索使用的后端。", [
         Vue.h("div", { class: "embed-active-state", title: embedModel }, [
           Vue.h("span", null, "当前运行"),
           Vue.h("strong", null, `${activeLabel} · ${dim}维`),
         ]),
+        Vue.h("button", {
+          class: "btn-sm btn-sm-ghost embed-check-btn",
+          type: "button",
+          disabled: uiState.embedChecking,
+          title: "手动探测云端连通性并刷新状态（不会自动轮询）",
+          onClick: checkEmbedStatus,
+        }, uiState.embedChecking ? "检查中…" : "检查状态"),
       ]),
 
       Vue.h("div", { class: "embed-provider-grid" }, [
@@ -591,7 +1007,7 @@ import { chatStream } from "../features/chat-stream.js";
           modeOptions.find(option => option.key === mode)?.detail || ""),
         Vue.h("div", { class: "embed-capability-row" }, [
           Vue.h("span", { class: `bge-badge ${active !== "hash" ? "bge-badge-ok" : "bge-badge-warn"}` }, `${activeLabel} ${dim}维`),
-          Vue.h("span", { class: `bge-badge ${cloudOk ? "bge-badge-ok" : "bge-badge-warn"}` }, cloudOk ? "云端可用" : cloudConfigured ? "云端已配置" : "云端不可用"),
+          Vue.h("span", { class: `bge-badge ${cloudOk ? "bge-badge-ok" : "bge-badge-warn"}` }, cloudOk ? "云端可用" : uiState.embedCloudStatus === "configured" ? "云端未验证" : cloudConfigured ? "云端不可用" : "云端未配置"),
           Vue.h("span", { class: `bge-badge ${localOk ? "bge-badge-ok" : "bge-badge-warn"}` }, localOk ? "本地可用" : "本地不可用"),
         ]),
       ]),
@@ -614,36 +1030,112 @@ import { chatStream } from "../features/chat-stream.js";
         : null,
     ]);
   }
+  function renderLlm() {
+    const configs = state.modelConfigs || {};
+    /* Dynamic load: the "models" module updates state.modelConfigs every time
+       the settings modal saves a change, so this tab always sees the latest
+       config without an extra fetch.  We only pull when the data is stale. */
+    const providers = Object.entries(configs);
+    const hasConfigs = providers.length > 0;
+    const builtin = providers.filter(([, c]) => !c.is_custom);
+    const custom = providers.filter(([, c]) => c.is_custom);
+    const BUILTIN_LABELS = {
+      deepseek: "DeepSeek", openai: "OpenAI / ChatGPT",
+      atlascloud: "AtlasCloud", ollama: "Ollama (本地)",
+    };
+
+    const providerCard = ([key, cfg]) => {
+      const label = cfg.is_custom ? (cfg.name || cfg.model || key) : (BUILTIN_LABELS[key] || key);
+      const model = cfg.model || "—";
+      const hasKey = !!cfg.has_api_key;
+      return Vue.h("div", { class: "llm-provider-card", key }, [
+        Vue.h("div", { class: "llm-provider-head" }, [
+          Vue.h("strong", null, label),
+          Vue.h("span", { class: `llm-badge ${hasKey ? "llm-badge-ok" : "llm-badge-off"}` },
+            hasKey ? "已配置" : "未配置"),
+        ]),
+        Vue.h("div", { class: "llm-provider-body" }, [
+          Vue.h("span", null, `模型：${model}`),
+          cfg.base_url ? Vue.h("span", null, `端点：${cfg.base_url}`) : null,
+        ].filter(Boolean)),
+      ]);
+    };
+
+    const empty = Vue.h("div", { class: "llm-empty" }, [
+      Vue.h("p", null, "尚未配置任何 LLM 模型。"),
+      Vue.h("p", { class: "llm-empty-hint" },
+        "点击聊天界面右上角的 ⚙ 按钮打开「LLM模型」面板，即可添加内置提供商或自定义模型的 API Key。"),
+    ]);
+
+    return Vue.h("section", { class: "app-settings-panel llm-settings-panel" }, [
+      _renderPanelHead("LLM模型", "管理聊天、分析、团队协作使用的 LLM 后端。通过聊天界面右上角的快捷设置面板进行配置。", null),
+
+      hasConfigs ? [
+        builtin.length ? Vue.h("section", { class: "llm-section" }, [
+          Vue.h("div", { class: "llm-section-title" }, "内置提供商"),
+          Vue.h("div", { class: "llm-provider-grid" }, builtin.map(providerCard)),
+        ]) : null,
+        custom.length ? Vue.h("section", { class: "llm-section" }, [
+          Vue.h("div", { class: "llm-section-title" }, "自定义模型"),
+          Vue.h("div", { class: "llm-provider-grid" }, custom.map(providerCard)),
+        ]) : null,
+      ].filter(Boolean) : empty,
+    ]);
+  }
   function renderHooks() {
     const hint = "示例条件：tool == 'query_data' && args.sql contains 'DROP'";
     return Vue.h("section", { class: "app-settings-panel app-hooks-panel" }, [
-      Vue.h("div", { class: "app-settings-section-title" }, "Hooks"),
-      Vue.h("div", { class: "app-hooks-toolbar" }, [
+      _renderPanelHead("Hooks", "工具调用前后的拦截规则与自定义逻辑。", [
         Vue.h("button", { class: "btn-sm btn-sm-ghost", type: "button", disabled: uiState.hooksLoading, onClick: loadHooks }, "重新加载"),
-        Vue.h("button", { class: "btn-sm btn-sm-ghost", type: "button", disabled: uiState.hooksLoading, onClick: validateHooks }, "校验"),
-        Vue.h("button", { class: "btn-sm btn-sm-primary", type: "button", disabled: uiState.hooksLoading, onClick: saveHooks }, "保存"),
+        Vue.h("button", {
+          class: "btn-sm btn-sm-primary", type: "button", disabled: uiState.hooksLoading,
+          onClick: () => { uiState.customHookOpen = !uiState.customHookOpen; draw(); },
+        }, uiState.customHookOpen ? "收起自定义 Hook" : "自定义 Hook"),
       ]),
-      Vue.h("p", { class: "app-hooks-hint" }, "支持标准事件别名：SessionStart / UserPromptSubmit / PreToolUse / PostToolUse / PermissionRequest / SubagentStart / SubagentStop / PreCompact / PostCompact / Stop。保存后会规范化为 snake_case。"),
-      Vue.h("textarea", {
-        class: "app-hooks-editor",
-        spellcheck: "false",
-        value: uiState.hooksText,
-        onInput: event => { uiState.hooksText = event.target.value; },
-      }),
-      Vue.h("div", { class: "app-hooks-test-row" }, [
-        Vue.h("select", {
-          class: "app-hooks-select",
-          value: uiState.testEvent,
-          onChange: event => { uiState.testEvent = event.target.value; draw(); },
-        }, HOOK_EVENTS.map(event =>
-          Vue.h("option", { value: event }, event)
-        )),
-        Vue.h("button", { class: "btn-sm btn-sm-ghost", type: "button", disabled: uiState.hooksLoading, onClick: testHooks }, "测试运行"),
-        Vue.h("span", { class: "app-hooks-hint-inline" }, hint),
-      ]),
+      renderBuiltinHookTemplates(),
+      renderCustomHookRules(),
+      uiState.customHookOpen ? Vue.h("div", { class: "hooks-custom-editor" }, [
+        Vue.h("div", { class: "hooks-custom-head" }, [
+          Vue.h("div", null, [
+            Vue.h("strong", null, "自定义 Hook"),
+            Vue.h("span", null, "可组合事件、条件与动作；保存后在下一轮对话生效。"),
+          ]),
+          Vue.h("div", { class: "app-hooks-toolbar" }, [
+            Vue.h("button", { class: "btn-sm btn-sm-ghost", type: "button", disabled: uiState.hooksLoading, onClick: validateHooks }, "校验"),
+            Vue.h("button", { class: "btn-sm btn-sm-primary", type: "button", disabled: uiState.hooksLoading, onClick: saveHooks }, "保存"),
+          ]),
+        ]),
+        Vue.h("label", { class: "hooks-custom-name-field" }, [
+          Vue.h("span", null, "Hook 名称"),
+          Vue.h("input", {
+            type: "text", value: uiState.customHookName, placeholder: "例如：回答语气规范",
+            onInput: event => { uiState.customHookName = event.target.value; },
+          }),
+          Vue.h("button", { class: "btn-sm btn-sm-ghost", type: "button", onClick: addNamedCustomHook }, "添加命名 Hook"),
+        ]),
+        Vue.h("p", { class: "app-hooks-hint" }, "每条自定义规则都应有 name；它会显示在 Hook 触发记录中。也可直接在 JSON 中补充 name。"),
+        Vue.h("textarea", {
+          class: "app-hooks-editor", spellcheck: "false", value: uiState.hooksText,
+          onInput: event => { uiState.hooksText = event.target.value; },
+        }),
+        Vue.h("div", { class: "app-hooks-test-row" }, [
+          Vue.h("select", {
+            class: "app-hooks-select", value: uiState.testEvent,
+            onChange: event => { uiState.testEvent = event.target.value; draw(); },
+          }, HOOK_EVENTS.map(event => Vue.h("option", { value: event }, event))),
+          Vue.h("button", { class: "btn-sm btn-sm-ghost", type: "button", disabled: uiState.hooksLoading, onClick: testHooks }, "测试运行"),
+          Vue.h("span", { class: "app-hooks-hint-inline" }, hint),
+        ]),
+      ]) : null,
       uiState.hooksStatus
         ? Vue.h("pre", { class: `app-hooks-status app-hooks-status-${uiState.hooksStatusType}` }, uiState.hooksStatus)
         : null,
+      Vue.h("details", { class: "hooks-runtime-disclosure" }, [
+        Vue.h("summary", null, "内部触发事件端点"),
+        Vue.h("p", null, "这些端点只负责把内部事件转发给外部集成，不属于用户 Hook，也不会写入 Hook 触发记录。"),
+        renderInternalEventEndpoints(),
+      ]),
+      renderHookHistory(),
     ]);
   }
 
@@ -653,33 +1145,38 @@ import { chatStream } from "../features/chat-stream.js";
     uiState.lifecycleStatus = "正在读取存储信息…";
     draw();
     try {
-      const [settingsResponse, reportResponse, trashResponse, artifactTrashResponse, uploadTrashResponse, previewResponse, referencesResponse, uploadsResponse, workspaceResponse, auditResponse] = await Promise.all([
+      const [settingsResponse, reportResponse, trashResponse, artifactTrashResponse, uploadTrashResponse, memoryTrashResponse, previewResponse, referencesResponse, uploadsResponse, workspaceResponse, auditResponse, hookHistoryResponse] = await Promise.all([
         fetch("/api/lifecycle/settings"),
         fetch("/api/lifecycle/report"),
         fetch("/api/lifecycle/session-trash"),
         fetch("/api/lifecycle/artifact-trash"),
         fetch("/api/lifecycle/upload-trash"),
+        fetch("/api/lifecycle/memory-trash"),
         fetch("/api/lifecycle/artifacts/preview"),
         fetch("/api/lifecycle/artifacts/references/preview"),
         fetch("/api/lifecycle/uploads/preview"),
         fetch("/api/lifecycle/workspaces/preview"),
         fetch("/api/lifecycle/audit?limit=50"),
+        fetch("/api/hooks/history?limit=50"),
       ]);
       const settingsData = await settingsResponse.json();
       const reportData = await reportResponse.json();
       const trashData = await trashResponse.json();
       const artifactTrashData = await artifactTrashResponse.json();
       const uploadTrashData = await uploadTrashResponse.json();
+      const memoryTrashData = await memoryTrashResponse.json();
       const previewData = await previewResponse.json();
       const referencesData = await referencesResponse.json();
       const uploadsData = await uploadsResponse.json();
       const workspaceData = await workspaceResponse.json();
       const auditData = await auditResponse.json();
+      const hookHistoryData = await hookHistoryResponse.json().catch(() => ({}));
       if (!settingsResponse.ok || !settingsData.ok) throw new Error(settingsData.error || "读取生命周期设置失败");
       if (!reportResponse.ok || !reportData.ok) throw new Error(reportData.error || "读取存储统计失败");
-      if (!trashResponse.ok || !trashData.ok) throw new Error(trashData.error || "读取会话回收站失败");
+      if (!trashResponse.ok || !trashData.ok) throw new Error(trashData.error || "读取已归档对话失败");
       if (!artifactTrashResponse.ok || !artifactTrashData.ok) throw new Error(artifactTrashData.error || "读取产物回收站失败");
       if (!uploadTrashResponse.ok || !uploadTrashData.ok) throw new Error(uploadTrashData.error || "读取上传回收站失败");
+      if (!memoryTrashResponse.ok || !memoryTrashData.ok) throw new Error(memoryTrashData.error || "读取记忆回收站失败");
       if (!previewResponse.ok || !previewData.ok) throw new Error(previewData.error || "读取产物扫描失败");
       if (!referencesResponse.ok || !referencesData.ok) throw new Error(referencesData.error || "读取产物引用失败");
       if (!uploadsResponse.ok || !uploadsData.ok) throw new Error(uploadsData.error || "读取上传分类失败");
@@ -691,11 +1188,13 @@ import { chatStream } from "../features/chat-stream.js";
       uiState.lifecycleTrash = trashData.items || [];
       uiState.lifecycleArtifactTrash = artifactTrashData.items || [];
       uiState.lifecycleUploadTrash = uploadTrashData.items || [];
+      uiState.lifecycleMemoryTrash = memoryTrashData.items || [];
       uiState.lifecyclePreview = previewData.preview || null;
       uiState.lifecycleReferencePreview = referencesData.preview || null;
       uiState.lifecycleUploadsPreview = uploadsData.preview || null;
       uiState.lifecycleWorkspacePreview = workspaceData.preview || null;
       uiState.lifecycleAudit = auditData.items || [];
+      uiState.lifecycleHookHistory = hookHistoryResponse.ok && hookHistoryData.ok ? (hookHistoryData.items || []) : [];
       uiState.lifecycleStatus = "";
     } catch (error) {
       uiState.lifecycleStatus = `读取失败：${error.message || error}`;
@@ -754,45 +1253,6 @@ import { chatStream } from "../features/chat-stream.js";
     } catch (error) {
       uiState.lifecycleStatus = `保存失败：${error.message || error}`;
     } finally {
-      draw();
-    }
-  }
-
-  async function reclaimLifecycle() {
-    if (!uiState || uiState.lifecycleReclaiming) return;
-    const retentionDays = lifecycleRetentionDaysValue();
-    if (retentionDays === null) {
-      uiState.lifecycleStatus = "当前选择永久保留，会话回收站不会过期清理。";
-      draw();
-      return;
-    }
-    if (!Number.isInteger(retentionDays) || retentionDays < 0 || retentionDays > 3650) {
-      uiState.lifecycleStatus = "自定义保留天数必须是 0 到 3650 的整数";
-      draw();
-      return;
-    }
-    const accepted = await window.BAA.ui?.confirm?.({
-      title: "永久清理过期会话",
-      message: `将永久清理已在会话回收站保留超过 ${retentionDays} 天的文件。此操作不可恢复。`,
-      danger: true,
-    });
-    if (!accepted) return;
-    uiState.lifecycleReclaiming = true;
-    uiState.lifecycleStatus = "正在清理…";
-    draw();
-    try {
-      const response = await fetch("/api/lifecycle/session-trash/reclaim", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ retention_days: retentionDays }),
-      });
-      const data = await response.json();
-      if (!response.ok || !data.ok) throw new Error(data.error || "清理失败");
-      uiState.lifecycleStatus = `已清理 ${data.summary.groups || 0} 组、${data.summary.files || 0} 个文件。`;
-      await loadLifecycle();
-    } catch (error) {
-      uiState.lifecycleStatus = `清理失败：${error.message || error}`;
-    } finally {
-      uiState.lifecycleReclaiming = false;
       draw();
     }
   }
@@ -986,13 +1446,13 @@ import { chatStream } from "../features/chat-stream.js";
   async function clearSessionTrash() {
     if (!uiState || uiState.lifecycleReclaiming) return;
     const accepted = await window.BAA.ui?.confirm?.({
-      title: "清空会话回收站？",
-      message: "将永久删除会话回收站中的所有项目。此操作不可恢复。",
+      title: "永久删除全部已归档对话？",
+      message: "将永久删除所有已归档对话及其文件（会话、图表、导出、上传）。此操作不可恢复。",
       danger: true,
     });
     if (!accepted) return;
     uiState.lifecycleReclaiming = true;
-    uiState.lifecycleStatus = "正在清空会话回收站…";
+    uiState.lifecycleStatus = "正在删除已归档对话…";
     draw();
     try {
       const response = await fetch("/api/lifecycle/session-trash/reclaim", {
@@ -1000,7 +1460,7 @@ import { chatStream } from "../features/chat-stream.js";
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ retention_days: 0 }),
       });
-      const data = await parseLifecycleResponse(response, "清空会话回收站失败");
+      const data = await parseLifecycleResponse(response, "删除已归档对话失败");
       uiState.lifecycleStatus = `已清空 ${data.summary.groups || 0} 组、${data.summary.files || 0} 个会话文件。`;
       await loadLifecycle();
     } catch (error) {
@@ -1089,6 +1549,74 @@ import { chatStream } from "../features/chat-stream.js";
     }
   }
 
+  async function restoreMemoryTrashFromStorage(trashId) {
+    if (!uiState || uiState.lifecycleMemoryBusyKey) return;
+    uiState.lifecycleMemoryBusyKey = trashId;
+    uiState.lifecycleStatus = "正在恢复记忆…";
+    draw();
+    try {
+      const response = await fetch(`/api/lifecycle/memory-trash/${encodeURIComponent(trashId)}/restore`, { method: "POST" });
+      const data = await parseLifecycleResponse(response, "恢复记忆失败");
+      uiState.lifecycleStatus = `已恢复记忆「${data.summary.name || data.summary.restored?.[0] || ""}」。`;
+      await loadLifecycle();
+    } catch (error) {
+      uiState.lifecycleStatus = `恢复记忆失败：${error.message || error}`;
+      draw();
+    } finally {
+      uiState.lifecycleMemoryBusyKey = "";
+      draw();
+    }
+  }
+
+  async function clearMemoryTrash() {
+    if (!uiState || uiState.lifecycleMemoryReclaiming) return;
+    const accepted = await window.BAA.ui?.confirm?.({
+      title: "清空记忆回收站？",
+      message: "将永久删除记忆回收站中的所有归档记忆。此操作不可恢复。",
+      danger: true,
+    });
+    if (!accepted) return;
+    uiState.lifecycleMemoryReclaiming = true;
+    uiState.lifecycleStatus = "正在清空记忆回收站…";
+    draw();
+    try {
+      const response = await fetch("/api/lifecycle/memory-trash/reclaim", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ retention_days: 0 }),
+      });
+      const data = await parseLifecycleResponse(response, "清空记忆回收站失败");
+      uiState.lifecycleStatus = `已清空 ${data.summary.groups || 0} 组、${data.summary.files || 0} 个记忆文件。`;
+      await loadLifecycle();
+    } catch (error) {
+      uiState.lifecycleStatus = `清空记忆失败：${error.message || error}`;
+      draw();
+    } finally {
+      uiState.lifecycleMemoryReclaiming = false;
+      draw();
+    }
+  }
+
+  async function pruneMissingArtifacts() {
+    if (!uiState || uiState.lifecycleLoading) return;
+    const accepted = await window.BAA.ui?.confirm?.({
+      title: "清理缺失记录？",
+      message: "将移除已登记但文件已不存在的产物登记记录。仅清理登记信息，不影响任何现有文件。",
+    });
+    if (!accepted) return;
+    uiState.lifecycleStatus = "正在清理缺失记录…";
+    draw();
+    try {
+      const response = await fetch("/api/lifecycle/artifacts/prune-missing", { method: "POST" });
+      const data = await parseLifecycleResponse(response, "清理缺失记录失败");
+      uiState.lifecycleStatus = `已清理 ${data.summary.removed || 0} 条缺失记录。`;
+      await loadLifecycle();
+    } catch (error) {
+      uiState.lifecycleStatus = `清理缺失记录失败：${error.message || error}`;
+      draw();
+    }
+  }
+
   function formatLifecycleBytes(value) {
     const bytes = Number(value) || 0;
     if (bytes < 1024) return `${bytes} B`;
@@ -1124,6 +1652,7 @@ import { chatStream } from "../features/chat-stream.js";
     const items = uiState.lifecycleTrash || [];
     const artifactTrash = uiState.lifecycleArtifactTrash || [];
     const uploadTrash = uiState.lifecycleUploadTrash || [];
+    const memoryTrash = uiState.lifecycleMemoryTrash || [];
     const preview = uiState.lifecyclePreview || { unknown_files: [], unknown_bytes: 0, missing_registered_ids: [] };
     const referencePreview = uiState.lifecycleReferencePreview || { registered: 0, referenced: 0, unreferenced: 0, missing: 0, unreferenced_samples: [], missing_samples: [], reference_sources: 0 };
     const unknownFiles = Array.isArray(preview.unknown_files) ? preview.unknown_files : [];
@@ -1139,7 +1668,6 @@ import { chatStream } from "../features/chat-stream.js";
     const auditAll = Array.isArray(uiState.lifecycleAudit) ? uiState.lifecycleAudit : [];
     const audit = uiState.lifecycleAuditFilter === "all" ? auditAll : auditAll.filter(item => String(item.event || "").includes(uiState.lifecycleAuditFilter));
     const locations = report.locations || {};
-    const uploads = locations.uploads || { files: 0, bytes: 0 };
     const retentionDays = lifecycleRetentionDaysValue();
     const retentionForever = retentionDays === null;
     const customRetentionInvalid = !retentionForever && (!Number.isInteger(retentionDays) || retentionDays < 0 || retentionDays > 3650);
@@ -1149,21 +1677,17 @@ import { chatStream } from "../features/chat-stream.js";
       if (!Number.isFinite(deletedAt)) return false;
       return Date.now() - deletedAt >= retentionDays * 86400000;
     };
-    const expiredTrash = items.filter(isExpiredTrash);
     const expiredArtifactTrash = artifactTrash.filter(isExpiredTrash);
-    const expiredTrashBytes = expiredTrash.reduce((total, item) => total + Number(item.bytes || 0), 0);
     const expiredArtifactTrashBytes = expiredArtifactTrash.reduce((total, item) => total + Number(item.bytes || 0), 0);
     const trashBytes = items.reduce((total, item) => total + Number(item.bytes || 0), 0);
     const artifactTrashBytes = artifactTrash.reduce((total, item) => total + Number(item.bytes || 0), 0);
     const uploadTrashBytes = uploadTrash.reduce((total, item) => total + Number(item.bytes || 0), 0);
+    const memoryTrashBytes = memoryTrash.reduce((total, item) => total + Number(item.bytes || 0), 0);
+    const recycleTotalBytes = artifactTrashBytes + uploadTrashBytes + memoryTrashBytes;
     const metricCards = [
       { label: "目录总占用", value: formatLifecycleBytes(report.total_bytes), note: `${report.total_files || 0} 个文件 · 不是可清理量`, tone: "primary" },
-      { label: "会话回收站", value: formatLifecycleBytes(trashBytes), note: retentionForever ? `${items.length} 组 · 永久保留` : `${items.length} 组 · ${expiredTrash.length} 组已过期`, tone: expiredTrash.length ? "danger" : "muted" },
-      { label: "产物回收站", value: formatLifecycleBytes(artifactTrashBytes), note: retentionForever ? `${artifactTrash.length} 项 · 永久保留` : `${artifactTrash.length} 项 · ${expiredArtifactTrash.length} 项已过期`, tone: expiredArtifactTrash.length ? "danger" : "muted" },
-      { label: "上传回收站", value: formatLifecycleBytes(uploadTrashBytes), note: `${uploadTrash.length} 项 · 可恢复`, tone: uploadTrash.length ? "warn" : "muted" },
-      { label: "已登记产物", value: String(referencePreview.registered || 0), note: `${referencePreview.unreferenced || 0} 个候选 · ${referencePreview.missing || 0} 个缺失`, tone: referencePreview.unreferenced ? "warn" : "muted" },
-      { label: "历史产物待识别", value: formatLifecycleBytes(preview.unknown_bytes), note: `${unknownFiles.length} 个 · charts / exports`, tone: unknownFiles.length ? "warn" : "muted" },
-      { label: "上传文件", value: formatLifecycleBytes(uploads.bytes), note: `${uploads.files || 0} 个 · ${uploadCategories.unknown_uploads?.files || 0} 个待识别`, tone: "protected" },
+      { label: "已归档对话", value: formatLifecycleBytes(trashBytes), note: `${items.length} 组 · 手动管理，不受保留策略影响`, tone: items.length ? "warn" : "muted" },
+      { label: "回收站总量", value: formatLifecycleBytes(recycleTotalBytes), note: `产物 ${artifactTrash.length} · 上传 ${uploadTrash.length} · 记忆 ${memoryTrash.length} 项`, tone: recycleTotalBytes ? "warn" : "muted" },
     ];
 
     const section = (title, description, actions, children, extraClass = "") => Vue.h("section", { class: `lifecycle-card ${extraClass}` }, [
@@ -1174,7 +1698,7 @@ import { chatStream } from "../features/chat-stream.js";
         ]),
         actions ? Vue.h("div", { class: "lifecycle-preview-actions" }, Array.isArray(actions) ? actions : [actions]) : null,
       ]),
-      ...children,
+      ...(Array.isArray(children) ? children : []),
     ]);
 
     const previewList = (caption, rows, renderRow, emptyText = "暂无数据") => rows.length
@@ -1228,12 +1752,7 @@ import { chatStream } from "../features/chat-stream.js";
     ];
 
     return Vue.h("section", { class: "app-settings-panel lifecycle-panel lifecycle-redesigned" }, [
-      Vue.h("div", { class: "lifecycle-hero lifecycle-hero-redesigned" }, [
-        Vue.h("div", null, [
-          Vue.h("div", { class: "lifecycle-kicker" }, "Storage lifecycle"),
-          Vue.h("div", { class: "app-settings-section-title lifecycle-title" }, "本地数据存储"),
-          Vue.h("p", { class: "lifecycle-copy" }, "把本地文件分成可回收、需确认和受保护三类。回收站支持恢复；永久删除必须手动确认。"),
-        ]),
+      _renderPanelHead("存储", "本地文件分为可回收、需确认、受保护三类；回收站可恢复，永久删除必须手动确认。", [
         Vue.h("button", { class: "btn-sm btn-sm-primary", type: "button", disabled: uiState.lifecycleLoading, onClick: loadLifecycle }, uiState.lifecycleLoading ? "刷新中…" : "刷新统计"),
       ]),
 
@@ -1243,7 +1762,7 @@ import { chatStream } from "../features/chat-stream.js";
         Vue.h("small", null, card.note),
       ]))),
 
-      section("保留策略", "控制会话、产物和上传回收站的过期清理口径；一键删除会忽略保留期并永久清空对应回收站。", [
+      section("保留策略", "控制无注册的产物、上传和记忆回收站的过期清理口径；已归档的对话不受此策略影响，只能手动恢复或删除。", [
         Vue.h("label", { class: "lifecycle-retention-field" }, [
           Vue.h("span", null, "保留策略"),
           Vue.h("select", { class: "lifecycle-retention-select", value: uiState.lifecycleRetentionPreset, onChange: event => setLifecycleRetentionPreset(event.target.value) }, [
@@ -1254,60 +1773,21 @@ import { chatStream } from "../features/chat-stream.js";
           ]),
           uiState.lifecycleRetentionPreset === "custom" ? Vue.h("input", { class: "lifecycle-days", type: "number", min: 0, max: 3650, value: uiState.lifecycleRetentionCustomDays, onInput: event => { uiState.lifecycleRetentionCustomDays = event.target.value; draw(); }, onChange: saveLifecycleSettingsFromUi }) : null,
         ]),
-        Vue.h("button", { class: "btn-sm btn-sm-danger", type: "button", disabled: uiState.lifecycleReclaiming || retentionForever || customRetentionInvalid || !expiredTrash.length, title: retentionForever ? "当前选择永久保留，不会清理会话回收站" : customRetentionInvalid ? "自定义天数需为 0 到 3650 的整数" : expiredTrash.length ? "永久删除超过保留策略的会话回收站文件" : "当前没有过期的会话回收站文件", onClick: reclaimLifecycle }, retentionForever ? "永久保留会话" : `清理过期会话 · ${formatLifecycleBytes(expiredTrashBytes)}`),
       ], [uiState.lifecycleStatus ? Vue.h("div", { class: "lifecycle-status" }, uiState.lifecycleStatus) : null]),
 
-      Vue.h("div", { class: "lifecycle-two-column" }, [
-        section("可清理候选", "这些项目可以手动移入回收站。未知不等于垃圾；删除前请看文件名和来源。", null, [
-          Vue.h("div", { class: "lifecycle-subsection" }, [
-            Vue.h("div", { class: "lifecycle-inline-title" }, "Uploads"),
-            Vue.h("div", { class: "lifecycle-location-list" }, uploadCategoryRows.map(([key, label]) => {
-              const value = uploadCategories[key] || { files: 0, bytes: 0 };
-              return Vue.h("div", { class: "lifecycle-row", key }, [Vue.h("span", null, label), Vue.h("span", null, `${value.files || 0} 个 · ${formatLifecycleBytes(value.bytes)}`)]);
-            })),
-            previewList(`未知上传前 ${Math.min(20, unknownUploadSamples.length)} 项`, unknownUploadSamples, uploadCandidateRow, "没有未知上传"),
-            previewList(`Excel 解析缓存前 ${Math.min(20, cacheUploadSamples.length)} 项`, cacheUploadSamples, uploadCandidateRow, "没有 Excel 解析缓存"),
-          ]),
-          Vue.h("div", { class: "lifecycle-subsection" }, [
-            Vue.h("div", { class: "lifecycle-inline-title" }, "历史 charts / exports"),
-            Vue.h("p", { class: "lifecycle-copy" }, `发现 ${unknownFiles.length} 个未登记历史产物（${formatLifecycleBytes(preview.unknown_bytes)}），已登记但缺失 ${missingRegistered.length} 个。`),
-            previewList(`未登记历史产物前 ${Math.min(20, unknownFiles.length)} 项`, unknownFiles.slice(0, 20), (item, index) => {
-              const key = `${item.type || "artifact"}:${item.relative_path || item.filename || index}`;
-              const recycling = uiState.lifecycleRecyclingKey === key;
-              return Vue.h("div", { class: "lifecycle-preview-item", key }, [
-                Vue.h("span", { title: item.relative_path || item.filename || "" }, `${item.type || "unknown"} · ${item.filename || "未命名产物"}`),
-                Vue.h("div", { class: "lifecycle-preview-actions" }, [
-                  Vue.h("small", null, formatLifecycleBytes(item.size_bytes)),
-                  Vue.h("button", { class: "btn-sm btn-sm-danger", type: "button", disabled: recycling || uiState.lifecycleLoading, onClick: () => recycleUnregisteredArtifact(item) }, recycling ? "移动中…" : "删除"),
-                ]),
-              ]);
-            }, "没有未登记历史产物"),
-          ]),
-          Vue.h("div", { class: "lifecycle-subsection" }, [
-            Vue.h("div", { class: "lifecycle-inline-title" }, "已登记产物引用"),
-            Vue.h("p", { class: "lifecycle-copy" }, `扫描 ${referencePreview.reference_sources || 0} 个会话文件：已登记 ${referencePreview.registered || 0} 个，发现引用 ${referencePreview.referenced || 0} 个，未发现引用 ${referencePreview.unreferenced || 0} 个，文件缺失 ${referencePreview.missing || 0} 个。`),
-            previewList(`未发现引用前 ${Math.min(20, unreferencedRegistered.length)} 项`, unreferencedRegistered, (item, index) => {
-              const key = `registered:${item.id || index}`;
-              const recycling = uiState.lifecycleRecyclingKey === key;
-              return Vue.h("div", { class: "lifecycle-preview-item", key }, [
-                Vue.h("span", { title: item.id || item.filename || "" }, `${item.type || "artifact"} · ${item.filename || item.id || "未命名产物"}`),
-                Vue.h("div", { class: "lifecycle-preview-actions" }, [
-                  Vue.h("small", null, formatLifecycleBytes(item.size_bytes)),
-                  ["chart", "export", "report"].includes(item.type) ? Vue.h("button", { class: "btn-sm btn-sm-danger", type: "button", disabled: recycling || uiState.lifecycleLoading, onClick: () => recycleRegisteredArtifact(item) }, recycling ? "移动中…" : "回收") : null,
-                ]),
-              ]);
-            }, "没有未发现引用的已登记产物"),
-            previewList(`缺失记录前 ${Math.min(20, missingRegisteredSamples.length)} 项`, missingRegisteredSamples, (item, index) => Vue.h("div", { class: "lifecycle-preview-item", key: `${item.id || index}` }, [
-              Vue.h("span", { title: item.id || item.filename || "" }, `${item.type || "artifact"} · ${item.filename || item.id || "缺失产物"}`),
-              Vue.h("small", null, formatLifecycleBytes(item.size_bytes)),
-            ]), "没有缺失的已登记产物"),
-          ]),
-        ]),
-
-        section("数据统计", "展示各类本地数据的占用情况。知识库请通过知识库管理删除，Workspace 请通过工作区流程删除。", Vue.h("span", { class: "lifecycle-badge lifecycle-badge-protected" }, "分类统计"), [
-          Vue.h("div", { class: "lifecycle-location-list" }, protectedRows.map(([label, value]) => Vue.h("div", { class: "lifecycle-row", key: label }, [Vue.h("span", null, label), Vue.h("span", null, value)]))),
-        ], "lifecycle-card-stats"),
-      ]),
+      section("已归档的对话", "手动归档的对话及其图表、导出、上传等文件保存在这里，可随时恢复；不受保留策略影响，只由你手动恢复或永久删除。", [
+        Vue.h("button", { class: "btn-sm btn-sm-danger", type: "button", disabled: uiState.lifecycleReclaiming || !items.length, title: items.length ? "永久删除全部已归档对话（不可恢复）" : "暂无已归档对话", onClick: clearSessionTrash }, "永久删除全部"),
+      ], [
+        items.length
+          ? Vue.h("div", { class: "lifecycle-trash-list" }, items.map(item => Vue.h("div", { class: "lifecycle-trash-item", key: item.id }, [
+            Vue.h("div", null, [
+              Vue.h("strong", null, item.source_filename || "已归档对话"),
+              Vue.h("small", null, `${item.deleted_at || ""} · ${item.files} 个文件${item.artifacts ? ` + ${item.artifacts} 个产物` : ""} · ${formatLifecycleBytes(item.bytes)} · 可恢复`),
+            ]),
+            Vue.h("button", { class: "btn-sm btn-sm-ghost", type: "button", disabled: uiState.lifecycleReclaiming, onClick: () => restoreLifecycle(item.id) }, "恢复"),
+          ])))
+          : Vue.h("div", { class: "lifecycle-empty" }, "暂无已归档的对话"),
+      ], "lifecycle-card-recycle"),
 
       section("回收站", "回收站里的项目可恢复；一键删除会永久清空对应回收站。", null, [
         Vue.h("div", { class: "lifecycle-recycle-grid" }, [
@@ -1315,35 +1795,456 @@ import { chatStream } from "../features/chat-stream.js";
           recycleBin("产物回收站", artifactTrash, clearArtifactTrash, uiState.lifecycleArtifactReclaiming, restoreArtifactTrash, uiState.lifecycleArtifactBusyKey, "已回收产物", [
             Vue.h("button", { class: "btn-sm btn-sm-danger", type: "button", disabled: uiState.lifecycleArtifactReclaiming || retentionForever || customRetentionInvalid || !expiredArtifactTrash.length, onClick: reclaimArtifactTrash }, retentionForever ? "永久保留产物" : `清理过期 · ${formatLifecycleBytes(expiredArtifactTrashBytes)}`),
           ]),
-          recycleBin("会话回收站", items, clearSessionTrash, uiState.lifecycleReclaiming, restoreLifecycle, "", "已删除会话"),
+          recycleBin("记忆回收站", memoryTrash, clearMemoryTrash, uiState.lifecycleMemoryReclaiming, restoreMemoryTrashFromStorage, uiState.lifecycleMemoryBusyKey, "已归档记忆"),
         ]),
       ]),
 
-      section("生命周期记录", "记录最近的登记、回收、恢复和清理操作；API 会隐藏本地绝对路径。", [
-        Vue.h("select", { class: "lifecycle-retention-select", value: uiState.lifecycleAuditFilter, onChange: event => { uiState.lifecycleAuditFilter = event.target.value; draw(); } }, [
-          Vue.h("option", { value: "all" }, "全部"),
-          Vue.h("option", { value: "session" }, "会话"),
-          Vue.h("option", { value: "artifact" }, "产物"),
-          Vue.h("option", { value: "reclaim" }, "清理"),
-        ]),
-        Vue.h("button", { class: "btn-sm btn-sm-ghost", type: "button", disabled: uiState.lifecycleLoading, onClick: loadLifecycle }, "刷新"),
-      ], [audit.length ? Vue.h("div", { class: "lifecycle-audit-list" }, audit.map((item, index) => {
-        const detail = lifecycleAuditDetails(item);
-        return Vue.h("div", { class: "lifecycle-audit-item", key: `${item.at || ""}-${item.event || index}` }, [
-          Vue.h("div", { class: "lifecycle-audit-main" }, [
-            Vue.h("span", null, lifecycleAuditLabel(item.event)),
-            detail ? Vue.h("em", null, detail) : null,
+      section("高级", "未登记的产物、上传缓存、目录统计与操作审计；日常无需关注。", [
+        Vue.h("button", { class: "btn-sm btn-sm-ghost", type: "button", onClick: () => { uiState.lifecycleAdvancedOpen = !uiState.lifecycleAdvancedOpen; draw(); } }, uiState.lifecycleAdvancedOpen ? "收起高级" : "展开高级"),
+      ], uiState.lifecycleAdvancedOpen ? [
+        Vue.h("div", { class: "lifecycle-subsection" }, [
+          Vue.h("div", { class: "lifecycle-inline-title" }, "Hook 触发记录"),
+          Vue.h("p", { class: "lifecycle-copy" }, "Hook 执行日志保存在本地配置目录，最多保留 500 条；可在 Hooks 页查看详情。"),
+          Vue.h("div", { class: "lifecycle-preview-actions" }, [
+            Vue.h("button", { class: "btn-sm btn-sm-danger", type: "button", disabled: !(uiState.lifecycleHookHistory || []).length, onClick: clearHookHistoryFromStorage }, "清理记录"),
           ]),
-          Vue.h("small", null, item.at || ""),
-        ]);
-      })) : Vue.h("div", { class: "lifecycle-empty" }, "暂无生命周期记录")]),
+        ]),
+
+        Vue.h("div", { class: "lifecycle-two-column" }, [
+          section("可清理候选", "这些项目可以手动移入回收站。未知不等于垃圾；删除前请看文件名和来源。", null, [
+            Vue.h("div", { class: "lifecycle-subsection" }, [
+              Vue.h("div", { class: "lifecycle-inline-title" }, "Uploads"),
+              Vue.h("div", { class: "lifecycle-location-list" }, uploadCategoryRows.map(([key, label]) => {
+                const value = uploadCategories[key] || { files: 0, bytes: 0 };
+                return Vue.h("div", { class: "lifecycle-row", key }, [Vue.h("span", null, label), Vue.h("span", null, `${value.files || 0} 个 · ${formatLifecycleBytes(value.bytes)}`)]);
+              })),
+              previewList(`未知上传前 ${Math.min(20, unknownUploadSamples.length)} 项`, unknownUploadSamples, uploadCandidateRow, "没有未知上传"),
+              previewList(`Excel 解析缓存前 ${Math.min(20, cacheUploadSamples.length)} 项`, cacheUploadSamples, uploadCandidateRow, "没有 Excel 解析缓存"),
+            ]),
+            Vue.h("div", { class: "lifecycle-subsection" }, [
+              Vue.h("div", { class: "lifecycle-inline-title" }, "历史 charts / exports"),
+              Vue.h("p", { class: "lifecycle-copy" }, `发现 ${unknownFiles.length} 个未登记历史产物（${formatLifecycleBytes(preview.unknown_bytes)}），已登记但缺失 ${missingRegistered.length} 个。`),
+              previewList(`未登记历史产物前 ${Math.min(20, unknownFiles.length)} 项`, unknownFiles.slice(0, 20), (item, index) => {
+                const key = `${item.type || "artifact"}:${item.relative_path || item.filename || index}`;
+                const recycling = uiState.lifecycleRecyclingKey === key;
+                return Vue.h("div", { class: "lifecycle-preview-item", key }, [
+                  Vue.h("span", { title: item.relative_path || item.filename || "" }, `${item.type || "unknown"} · ${item.filename || "未命名产物"}`),
+                  Vue.h("div", { class: "lifecycle-preview-actions" }, [
+                    Vue.h("small", null, formatLifecycleBytes(item.size_bytes)),
+                    Vue.h("button", { class: "btn-sm btn-sm-danger", type: "button", disabled: recycling || uiState.lifecycleLoading, onClick: () => recycleUnregisteredArtifact(item) }, recycling ? "移动中…" : "删除"),
+                  ]),
+                ]);
+              }, "没有未登记历史产物"),
+            ]),
+            Vue.h("div", { class: "lifecycle-subsection" }, [
+              Vue.h("div", { class: "lifecycle-inline-title" }, "已登记产物引用"),
+              Vue.h("p", { class: "lifecycle-copy" }, `扫描 ${referencePreview.reference_sources || 0} 个会话文件：已登记 ${referencePreview.registered || 0} 个，发现引用 ${referencePreview.referenced || 0} 个，未发现引用 ${referencePreview.unreferenced || 0} 个，文件缺失 ${referencePreview.missing || 0} 个。`),
+              previewList(`未发现引用前 ${Math.min(20, unreferencedRegistered.length)} 项`, unreferencedRegistered, (item, index) => {
+                const key = `registered:${item.id || index}`;
+                const recycling = uiState.lifecycleRecyclingKey === key;
+                return Vue.h("div", { class: "lifecycle-preview-item", key }, [
+                  Vue.h("span", { title: item.id || item.filename || "" }, `${item.type || "artifact"} · ${item.filename || item.id || "未命名产物"}`),
+                  Vue.h("div", { class: "lifecycle-preview-actions" }, [
+                    Vue.h("small", null, formatLifecycleBytes(item.size_bytes)),
+                    ["chart", "export", "report"].includes(item.type) ? Vue.h("button", { class: "btn-sm btn-sm-danger", type: "button", disabled: recycling || uiState.lifecycleLoading, onClick: () => recycleRegisteredArtifact(item) }, recycling ? "移动中…" : "回收") : null,
+                  ]),
+                ]);
+              }, "没有未发现引用的已登记产物"),
+              missingRegisteredSamples.length ? Vue.h("div", { class: "lifecycle-preview-actions" }, [
+                Vue.h("button", { class: "btn-sm btn-sm-ghost", type: "button", disabled: uiState.lifecycleLoading, onClick: pruneMissingArtifacts }, `清理缺失记录（${missingRegisteredSamples.length}）`),
+              ]) : null,
+              previewList(`缺失记录前 ${Math.min(20, missingRegisteredSamples.length)} 项`, missingRegisteredSamples, (item, index) => Vue.h("div", { class: "lifecycle-preview-item", key: `${item.id || index}` }, [
+                Vue.h("span", { title: item.id || item.filename || "" }, `${item.type || "artifact"} · ${item.filename || item.id || "缺失产物"}`),
+                Vue.h("small", null, formatLifecycleBytes(item.size_bytes)),
+              ]), "没有缺失的已登记产物"),
+            ]),
+          ]),
+
+          section("数据统计", "展示各类本地数据的占用情况。知识库请通过知识库管理删除，Workspace 请通过工作区流程删除。", Vue.h("span", { class: "lifecycle-badge lifecycle-badge-protected" }, "分类统计"), [
+            Vue.h("div", { class: "lifecycle-location-list" }, protectedRows.map(([label, value]) => Vue.h("div", { class: "lifecycle-row", key: label }, [Vue.h("span", null, label), Vue.h("span", null, value)]))),
+          ], "lifecycle-card-stats"),
+        ]),
+
+        section("生命周期记录", "记录最近的登记、回收、恢复和清理操作；API 会隐藏本地绝对路径。", [
+          Vue.h("select", { class: "lifecycle-retention-select", value: uiState.lifecycleAuditFilter, onChange: event => { uiState.lifecycleAuditFilter = event.target.value; draw(); } }, [
+            Vue.h("option", { value: "all" }, "全部"),
+            Vue.h("option", { value: "session" }, "会话"),
+            Vue.h("option", { value: "artifact" }, "产物"),
+            Vue.h("option", { value: "reclaim" }, "清理"),
+          ]),
+          Vue.h("button", { class: "btn-sm btn-sm-ghost", type: "button", disabled: uiState.lifecycleLoading, onClick: loadLifecycle }, "刷新"),
+        ], [audit.length ? Vue.h("div", { class: "lifecycle-audit-list" }, audit.map((item, index) => {
+          const detail = lifecycleAuditDetails(item);
+          return Vue.h("div", { class: "lifecycle-audit-item", key: `${item.at || ""}-${item.event || index}` }, [
+            Vue.h("div", { class: "lifecycle-audit-main" }, [
+              Vue.h("span", null, lifecycleAuditLabel(item.event)),
+              detail ? Vue.h("em", null, detail) : null,
+            ]),
+            Vue.h("small", null, item.at || ""),
+          ]);
+        })) : Vue.h("div", { class: "lifecycle-empty" }, "暂无生命周期记录")]),
+      ] : []),
     ]);
   }
+
+  // ── 记忆 (long-term memory) ────────────────────────────────────
+  function _memorySid() {
+    return state.SID
+      || sessionStorage.getItem("baa_session_id")
+      || localStorage.getItem("baa_session_id")
+      || "";
+  }
+  function _memoryScopeUrl(path) {
+    const sid = _memorySid();
+    if (!sid) return path;
+    const sep = path.includes("?") ? "&" : "?";
+    return `${path}${sep}session_id=${encodeURIComponent(sid)}`;
+  }
+  async function loadMemory() {
+    if (!uiState || uiState.memoryLoading) return;
+    if (uiState.memoryEnabled === false) {
+      uiState.memoryRecords = [];
+      uiState.memoryActivity = [];
+      uiState.memoryStatus = "";
+      uiState.memoryStatusType = "ok";
+      draw();
+      return;
+    }
+    uiState.memoryLoading = true;
+    uiState.memoryStatus = "正在加载记忆…";
+    uiState.memoryStatusType = "ok";
+    draw();
+    try {
+      const [r, activityResponse] = await Promise.all([
+        fetch(_memoryScopeUrl("/api/memory")),
+        fetch(_memoryScopeUrl("/api/memory-activity")),
+      ]);
+      const d = await r.json();
+      const activityData = activityResponse.ok ? await activityResponse.json() : {};
+      uiState.memoryRecords = Array.isArray(d.records) ? d.records : [];
+      uiState.memoryWorkspaceMounted = !!d.workspace_mounted;
+      uiState.memoryActivity = Array.isArray(activityData.activity) ? activityData.activity : [];
+      uiState.memoryStatus = "";
+    } catch (e) {
+      uiState.memoryStatus = `加载失败：${e.message || e}`;
+      uiState.memoryStatusType = "error";
+    } finally {
+      uiState.memoryLoading = false;
+      draw();
+    }
+  }
+  function _resetMemoryForm() {
+    uiState.memoryForm = { name: "", scope: "user", title: "", body: "", why: "", how_to_apply: "" };
+    uiState.memoryFormMsg = { err: "", ok: "" };
+    uiState.memoryEditing = null;
+    uiState.memoryFormOpen = false;
+    uiState.memoryAdvancedOpen = false;
+  }
+  function openMemoryCreate(scope) {
+    _resetMemoryForm();
+    uiState.memoryForm.scope = scope || (uiState.memoryWorkspaceMounted ? "workspace" : "user");
+    uiState.memoryFormOpen = true;
+    draw();
+  }
+  function openMemoryEdit(record) {
+    uiState.memoryEditing = record.name;
+    uiState.memoryForm = {
+      name: record.name || "",
+      scope: record.scope || "user",
+      title: record.title || "",
+      body: record.body || "",
+      why: record.why || "",
+      how_to_apply: record.how_to_apply || "",
+    };
+    uiState.memoryFormMsg = { err: "", ok: "" };
+    uiState.memoryAdvancedOpen = !!(record.why || record.how_to_apply);
+    uiState.memoryFormOpen = true;
+    draw();
+  }
+  function closeMemoryForm() {
+    _resetMemoryForm();
+    draw();
+  }
+  function _memoryScopeDisabled(scope) {
+    return scope === "workspace" && !uiState.memoryWorkspaceMounted;
+  }
+  async function submitMemoryForm() {
+    const form = uiState.memoryForm;
+    if (!form.name.trim()) {
+      uiState.memoryFormMsg = { err: "请填写记忆 ID（kebab-case）", ok: "" };
+      draw();
+      return;
+    }
+    if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(form.name.trim())) {
+      uiState.memoryFormMsg = { err: "记忆 ID 必须为 kebab-case（小写字母/数字，连字符分隔）", ok: "" };
+      draw();
+      return;
+    }
+    if (_memoryScopeDisabled(form.scope)) {
+      uiState.memoryFormMsg = { err: "当前未挂载工作区，无法保存工作区级记忆", ok: "" };
+      draw();
+      return;
+    }
+    const payload = {
+      name: form.name.trim(),
+      type: form.scope === "workspace" ? "project" : "user",
+      title: form.title,
+      body: form.body,
+      why: form.why,
+      how_to_apply: form.how_to_apply,
+    };
+    const editing = uiState.memoryEditing;
+    const path = editing
+      ? `/api/memory/${encodeURIComponent(editing)}`
+      : "/api/memory";
+    const method = editing ? "PUT" : "POST";
+    try {
+      const r = await fetch(_memoryScopeUrl(path), {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "保存失败");
+      toast(editing ? "记忆已更新" : "记忆已创建");
+      closeMemoryForm();
+      await loadMemory();
+    } catch (e) {
+      uiState.memoryFormMsg = { err: String(e.message || e), ok: "" };
+      draw();
+    }
+  }
+  async function archiveMemory(name) {
+    if (!window.BAA?.ui?.confirm) {
+      if (!confirm(`确定归档记忆 "${name}"？归档后进入「设置 → 存储」的回收站，可随时恢复。`)) return;
+    } else {
+      const ok = await window.BAA.ui.confirm({
+        title: "归档记忆",
+        message: `确定归档 "${name}" 吗？归档后记忆将移入「设置 → 存储」的回收站，不再注入到后续对话；可在回收站中随时恢复。`,
+        confirmText: "归档",
+        cancelText: "取消",
+      });
+      if (!ok) return;
+    }
+    try {
+      const r = await fetch(_memoryScopeUrl(`/api/memory/${encodeURIComponent(name)}`), {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm: true }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "归档失败");
+      toast("记忆已归档");
+      await loadMemory();
+    } catch (e) {
+      toast(`归档失败：${e.message || e}`, "error");
+    }
+  }
+  async function undoRememberedMemory(name) {
+    try {
+      const r = await fetch(_memoryScopeUrl(`/api/memory/${encodeURIComponent(name)}`), {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm: true }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "撤销失败");
+      toast("已撤销该自动记忆");
+      await loadMemory();
+    } catch (e) {
+      toast(`撤销失败：${e.message || e}`, "error");
+    }
+  }
+
+  function renderMemory() {
+    const records = uiState.memoryRecords || [];
+    const statusNode = uiState.memoryStatus
+      ? Vue.h("div", { class: `app-hooks-status app-hooks-status-${uiState.memoryStatusType}` }, uiState.memoryStatus)
+      : null;
+    const formOpen = !!uiState.memoryFormOpen;
+    const activity = uiState.memoryActivity || [];
+    if (uiState.memoryEnabled === false) {
+      return Vue.h("section", { class: "app-settings-panel memory-panel" }, [
+        _renderPanelHead("长期记忆", "跨会话保存的用户偏好、反馈、项目事实与引用。", [
+          Vue.h("button", {
+            class: "btn-sm btn-sm-primary",
+            type: "button",
+            onClick: () => setMemoryEnabled(true),
+          }, "重新开启"),
+        ]),
+        Vue.h("p", { class: "pf-hint" }, "记忆功能已关闭。可在「通用」设置中重新开启；开启后跨会话的用户偏好、纠正与口径结论会自动记录并注入。"),
+      ]);
+    }
+
+    const scopeOptions = [
+      { key: "user", label: "用户级", description: "所有工作区都生效", workspace: false },
+      { key: "workspace", label: "工作区级", description: "仅当前工作区生效", workspace: true },
+    ];
+
+    const grouped = {
+      user: records.filter(r => r.scope === "user"),
+      workspace: records.filter(r => r.scope === "workspace"),
+    };
+
+    return Vue.h("section", { class: "app-settings-panel memory-panel" }, [
+      _renderPanelHead("长期记忆", "跨会话保存的用户偏好、反馈、项目事实与引用。记忆会安全注入到后续对话的上下文。", [
+        Vue.h("button", {
+          class: "btn-sm btn-sm-ghost",
+          type: "button",
+          disabled: uiState.memoryLoading,
+          onClick: loadMemory,
+        }, "刷新"),
+        Vue.h("button", {
+          class: "btn-sm btn-sm-primary",
+          type: "button",
+          onClick: () => openMemoryCreate(),
+        }, "新建记忆"),
+      ]),
+      statusNode,
+      !uiState.memoryWorkspaceMounted
+        ? Vue.h("p", { class: "pf-hint" }, "当前未挂载工作区，仅可管理用户级记忆。挂载工作区后可创建仅对该项目生效的记忆。")
+        : null,
+
+      // 分组：用户级 + 工作区级
+      Vue.h("div", { class: "memory-group" }, [
+        Vue.h("h4", null, "用户级"),
+        grouped.user.length
+          ? Vue.h("div", { class: "memory-list" }, grouped.user.map(r => _memoryCard(r)))
+          : Vue.h("div", { class: "custom-empty" }, "暂无用户级记忆"),
+      ]),
+      Vue.h("div", { class: "memory-group" }, [
+        Vue.h("h4", null, uiState.memoryWorkspaceMounted ? "工作区级" : "工作区级（未挂载）"),
+        grouped.workspace.length
+          ? Vue.h("div", { class: "memory-list" }, grouped.workspace.map(r => _memoryCard(r)))
+          : Vue.h("div", { class: "custom-empty" }, "暂无工作区级记忆"),
+      ]),
+      Vue.h("div", { class: "memory-activity" }, [
+        Vue.h("h4", null, "最近自动提取"),
+        activity.length ? Vue.h("div", { class: "memory-activity-list" }, activity.map((item, index) => {
+          const status = item.status || "unknown";
+          const records = Array.isArray(item.records) ? item.records : [];
+          return Vue.h("div", { class: `memory-activity-item ${status}`, key: `${item.ts || ""}-${index}` }, [
+            Vue.h("div", { class: "memory-activity-copy" }, [
+              Vue.h("strong", null, status === "saved" ? "已保存" : status === "skipped" ? "已跳过" : status === "rejected" ? "未写入" : "提取失败"),
+              Vue.h("span", null, item.message || "自动提取已完成"),
+              records.length ? Vue.h("small", null, records.map(record => `${record.scope === "workspace" ? "工作区级" : "用户级"}：${record.title || record.name}`).join("；")) : null,
+            ]),
+            records.length ? Vue.h("div", { class: "memory-activity-actions" }, records.map(record => Vue.h("button", {
+              class: "btn-sm btn-sm-ghost", type: "button", onClick: () => undoRememberedMemory(record.name),
+            }, "撤销"))) : null,
+            Vue.h("time", null, item.ts || ""),
+          ]);
+        })) : Vue.h("div", { class: "custom-empty" }, "暂无自动提取记录"),
+      ]),
+
+      // 编辑/创建表单
+      formOpen ? Vue.h("div", { class: "memory-form" }, [
+        Vue.h("h4", null, uiState.memoryEditing ? `编辑：${uiState.memoryEditing}` : "新建记忆"),
+        Vue.h("div", { class: "pf-row" }, [
+          Vue.h("label", null, "ID (kebab-case)"),
+          Vue.h("input", {
+            type: "text",
+            value: uiState.memoryForm.name,
+            disabled: !!uiState.memoryEditing,
+            onInput: e => { uiState.memoryForm.name = e.target.value; },
+          }),
+        ]),
+        Vue.h("div", { class: "pf-row" }, [
+          Vue.h("label", null, "保存范围"),
+          Vue.h("select", {
+            value: uiState.memoryForm.scope,
+            onChange: e => { uiState.memoryForm.scope = e.target.value; draw(); },
+          }, scopeOptions.map(o => Vue.h("option", {
+            value: o.key,
+            disabled: o.workspace && !uiState.memoryWorkspaceMounted,
+          }, `${o.label} · ${o.description}`))),
+          Vue.h("small", { class: "pf-hint" }, uiState.memoryForm.scope === "workspace"
+            ? "适合数据口径、表字段规则和项目资料；仅当前工作区生效。"
+            : "适合个人偏好和通用规则；在所有工作区生效。"),
+        ]),
+        Vue.h("div", { class: "pf-row" }, [
+          Vue.h("label", null, "标题"),
+          Vue.h("input", {
+            type: "text",
+            value: uiState.memoryForm.title,
+            onInput: e => { uiState.memoryForm.title = e.target.value; },
+          }),
+        ]),
+        Vue.h("div", { class: "pf-row" }, [
+          Vue.h("label", null, "正文"),
+          Vue.h("textarea", {
+            rows: 4,
+            value: uiState.memoryForm.body,
+            onInput: e => { uiState.memoryForm.body = e.target.value; },
+          }),
+        ]),
+        Vue.h("button", {
+          class: "memory-advanced-toggle", type: "button",
+          onClick: () => { uiState.memoryAdvancedOpen = !uiState.memoryAdvancedOpen; draw(); },
+        }, uiState.memoryAdvancedOpen ? "收起高级选项" : "高级选项（原因、应用方式）"),
+        uiState.memoryAdvancedOpen ? Vue.h("div", { class: "memory-advanced-fields" }, [
+          Vue.h("div", { class: "pf-row" }, [
+            Vue.h("label", null, "原因 (可选)"),
+            Vue.h("input", { type: "text", value: uiState.memoryForm.why, onInput: e => { uiState.memoryForm.why = e.target.value; } }),
+          ]),
+          Vue.h("div", { class: "pf-row" }, [
+            Vue.h("label", null, "应用方式 (可选)"),
+            Vue.h("input", { type: "text", value: uiState.memoryForm.how_to_apply, onInput: e => { uiState.memoryForm.how_to_apply = e.target.value; } }),
+          ]),
+        ]) : null,
+        uiState.memoryFormMsg.err
+          ? Vue.h("div", { class: "app-hooks-status app-hooks-status-error" }, uiState.memoryFormMsg.err)
+          : null,
+        Vue.h("div", { class: "provider-actions" }, [
+          Vue.h("button", {
+            class: "btn-sm btn-sm-ghost",
+            type: "button",
+            onClick: closeMemoryForm,
+          }, "取消"),
+          Vue.h("button", {
+            class: "btn-sm btn-sm-primary",
+            type: "button",
+            onClick: submitMemoryForm,
+          }, uiState.memoryEditing ? "保存" : "创建"),
+        ]),
+      ]) : null,
+    ]);
+  }
+  function _memoryCard(r) {
+    const scope = r.scope === "workspace" ? "workspace" : "user";
+    const typeBadge = Vue.h("span", { class: `memory-type-badge scope-${scope}` }, scope === "workspace" ? "工作区级" : "用户级");
+    const updated = r.updated_at || r.created_at || "";
+    return Vue.h("div", { class: "memory-card", key: r.name }, [
+      Vue.h("div", { class: "memory-card-head" }, [
+        typeBadge,
+        Vue.h("strong", { class: "memory-title" }, r.title || r.name),
+        Vue.h("span", { class: "memory-updated" }, updated),
+      ]),
+      r.body ? Vue.h("p", { class: "memory-body" }, r.body.length > 160 ? r.body.slice(0, 160) + "…" : r.body) : null,
+      r.why ? Vue.h("p", { class: "memory-why" }, `原因：${r.why}`) : null,
+      r.how_to_apply ? Vue.h("p", { class: "memory-how" }, `应用：${r.how_to_apply}`) : null,
+      Vue.h("div", { class: "memory-card-actions" }, [
+        Vue.h("button", {
+          class: "btn-sm btn-sm-ghost",
+          type: "button",
+          onClick: () => openMemoryEdit(r),
+        }, "编辑"),
+        Vue.h("button", {
+          class: "btn-sm btn-sm-danger",
+          type: "button",
+          onClick: () => archiveMemory(r.name),
+        }, "归档"),
+      ]),
+    ]);
+  }
+
   function renderApp() {
     if (!root) return;
     const tabs = [
       ["general", "通用"],
-      ["model", "模型"],
+      ["model", "知识库检索"],
+      ["llm", "LLM模型"],
+      ["memory", "记忆"],
       ["hooks", "Hooks"],
       ["storage", "存储"],
     ];
@@ -1352,12 +2253,14 @@ import { chatStream } from "../features/chat-stream.js";
         Vue.h("button", {
           class: `app-settings-nav-item${uiState.tab === id ? " active" : ""}`,
           type: "button",
-          onClick: () => { uiState.tab = id; draw(); if (id === "storage") loadLifecycle(); },
+          onClick: () => { uiState.tab = id; draw(); if (id === "storage") loadLifecycle(); if (id === "memory") loadMemory(); },
         }, label)
       )),
       uiState.tab === "storage" ? renderStorage()
         : uiState.tab === "hooks" ? renderHooks()
+        : uiState.tab === "memory" ? renderMemory()
         : uiState.tab === "model" ? renderModel()
+        : uiState.tab === "llm" ? renderLlm()
         : renderGeneral(),
     ]), root);
   }
@@ -1366,6 +2269,7 @@ import { chatStream } from "../features/chat-stream.js";
     appState.promptSuggestionEnabled = _enabledFromStorage();
     appState.teamsEnabled = _teamsEnabledFromStorage();
     appState.autoMatchSkill = _autoMatchSkillFromStorage();
+    appState.memoryEnabled = _memoryEnabledFromStorage();
     if (!root || !Vue?.h || !Vue?.render || !Vue?.reactive) return;
     uiState = Vue.reactive({
       tab: "general",
@@ -1376,6 +2280,13 @@ import { chatStream } from "../features/chat-stream.js";
       hooksStatus: "",
       hooksStatusType: "ok",
       hooksLoading: false,
+      hooksRuntime: { enabled: false, active_hooks: [], enabled_count: 0, runnable_count: 0, pending_count: 0, configured_count: 0 },
+      hookHistory: [],
+      hookHistoryAvailable: true,
+      hookHistoryLoading: false,
+      customHookOpen: false,
+      customHookName: "",
+      customHookNames: {},
       testEvent: "turn_start",
       bgeInstalled: false,
       bgeNeural: false,
@@ -1393,6 +2304,7 @@ import { chatStream } from "../features/chat-stream.js";
       embedLocalAvailable: false,
       embedSwitching: false,
       embedRebuilding: false,
+      embedChecking: false,
       cloudUrl: "https://embed.zafer-liu-product.xyz",
       cloudModel: "bge-large-zh",
       cloudToken: "",
@@ -1402,14 +2314,17 @@ import { chatStream } from "../features/chat-stream.js";
       lifecycleTrash: [],
       lifecycleArtifactTrash: [],
       lifecycleUploadTrash: [],
+      lifecycleMemoryTrash: [],
       lifecycleLoading: false,
       lifecycleReclaiming: false,
       lifecycleArtifactReclaiming: false,
       lifecycleUploadReclaiming: false,
+      lifecycleMemoryReclaiming: false,
       lifecycleArtifactBusyKey: "",
       lifecycleUploadBusyKey: "",
+      lifecycleMemoryBusyKey: "",
       lifecycleRecyclingKey: "",
-      lifecycleRetentionPreset: "custom",
+      lifecycleRetentionPreset: "forever",
       lifecycleRetentionCustomDays: 30,
       lifecycleStatus: "",
       lifecyclePreview: null,
@@ -1417,7 +2332,21 @@ import { chatStream } from "../features/chat-stream.js";
       lifecycleUploadsPreview: null,
       lifecycleWorkspacePreview: null,
       lifecycleAudit: [],
+      lifecycleHookHistory: [],
       lifecycleAuditFilter: "all",
+      lifecycleAdvancedOpen: false,
+      memoryRecords: [],
+      memoryWorkspaceMounted: false,
+      memoryEnabled: _memoryEnabledFromStorage(),
+      memoryLoading: false,
+      memoryStatus: "",
+      memoryStatusType: "ok",
+      memoryEditing: null,
+      memoryFormOpen: false,
+      memoryAdvancedOpen: false,
+      memoryForm: { name: "", scope: "user", title: "", body: "", why: "", how_to_apply: "" },
+      memoryFormMsg: { err: "", ok: "" },
+      memoryActivity: [],
     });
     draw = renderApp;
     draw();
@@ -1438,6 +2367,7 @@ import { chatStream } from "../features/chat-stream.js";
     saveHooks,
     testHooks,
     loadEmbedMode,
+    checkEmbedStatus,
     setEmbedMode,
     rebuildEmbeddings,
     loadCloudConfig,

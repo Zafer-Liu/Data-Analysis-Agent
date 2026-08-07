@@ -6,7 +6,7 @@
 <title>智析Agent</title>
 <link rel="icon" href="{{ url_for('static', filename='Images/icon.png') }}">
 <script src="{{ url_for('static', filename='js/theme_bootstrap.js', v='fe0') }}"></script>
-<link rel="stylesheet" href="{{ url_for('static', filename='css/agent_chat.css', v='klein-blue-5') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/agent_chat.css', v='klein-blue-7') }}">
 {% if desktop_lifecycle_enabled %}
 <script defer src="{{ url_for('static', filename='js/modules/desktop_lifecycle.js', v='desktop-lease-1') }}"></script>
 {% endif %}
@@ -922,7 +922,7 @@
 <!-- Settings modal -->
 <div class="overlay" id="ov-settings">
   <div class="modal">
-    <div class="modal-title" data-i18n="modal.settings.title">⚙ 模型设置</div>
+    <div class="modal-title" data-i18n="modal.settings.title">⚙ LLM模型</div>
 
     <!-- Built-in providers -->
     <div class="settings-sec">
@@ -1034,14 +1034,14 @@
   <div class="modal session-delete-modal" role="dialog" aria-modal="true" aria-labelledby="delete-session-title">
     <div class="session-delete-head">
       <div class="session-delete-icon" aria-hidden="true">!</div>
-      <div class="modal-title" id="delete-session-title">删除这条对话？</div>
+      <div class="modal-title" id="delete-session-title">归档这条对话？</div>
     </div>
     <div class="session-delete-copy" id="delete-session-name"></div>
-    <div class="session-delete-warning">删除后无法恢复，请确认不再需要这条记录。</div>
+    <div class="session-delete-warning">归档后，这条对话及其图表、导出、上传等文件会进入「设置 → 存储」的回收站，可随时恢复；不会随保留策略自动清理。</div>
     <div class="msg-err" id="delete-session-err"></div>
     <div class="modal-footer">
       <button class="btn-sm btn-sm-ghost" data-action="closeOverlay:ov-delete-session">取消</button>
-      <button class="btn-sm session-delete-confirm" id="delete-session-confirm" data-action="confirmDeleteSession">确认删除</button>
+      <button class="btn-sm session-delete-confirm" id="delete-session-confirm" data-action="confirmDeleteSession">归档</button>
     </div>
   </div>
 </div>
@@ -1266,6 +1266,6 @@
 <script src="{{ url_for('static', filename='vendor/vue.global.prod.js') }}"></script>
 
 <!-- ── ES module entry; non-critical UI islands load from dist/chunks on demand ── -->
-<script type="module" src="{{ url_for('static', filename='dist/chat-app.js', v='fe1-chat-app-81') }}"></script>
+<script type="module" src="{{ url_for('static', filename='dist/chat-app.js', v='fe1-chat-app-82') }}"></script>
 </body>
 </html>
