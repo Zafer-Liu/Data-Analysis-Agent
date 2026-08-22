@@ -477,7 +477,8 @@ _BOOST_TABLE: List[tuple] = [
 
     # — RELATIONSHIP —
     (["散点图", "散点", "scatter", "scatter plot", "相关性", "correlation",
-      "两变量关系", "变量关系", "变量之间的关系"],
+      "两变量关系", "变量关系", "变量之间的关系", "的关系", "之间关系",
+      "relationship between", "association between"],
      ["Scatter_Plot"], 22),
 
     (["相关性", "correlation", "两变量关系"],
@@ -539,6 +540,8 @@ _COLUMN_PATTERN_TABLE: List[tuple] = [
 
 # Build a fast lookup: chart_id -> chart dict
 _CHART_INDEX: Dict[str, Dict[str, Any]] = {c["chart_id"]: c for c in _CHARTS}
+
+_MINIMUM_VALID_SCORE = 1
 
 
 def _score_chart(chart: Dict[str, Any], intent_lower: str, col_lower: List[str]) -> int:
@@ -606,10 +609,11 @@ def select_charts(
     intent_lower = user_intent.lower()
     col_lower = [c.lower() for c in (available_columns or [])]
 
-    scored = [
-        (chart, _score_chart(chart, intent_lower, col_lower))
-        for chart in _CHARTS
-    ]
+    scored = []
+    for chart in _CHARTS:
+        score = _score_chart(chart, intent_lower, col_lower)
+        if score >= _MINIMUM_VALID_SCORE:
+            scored.append((chart, score))
     scored.sort(key=lambda t: -t[1])
 
     results = []
@@ -647,7 +651,8 @@ def format_selection_result(candidates: List[Dict[str, Any]]) -> str:
     if not candidates:
         return (
             "No matching charts found in the registry. "
-            "Use a chart_id from the complete list in the system prompt."
+            "Use `ask_user` to confirm the visualization goal "
+            "before selecting a chart."
         )
 
     lines: List[str] = [
