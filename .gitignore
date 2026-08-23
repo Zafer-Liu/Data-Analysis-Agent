@@ -124,7 +124,12 @@ package-lock.json
 .agents/
 .uploads/
 memory/
-scripts/
+# Keep local maintenance scripts private, but version the three scripts required by
+# `pnpm run build` so release runners can build the chat bundle.
+scripts/*
+!scripts/build-chat.mjs
+!scripts/clean-chat-chunks.mjs
+!scripts/verify-chat-bundle.mjs
 # Untracked assets
 Information/assets/LOGO.png
 PRODUCT.md
