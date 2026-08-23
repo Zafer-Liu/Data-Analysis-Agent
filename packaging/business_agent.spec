@@ -97,6 +97,9 @@ hiddenimports = [
     # G2 remote GPU connectivity imports these lazily at runtime.
     "paramiko",
     "keyring",
+    # Torch_MLP is loaded by the path-based analysis registry, so its training
+    # target selector is invisible to PyInstaller's normal import discovery.
+    "infrastructure.training_router",
 ]
 hiddenimports += collect_submodules("charts")
 hiddenimports += collect_submodules("PPT")

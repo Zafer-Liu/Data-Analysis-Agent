@@ -108,4 +108,9 @@ def run_frozen_smoke() -> int:
     output = data_path("outputs", "build-smoke.json")
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    if not ok:
+        print("[frozen-smoke] failed checks:", file=sys.stderr)
+        for name, item in checks.items():
+            if item.get("ok") is not True:
+                print(f"- {name}: {item.get('error') or item}", file=sys.stderr)
     return 0 if ok else 3
