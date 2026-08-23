@@ -94,7 +94,7 @@ import { setLoadedName } from "./autosave.js";
           </div>
           <button class="saved-rename" title="${t('saved.rename')}" data-action="renameSession"
                   data-filename="${escAttr(s.filename)}" data-name="${escAttr(s.name)}">✎</button>
-          <button class="saved-del" title="✕" data-action="deleteSession"
+          <button class="saved-del" title="${t('saved.delete') || '归档'}" data-action="deleteSession"
                   data-filename="${escAttr(s.filename)}" data-name="${escAttr(s.name)}">✕</button>
         </div>`;
     }).join("");

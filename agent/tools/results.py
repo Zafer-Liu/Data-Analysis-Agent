@@ -82,7 +82,17 @@ def classify_tool_error(raw: Any, tool: str = "") -> str:
         return "sql_execution_error"
     if "no data source" in lower or "连接已断开" in text:
         return "datasource_disconnected"
-    if "permission" in lower or "权限" in text:
+    # Do not treat every informational mention of "权限" as a failure.  Skill
+    # instructions commonly contain a permissions section, and tool results
+    # must remain successful when they merely explain required permissions.
+    permission_markers = (
+        "permission_error", "permission denied", "access denied", "unauthorized",
+        "forbidden", "无权限", "权限不足", "权限被拒绝", "权限拒绝", "权限错误",
+    )
+    if (
+        any(marker in lower for marker in permission_markers)
+        or ("飞书拒绝" in text and "权限" in text)
+    ):
         return "permission_error"
     if tool == "get_schema":
         if text.startswith("ERROR:") or text.startswith("工具执行错误"):

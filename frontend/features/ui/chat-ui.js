@@ -498,7 +498,8 @@ export function mountChatUi() {
 
   function _renderJobCard(job) {
     const terminal = ["succeeded", "failed", "canceled"].includes(job.status);
-    const canCancel = !terminal && job.status !== "canceling" && job.jobType !== "filehistory_rewind";
+    const canCancel = !terminal && job.status !== "canceling"
+      && job.jobType !== "filehistory_rewind" && job.jobType !== "memory_extraction";
     const progress = Math.max(0, Math.min(100, Number(job.progress) || 0));
     const statusText = _jobText(`job.status.${job.status}`, job.status || "created");
     const children = [

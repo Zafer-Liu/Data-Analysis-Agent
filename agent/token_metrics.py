@@ -40,6 +40,8 @@ def build_prompt_breakdown(
     activation_kind: str = "",
     activation_name: str = "",
     workflow_stage: str = "",
+    project_instruction_chars: int = 0,
+    memory_chars: int = 0,
     chars_per_token: float = DEFAULT_CHARS_PER_TOKEN,
 ) -> dict[str, Any]:
     """Estimate the actual payload immediately before one model call.
@@ -95,6 +97,10 @@ def build_prompt_breakdown(
         "activation_kind": str(activation_kind or ""),
         "activation_name": str(activation_name or "")[:80],
         "workflow_stage": str(workflow_stage or ""),
+        "project_instruction_chars": max(0, int(project_instruction_chars or 0)),
+        "project_instruction_tokens_est": _tokens(project_instruction_chars, chars_per_token),
+        "memory_chars": max(0, int(memory_chars or 0)),
+        "memory_tokens_est": _tokens(memory_chars, chars_per_token),
         "system_chars": system_chars,
         "system_tokens_est": _tokens(system_chars, chars_per_token),
         "tool_schema_chars": tool_schema_chars,

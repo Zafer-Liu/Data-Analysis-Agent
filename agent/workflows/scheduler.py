@@ -16,6 +16,8 @@ from data.jobs_store import (
 from data.workflow_run_store import WorkflowRunStore, WorkflowRunStoreError
 from data.workflow_store import WorkflowStore
 
+from .pricing import estimate_model_cost
+
 from .models import (
     NODE_RUN_TERMINAL_STATUSES,
     RUN_TERMINAL_STATUSES,
@@ -29,6 +31,7 @@ from .models import (
 
 
 NodeExecutor = Callable[[dict[str, Any], dict[str, Any], Any], Any]
+NodePreflight = Callable[[Mapping[str, Any]], None]
 
 
 class WorkflowConcurrencyLimiter:
@@ -88,12 +91,14 @@ class WorkflowScheduler:
         run_store: WorkflowRunStore,
         job_runner,
         executor: NodeExecutor,
+        preflight: NodePreflight | None = None,
         limiter: WorkflowConcurrencyLimiter | None = None,
     ):
         self.workflow_store = workflow_store
         self.run_store = run_store
         self.job_runner = job_runner
         self.executor = executor
+        self.preflight = preflight
         self.limiter = limiter or GLOBAL_WORKFLOW_LIMITER
         self._locks: dict[str, threading.RLock] = {}
         self._locks_guard = threading.Lock()
@@ -101,6 +106,10 @@ class WorkflowScheduler:
     def _run_lock(self, run_id: str) -> threading.RLock:
         with self._locks_guard:
             return self._locks.setdefault(run_id, threading.RLock())
+
+    @staticmethod
+    def _concurrency_key(node_run: Mapping[str, Any]) -> str:
+        return str(node_run.get("agent_profile_id") or node_run["node_id"])
 
     def start(
         self,
@@ -135,11 +144,24 @@ class WorkflowScheduler:
             )
         version = self.workflow_store.get_version(run["workflow_version_id"])
         nodes = self.run_store.list_node_runs(run_id)
+        for node in nodes:
+            model = str(node.get("model_name") or "")
+            node["estimated_cost"] = (
+                estimate_model_cost(
+                    str(node.get("provider_name") or ""),
+                    model,
+                    int(node.get("input_tokens") or 0),
+                    int(node.get("output_tokens") or 0),
+                )
+                if model
+                else None
+            )
         latest_nodes = self._latest_by_node(nodes)
         declared_outputs = set(
             ((version or {}).get("output_schema") or {}).get("properties", {})
         )
         outputs: dict[str, Any] = {}
+        lineage: list[dict[str, Any]] = []
         for node in latest_nodes.values():
             node_output = node.get("output")
             if not isinstance(node_output, Mapping):
@@ -147,11 +169,22 @@ class WorkflowScheduler:
             for key, value in node_output.items():
                 if not declared_outputs or key in declared_outputs:
                     outputs[str(key)] = value
+                    manifest = self.run_store.get_manifest(
+                        str(node.get("output_manifest_id") or "")
+                    )
+                    artifact = next((item for item in (manifest or {}).get("items", []) if item.get("logical_name") == key), {})
+                    lineage.append({
+                        "output": str(key), "producer_node_id": node.get("node_id", ""),
+                        "producer_node_run_id": node.get("id", ""), "artifact_id": artifact.get("artifact_id", ""),
+                        "uri": artifact.get("uri", ""), "evidence": artifact.get("evidence", []),
+                        "quality": artifact.get("quality", {}),
+                    })
         return {
             "run": run,
             "graph": version["graph"] if version else {},
             "output_schema": version["output_schema"] if version else {},
             "outputs": outputs,
+            "lineage": lineage,
             "nodes": nodes,
             "manifests": self.run_store.list_manifests(run_id),
             "consumptions": self.run_store.list_consumptions(run_id),
@@ -190,6 +223,8 @@ class WorkflowScheduler:
             if self._expire_timed_out_run(run, version["graph"]):
                 return self.detail(run_id)
             self._reconcile_jobs(run_id, version["graph"])
+            if self._expire_token_budget(run_id, version["graph"]):
+                return self.detail(run_id)
             if RunStatus((self.run_store.get_run(run_id) or run)["status"]) is RunStatus.CANCELING:
                 self._advance_canceling(run_id)
                 return self.detail(run_id)
@@ -198,6 +233,11 @@ class WorkflowScheduler:
                 self._mark_ready_nodes(run_id, version["graph"])
             self._mark_ready_nodes(run_id, version["graph"])
             self._dispatch_ready_nodes(run_id, version["graph"])
+            # A policy preflight can fail without creating a Job, so there is
+            # no terminal Job callback to derive downstream skips. Re-evaluate
+            # readiness before settling the Run in the same scheduler tick.
+            for _node in version["graph"].get("nodes", []):
+                self._mark_ready_nodes(run_id, version["graph"])
             self._settle_run(run_id)
             return self.detail(run_id)
 
@@ -326,6 +366,22 @@ class WorkflowScheduler:
         )
         return True
 
+    def _expire_token_budget(self, run_id: str, graph: Mapping[str, Any]) -> bool:
+        limit = graph.get("limits", {}).get("max_total_tokens")
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            return False
+        used = sum(
+            int(item.get("input_tokens") or 0) + int(item.get("output_tokens") or 0)
+            for item in self.run_store.list_node_runs(run_id)
+        )
+        if used <= limit:
+            return False
+        for node_run in self.run_store.list_node_runs(run_id):
+            if NodeRunStatus(node_run["status"]) is NodeRunStatus.READY:
+                self.run_store.transition_node(node_run["id"], NodeRunStatus.CANCELED, error="workflow token budget exceeded")
+        self.run_store.transition_run(run_id, RunStatus.FAILED, failure_code="workflow_token_budget_exceeded", failure_message=f"workflow consumed {used} tokens, above max_total_tokens={limit}")
+        return True
+
     def _reconcile_jobs(self, run_id: str, graph: Mapping[str, Any]) -> None:
         nodes_by_id = {
             str(node["node_id"]): dict(node)
@@ -360,7 +416,7 @@ class WorkflowScheduler:
                 self.limiter.release(
                     self.run_store.workspace_id,
                     run_id,
-                    node_run["agent_profile_id"],
+                    self._concurrency_key(node_run),
                 )
                 if current is NodeRunStatus.QUEUED:
                     self.run_store.transition_node(node_run["id"], NodeRunStatus.RUNNING)
@@ -370,13 +426,51 @@ class WorkflowScheduler:
                     job_result = dict(job_result)
                     raw_usage = job_result.pop("__workflow_usage__", None)
                     usage = raw_usage if isinstance(raw_usage, Mapping) else None
+                    output_error = str(job_result.pop("__workflow_output_error__", "") or "")
+                else:
+                    output_error = ""
                 if usage:
                     self.run_store.record_node_usage(node_run["id"], usage)
                 self.run_store.transition_node(
                     node_run["id"],
                     NodeRunStatus.OUTPUT_READY,
                     output=job_result,
+                    artifact_types=nodes_by_id.get(node_run["node_id"], {}).get("output_artifacts", {}),
                 )
+                if output_error:
+                    self.run_store.transition_node(
+                        node_run["id"], NodeRunStatus.FAILED, error=output_error,
+                    )
+                    continue
+                node_definition = nodes_by_id.get(node_run["node_id"], {})
+                is_verifier_rework = (
+                    node_definition.get("type") == "verifier"
+                    and isinstance(job_result, Mapping)
+                    and job_result.get("decision") == "rework"
+                )
+                if is_verifier_rework:
+                    # A failed independent check never opens a side-effect
+                    # approval.  It returns to the graph's bounded rework
+                    # loop first, so a reviewer cannot approve a known-bad
+                    # plan by mistake.
+                    self.run_store.transition_node(
+                        node_run["id"],
+                        NodeRunStatus.SUCCEEDED,
+                    )
+                    for retry_node_id in self._retry_iteration_nodes(
+                        graph, str(node_run["node_id"])
+                    ):
+                        latest = self._latest_by_node(
+                            self.run_store.list_node_runs(run_id)
+                        ).get(retry_node_id)
+                        if latest:
+                            self.run_store.create_retry_iteration(
+                                latest["id"],
+                                max_iteration=self._retry_limit(
+                                    graph, str(node_run["node_id"])
+                                ),
+                            )
+                    continue
                 if self._requires_key_approval(node_run, graph):
                     self._open_node_approval(
                         run_id,
@@ -393,7 +487,7 @@ class WorkflowScheduler:
                 self.limiter.release(
                     self.run_store.workspace_id,
                     run_id,
-                    node_run["agent_profile_id"],
+                    self._concurrency_key(node_run),
                 )
                 node = nodes_by_id.get(node_run["node_id"], {})
                 if int(node_run["attempt"]) < self._node_max_attempts(node):
@@ -430,7 +524,7 @@ class WorkflowScheduler:
                 self.limiter.release(
                     self.run_store.workspace_id,
                     run_id,
-                    node_run["agent_profile_id"],
+                    self._concurrency_key(node_run),
                 )
                 self.run_store.transition_node(
                     node_run["id"],
@@ -497,6 +591,33 @@ class WorkflowScheduler:
                 {},
             )
             required = predecessors[node_id]
+            conditional_edges = [
+                edge for edge in graph.get("edges", [])
+                if str(edge.get("to_node")) == node_id
+                and edge.get("type") == EdgeType.CONDITIONAL.value
+            ]
+            if conditional_edges:
+                selected = []
+                unresolved = False
+                for edge in conditional_edges:
+                    source = str(edge["from_node"])
+                    source_run = node_runs[source]
+                    source_status = NodeRunStatus(source_run["status"])
+                    if source_status not in NODE_RUN_TERMINAL_STATUSES:
+                        unresolved = True
+                        continue
+                    if source_status is not NodeRunStatus.SUCCEEDED:
+                        continue
+                    output = source_run.get("output") or {}
+                    condition = edge.get("condition") or {}
+                    if isinstance(output, Mapping) and output.get(condition.get("field")) == condition.get("equals"):
+                        selected.append(source)
+                required = [source for source in required if source not in {
+                    str(edge["from_node"]) for edge in conditional_edges
+                }] + selected
+                if not selected and not unresolved and node_id not in entries:
+                    self.run_store.transition_node(node_run["id"], NodeRunStatus.SKIPPED)
+                    continue
             if node_id in entries and not required:
                 self.run_store.transition_node(node_run["id"], NodeRunStatus.READY)
                 continue
@@ -516,12 +637,29 @@ class WorkflowScheduler:
                 else:
                     self.run_store.transition_node(node_run["id"], NodeRunStatus.SKIPPED)
 
-    @staticmethod
-    def _material_value(item: Mapping[str, Any]) -> Any:
+    def _material_value(self, item: Mapping[str, Any]) -> Any:
         if "data" in item:
             return item["data"]
+        artifact_id = str(item.get("artifact_id") or "")
+        if artifact_id:
+            content = self.run_store.get_artifact_content(artifact_id)
+            if content is not None:
+                return content
+        if item.get("content_available"):
+            raise WorkflowContractError(
+                WorkflowErrorCode.OUTPUT_CONTRACT_VIOLATION,
+                "complete Artifact content is unavailable: " + artifact_id,
+            )
+        # Legacy manifests created before Artifact blobs had no recoverable
+        # full body. Never pass their preview to a new downstream node as if it
+        # were the source material.
+        if item.get("data_preview"):
+            raise WorkflowContractError(
+                WorkflowErrorCode.OUTPUT_CONTRACT_VIOLATION,
+                "legacy Artifact contains only a preview and cannot be consumed safely: " + artifact_id,
+            )
         return {
-            "artifact_id": item.get("artifact_id", ""),
+            "artifact_id": artifact_id,
             "logical_name": item.get("logical_name", item.get("name", "")),
             "uri": item.get("uri", ""),
             "sha256": item.get("sha256", ""),
@@ -543,13 +681,23 @@ class WorkflowScheduler:
         }
         required_contract = set(nodes[node_id].get("input_contract") or [])
         values: dict[str, Any] = {}
+        predecessors = self._predecessors(graph)[node_id]
+        # Backward compatibility for published templates created before
+        # ``business_context`` became a declared input.  The optional context
+        # is only injected into an entry node and remains visible in its saved
+        # node input, so it cannot leak across arbitrary downstream edges.
+        entry_context = not predecessors
         run_manifest = self.run_store.get_manifest(str(run.get("input_manifest_id") or ""))
         if run_manifest:
             for item in run_manifest.get("items", []):
                 name = str(item.get("logical_name") or item.get("name") or "")
-                if name in required_contract:
+                if name in required_contract or (entry_context and name == "business_context"):
                     values[name] = self._material_value(item)
-        predecessors = self._predecessors(graph)[node_id]
+        saved_inputs = node_run.get("input") or {}
+        if isinstance(saved_inputs, Mapping):
+            for name in required_contract:
+                if name in saved_inputs:
+                    values[name] = saved_inputs[name]
         by_id = self._latest_by_node(self.run_store.list_node_runs(run["id"]))
         for source in predecessors:
             producer = by_id[source]
@@ -571,6 +719,31 @@ class WorkflowScheduler:
                     artifact_id=str(item.get("artifact_id") or ""),
                     purpose=name,
                 )
+        # Older published analysis templates connected the final report only
+        # to verification_report. Preserve their immutable graph while giving
+        # the management report the two substantive analyses it needs. Each
+        # borrowed artifact is explicitly recorded for auditability.
+        if "operating_report" in set(nodes[node_id].get("output_contract") or []):
+            report_context_names = {"metric_analysis", "anomaly_analysis"}
+            for producer in by_id.values():
+                if producer.get("status") != NodeRunStatus.SUCCEEDED.value:
+                    continue
+                manifest = self.run_store.get_manifest(producer.get("output_manifest_id") or "")
+                if not manifest:
+                    continue
+                for item in manifest.get("items", []):
+                    name = str(item.get("logical_name") or item.get("name") or "")
+                    if name not in report_context_names or name in values:
+                        continue
+                    values[name] = self._material_value(item)
+                    self.run_store.record_artifact_consumption(
+                        run_id=str(run["id"]),
+                        consumer_node_run_id=str(node_run["id"]),
+                        producer_node_run_id=str(producer["id"]),
+                        manifest_id=str(manifest["id"]),
+                        artifact_id=str(item.get("artifact_id") or ""),
+                        purpose=f"report_context:{name}",
+                    )
         return values
 
     def _dispatch_ready_nodes(self, run_id: str, graph: Mapping[str, Any]) -> None:
@@ -581,10 +754,17 @@ class WorkflowScheduler:
             str(node["node_id"]): dict(node)
             for node in graph.get("nodes", [])
         }
+        max_concurrent = graph.get("limits", {}).get("max_concurrent_node_runs")
+        active_count = sum(
+            1 for item in self.run_store.list_node_runs(run_id)
+            if item["status"] in {NodeRunStatus.QUEUED.value, NodeRunStatus.RUNNING.value}
+        )
         for node_run in self.run_store.list_node_runs(run_id):
             if node_run["status"] != NodeRunStatus.READY.value:
                 continue
-            profile_id = node_run["agent_profile_id"]
+            if isinstance(max_concurrent, int) and not isinstance(max_concurrent, bool) and active_count >= max_concurrent:
+                break
+            profile_id = self._concurrency_key(node_run)
             if not self.limiter.acquire(
                 self.run_store.workspace_id,
                 run_id,
@@ -598,10 +778,12 @@ class WorkflowScheduler:
             if not self.run_store.claim_node(node_run["id"], operation_key):
                 self.limiter.release(self.run_store.workspace_id, run_id, profile_id)
                 continue
-            inputs = self._node_inputs(run, node_run, graph)
-            self.run_store.set_node_input(node_run["id"], inputs)
             node = nodes[node_run["node_id"]]
             try:
+                if self.preflight is not None:
+                    self.preflight(node)
+                inputs = self._node_inputs(run, node_run, graph)
+                self.run_store.set_node_input(node_run["id"], inputs)
                 job_id = self.job_runner.create(
                     lambda ctx, item=node, material=inputs: self.executor(
                         item,
@@ -614,6 +796,7 @@ class WorkflowScheduler:
                 if not self.run_store.bind_job(node_run["id"], job_id):
                     self.job_runner.cancel(job_id)
                     raise RuntimeError("failed to bind workflow Job")
+                active_count += 1
                 listener = getattr(self.job_runner, "add_terminal_listener", None)
                 if callable(listener):
                     listener(
@@ -625,6 +808,20 @@ class WorkflowScheduler:
                     )
             except Exception as exc:
                 self.limiter.release(self.run_store.workspace_id, run_id, profile_id)
+                if isinstance(exc, WorkflowContractError) and exc.code is WorkflowErrorCode.PERMISSION_DENIED:
+                    self.run_store.record_event(
+                        run_id,
+                        "workflow_policy_denied",
+                        {
+                            "run_id": run_id,
+                            "node_run_id": node_run["id"],
+                            "node_id": node_run["node_id"],
+                            "requested_side_effects": sorted(node.get("side_effects") or ()),
+                            "policy_source": "workspace.permission",
+                            "reason": str(exc),
+                            "error_code": exc.code.value,
+                        },
+                    )
                 self.run_store.transition_node(
                     node_run["id"],
                     NodeRunStatus.FAILED,
@@ -730,6 +927,123 @@ class WorkflowScheduler:
                     self.run_store.create_retry_iteration(descendant["id"])
             self.run_store.transition_run(run_id, RunStatus.RUNNING)
             return self.advance(run_id)
+
+    @staticmethod
+    def _checkpoint_ancestors(graph: Mapping[str, Any], node_id: str) -> set[str]:
+        """Return the successful prefix needed to make a checkpoint reusable."""
+        incoming: dict[str, set[str]] = {}
+        for edge in graph.get("edges", []):
+            if str(edge.get("type") or "auto") == EdgeType.RETRY_LOOP.value:
+                continue
+            source = str(edge.get("from_node") or "")
+            target = str(edge.get("to_node") or "")
+            if source and target:
+                incoming.setdefault(target, set()).add(source)
+        required = {node_id}
+        pending = [node_id]
+        while pending:
+            current = pending.pop()
+            for source in incoming.get(current, ()):
+                if source not in required:
+                    required.add(source)
+                    pending.append(source)
+        return required
+
+    def fork_from_checkpoint(
+        self,
+        run_id: str,
+        checkpoint_node_run_id: str,
+        *,
+        session_id: str,
+        started_by: str = "",
+    ) -> dict[str, Any]:
+        """Create an auditable branch that reuses a successful graph prefix."""
+        with self._run_lock(run_id):
+            source_run = self.run_store.get_run(run_id)
+            if source_run is None:
+                raise WorkflowContractError(WorkflowErrorCode.RESOURCE_NOT_FOUND, f"workflow run not found: {run_id}")
+            if str(source_run.get("session_id") or "") != str(session_id):
+                raise WorkflowContractError(WorkflowErrorCode.RESOURCE_NOT_FOUND, f"workflow run not found: {run_id}")
+            if RunStatus(source_run["status"]) not in RUN_TERMINAL_STATUSES:
+                raise WorkflowContractError(WorkflowErrorCode.RUN_NOT_RECOVERABLE, "only a terminal workflow run can be branched")
+            version = self.workflow_store.get_version(source_run["workflow_version_id"])
+            if version is None:
+                raise WorkflowContractError(WorkflowErrorCode.RESOURCE_NOT_FOUND, "published workflow version is missing")
+            node_runs = self.run_store.list_node_runs(run_id)
+            nodes_by_run_id = {str(node["id"]): node for node in node_runs}
+            checkpoint = self.run_store.get_node_run(checkpoint_node_run_id)
+            if checkpoint is None or checkpoint.get("run_id") != run_id:
+                raise WorkflowContractError(WorkflowErrorCode.RESOURCE_NOT_FOUND, f"workflow node run not found: {checkpoint_node_run_id}")
+            if NodeRunStatus(checkpoint["status"]) is not NodeRunStatus.SUCCEEDED:
+                raise WorkflowContractError(WorkflowErrorCode.RUN_NOT_RECOVERABLE, "checkpoint node must have succeeded")
+            reusable_ids = self._checkpoint_ancestors(version["graph"], str(checkpoint["node_id"]))
+            # Prefer the exact producer NodeRuns consumed by this checkpoint
+            # (and by those producers).  This keeps a branch from an earlier
+            # successful iteration coherent even if a later retry succeeded.
+            consumptions_by_consumer: dict[str, list[str]] = {}
+            for item in self.run_store.list_consumptions(run_id):
+                consumer = str(item.get("consumer_node_run_id") or "")
+                producer = str(item.get("producer_node_run_id") or "")
+                if consumer and producer:
+                    consumptions_by_consumer.setdefault(consumer, []).append(producer)
+            exact_runs: dict[str, Mapping[str, Any]] = {}
+            pending = [str(checkpoint["id"])]
+            seen: set[str] = set()
+            while pending:
+                current_id = pending.pop()
+                if current_id in seen:
+                    continue
+                seen.add(current_id)
+                current = nodes_by_run_id.get(current_id)
+                if current is None or NodeRunStatus(current["status"]) is not NodeRunStatus.SUCCEEDED:
+                    continue
+                exact_runs[str(current["node_id"])] = current
+                pending.extend(consumptions_by_consumer.get(current_id, ()))
+
+            def fallback_success(node_id: str) -> Mapping[str, Any] | None:
+                candidates = [
+                    node for node in node_runs
+                    if str(node.get("node_id")) == node_id
+                    and NodeRunStatus(node["status"]) is NodeRunStatus.SUCCEEDED
+                    and int(node.get("iteration") or 1) <= int(checkpoint.get("iteration") or 1)
+                ]
+                if not candidates:
+                    return None
+                return sorted(
+                    candidates,
+                    key=lambda node: (int(node.get("iteration") or 1), int(node.get("attempt") or 1), str(node.get("created_at") or "")),
+                )[-1]
+
+            reused = {
+                node_id: exact_runs.get(node_id) or fallback_success(node_id)
+                for node_id in reusable_ids
+            }
+            missing = sorted(node_id for node_id, node in reused.items() if node is None or NodeRunStatus(node["status"]) is not NodeRunStatus.SUCCEEDED)
+            if missing:
+                raise WorkflowContractError(WorkflowErrorCode.RUN_NOT_RECOVERABLE, "checkpoint has incomplete successful dependencies: " + ", ".join(missing))
+            branch = self.run_store.create_run(
+                workflow_version_id=source_run["workflow_version_id"],
+                session_id=session_id,
+                graph=version["graph"],
+                inputs=source_run.get("inputs") or {},
+                started_by=started_by or "checkpoint_fork",
+            )
+            try:
+                seeded = self.run_store.seed_checkpoint_nodes(
+                    branch["id"], source_run_id=run_id, source_nodes=reused
+                )
+            except WorkflowRunStoreError as exc:
+                raise WorkflowContractError(
+                    WorkflowErrorCode.IDEMPOTENCY_CONFLICT,
+                    "unable to seed workflow checkpoint branch",
+                ) from exc
+            if not seeded:
+                raise WorkflowContractError(
+                    WorkflowErrorCode.IDEMPOTENCY_CONFLICT,
+                    "unable to seed workflow checkpoint branch",
+                )
+            self.run_store.transition_run(branch["id"], RunStatus.RUNNING)
+        return self.advance(branch["id"])
 
     def cancel(self, run_id: str) -> dict[str, Any]:
         run = self.run_store.get_run(run_id)
@@ -839,6 +1153,22 @@ class WorkflowScheduler:
                     WorkflowErrorCode.RESOURCE_NOT_FOUND,
                     "published workflow version is missing",
                 )
+            node_definition = next(
+                (
+                    item for item in version["graph"].get("nodes", [])
+                    if str(item.get("node_id")) == str(node_run["node_id"])
+                ),
+                {},
+            )
+            if (
+                canonical in {"approve", "approve_with_changes"}
+                and node_definition.get("type") == "verifier"
+                and str((node_run.get("output") or {}).get("decision") or "") != "pass"
+            ):
+                raise WorkflowContractError(
+                    WorkflowErrorCode.GRAPH_INVALID,
+                    "a verifier must return decision=pass before its approval can authorize a side effect",
+                )
             if canonical == "reject_and_retry":
                 iteration_limit = self._retry_iteration_limit(
                     version["graph"], str(node_run["node_id"])
@@ -908,6 +1238,10 @@ class WorkflowScheduler:
                 latest_by_node = self._latest_by_node(
                     self.run_store.list_node_runs(run_id)
                 )
+                definitions = {
+                    str(item.get("node_id")): item
+                    for item in version["graph"].get("nodes", [])
+                }
                 for retry_node_id in self._retry_iteration_nodes(
                     version["graph"], str(node_run["node_id"])
                 ):
@@ -916,6 +1250,16 @@ class WorkflowScheduler:
                         self.run_store.create_retry_iteration(
                             retry_node["id"],
                             max_iteration=iteration_limit,
+                            input_overrides=(
+                                {"revision_request": comment.strip()}
+                                if comment.strip()
+                                and (
+                                    retry_node_id == str(node_run["node_id"])
+                                    or "revision_request" in set(
+                                        definitions.get(retry_node_id, {}).get("input_contract") or []
+                                    )
+                                ) else None
+                            ),
                         )
 
             run = self.run_store.get_run(run_id)
@@ -954,4 +1298,17 @@ class WorkflowScheduler:
         elif any(state is NodeRunStatus.CANCELED for state in states):
             self.run_store.transition_run(run_id, RunStatus.CANCELED)
         else:
-            self.run_store.transition_run(run_id, RunStatus.SUCCEEDED)
+            detail = self.detail(run_id)
+            required_outputs = set(
+                (detail.get("output_schema") or {}).get("required") or []
+            )
+            missing_outputs = sorted(required_outputs - set(detail.get("outputs") or {}))
+            if missing_outputs:
+                self.run_store.transition_run(
+                    run_id,
+                    RunStatus.FAILED,
+                    failure_code="workflow_final_output_missing",
+                    failure_message="workflow final outputs missing: " + ", ".join(missing_outputs),
+                )
+            else:
+                self.run_store.transition_run(run_id, RunStatus.SUCCEEDED)

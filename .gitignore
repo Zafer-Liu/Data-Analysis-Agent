@@ -52,6 +52,10 @@ auth.db-wal
 auth.db-shm
 
 # ---- Local-only tests ----
+# Lowercase tests/ is a local regression suite.  The release quality command
+# uses the existing uppercase Test/ package, so keep this exact path separate.
+/tests/
+
 # Keep the tests already tracked by Git for GitHub Actions, but do not add
 # newly created local tests to the repository.
 Test/*
@@ -94,6 +98,7 @@ LLM/embedding_config.json
 data/datasource_config.json
 .playwright-mcp
 docs/*
+!docs/14-local-duckdb-concurrency-import-plan.md
 !docs/10-ai-team-workflow-optimization-plan.md
 !docs/11-ai-team-workflow-wf0-decisions.md
 test.bat
@@ -112,6 +117,7 @@ MCP/flowchart_server.py
 RAILWAY_DEPLOY.md
 config/hooks.json
 config/hooks-history.json
+config/feishu-bot.json
 frontend/README.md
 package-lock.json
 .claude

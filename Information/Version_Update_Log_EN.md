@@ -1,5 +1,41 @@
 # Version Development Log
 
+## v1.4.0 LTS
+**August 21, 2026**
+
+v1.4.0 enters the Feishu AI Skills Hackathon, adds a Feishu bot and built-in Bitable analysis, and delivers targeted feature improvements. Existing local data sources, analysis tools, and the Web workspace remain available.
+
+### Feishu bot and shared conversation
+- Adds **Settings → Bots → Feishu channel** and `/robot` conversation binding, so a group mention can drive the linked Web analysis context and receive the answer in the same group.
+- Uses Feishu long connection by default for local development; Webhook remains an optional deployment path. Credentials are stored through the system credential store rather than source code or ordinary configuration.
+
+### Bitable as a first-class source
+- Adds the built-in `feishu-bitable` Skill for discovering tables, reading records, SQL analysis, and explicit create/append/update operations with real record IDs.
+- Bitable records enter the existing DuckDB / SQL pipeline and can reuse existing query, analysis, chart, and report tools. Write-back is never automatic and requires an explicit user request.
+
+### Reproducibility and competition evidence
+- Adds 240 rows of de-identified/simulated project-delivery test data and submission materials covering product description, setup, Demo, and change evidence.
+- 53 focused bot/Bitable/tool/Skill tests and `pnpm build:check` passed. Before external Demo recording, the actual environment must still complete an end-to-end group-message, text-reply, Bitable-read, and real-result-link check.
+- The LLM settings page fixes provider-row inset, hover, spacing, and long-content clipping issues. GPU compute is intentionally shown as **Planned** until its end-to-end path is ready; its implementation remains preserved.
+
+### Long-term memory: more reliable and controllable
+
+This release fixes extraction failures caused by thinking text mixed into model output, non-standard JSON, and incorrect distinctions between user preferences and current-project facts. Memory results are surfaced after extraction or consolidation, and a global switch in **Settings → General** disables future memory reading, extraction, and consolidation.
+
+The system also consolidates redundant or stale memories on a schedule and protects incomplete tool calls and overlong context when an older session is restored.
+
+### Knowledge retrieval: status reflects reality
+
+- Repairs local Embedding download and ONNX compatibility so local semantic retrieval can recover normally.
+- Cloud retrieval is no longer shown as available merely because it has not been checked. Users can explicitly test the connection; unavailable services are labelled clearly and retain the existing fallback behavior.
+- The former **Hash** mode is labelled **Basic** in the UI without changing internal compatibility.
+
+### Analysis workspace and compatibility
+
+- Wide chat layouts make better use of the available window width.
+- SQL Server guidance now covers drivers, timeouts, error boundaries, and large-table usage.
+- Workflow runtime visibility for model usage, tool calls, duration, and cost has been further organized for future auditability.
+
 ## v1.2.0 LTS
 **July 17, 2026**
 
@@ -419,4 +455,3 @@ This update focuses on **front-end architecture modernization**, progressively m
 - `01-notes-for-development.md` updates: progress overview title changed to "concluded"; added "standards" row; document maintenance rules updated
 
 ---
-

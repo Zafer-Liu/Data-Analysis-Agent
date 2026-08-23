@@ -72,6 +72,11 @@ TOOL_JOB_MIGRATION_PLAN: dict[str, ToolJobMigration] = {
     "workspace_status": _KEEP_SYNC_READ,
     "browse_webpage": _KEEP_SYNC_READ,
     "configure_hooks": _KEEP_SYNC_WORKSPACE_WRITE,
+    "create_feishu_bitable": _KEEP_SYNC_WORKSPACE_WRITE,
+    "list_feishu_bitable_tables": _KEEP_SYNC_READ,
+    "load_feishu_bitable": _KEEP_SYNC_READ,
+    "append_feishu_bitable_records": _KEEP_SYNC_WORKSPACE_WRITE,
+    "update_feishu_bitable_record": _KEEP_SYNC_WORKSPACE_WRITE,
     "read_tool_result": _KEEP_SYNC_READ,
     "search_mcp_tools": _KEEP_SYNC_READ,
     "query_knowledge": ToolJobMigration(

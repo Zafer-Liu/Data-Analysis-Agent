@@ -42,8 +42,8 @@ def set_builtin():
         input_price, output_price, _ = _price_payload(d)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
-    if not provider or not api_key:
-        return jsonify({"error": "provider 和 api_key 不能为空"}), 400
+    if not provider:
+        return jsonify({"error": "provider 不能为空"}), 400
     try:
         ok = config_manager.set_config(
             provider, api_key, base_url=base_url, model=model,

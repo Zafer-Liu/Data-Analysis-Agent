@@ -1,6 +1,6 @@
 """Bounded dynamic team plans recorded around existing team_delegate execution."""
 from __future__ import annotations
-import json, re, threading, uuid
+import json, os, re, threading, time, uuid
 from datetime import datetime
 from infrastructure.paths import data_path
 from data.workspace import workspace_manager
@@ -28,9 +28,22 @@ class DynamicTeamPlanStore:
         return data
     def _save(self,data):
         self.path.parent.mkdir(parents=True,exist_ok=True)
-        tmp=self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding="utf-8")
-        tmp.replace(self.path)
+        # A fixed ``dynamic_plans.tmp`` races with other writers on Windows.
+        # Keep the replacement atomic while giving transient file locks a short retry.
+        tmp=self.path.with_name(f".{self.path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            tmp.write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding="utf-8")
+            for attempt in range(3):
+                try:
+                    os.replace(tmp,self.path)
+                    return
+                except PermissionError:
+                    if attempt == 2:
+                        raise
+                    time.sleep(0.05 * (attempt + 1))
+        finally:
+            if tmp.exists():
+                tmp.unlink()
     @staticmethod
     def _normalize_usage(usage):
         usage=usage if isinstance(usage,dict) else {}
@@ -216,8 +229,10 @@ class DynamicTeamPlanStore:
     def create_workflow_draft(self,pid,created_by="teams_panel"):
         plan=self.get(pid)
         if plan["status"]!="completed": raise WorkspaceTeamError("only completed plans can become Workflow drafts")
-        runtime=workspace_manager.get(self.session_id)
-        if not runtime: raise WorkspaceTeamError("no workspace is mounted for this session")
+        # Dynamic-team output can be promoted to a Workflow even when the
+        # session has no user-mounted folder. The manager supplies the same
+        # isolated Workflow runtime used by the Workflow API in that case.
+        runtime=workspace_manager.workflow_runtime_for_session(self.session_id)
         suffix=uuid.uuid4().hex[:8]; profiles={}; nodes=[]; edges=[]; outputs={}
         with WorkflowService(runtime) as service:
             for t in plan["tasks"]:

@@ -43,6 +43,18 @@ function _closePanel(name, { restoreNav = true } = {}) {
   if (el) el.classList.add("collapsed");
   if (_activePanel === name) _activePanel = null;
   if (restoreNav) setSidebarNav("agent");
+  // Cascade-close skill drawer when skills panel closes
+  if (name === "skills") {
+    const drawer = document.getElementById("skill-modal-overlay");
+    if (drawer && !drawer.classList.contains("hidden")) {
+      drawer.classList.add("hidden");
+      // Move drawer back to body and clear inline style
+      if (drawer.parentElement !== document.body) {
+        drawer.style.left = "";
+        document.body.appendChild(drawer);
+      }
+    }
+  }
 }
 
 function closePanel(name) {

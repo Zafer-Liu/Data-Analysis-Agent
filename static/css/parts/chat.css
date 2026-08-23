@@ -1494,6 +1494,12 @@ details.tool-audit {
   font-size: 9px; font-weight: 800; letter-spacing: -.02em;
 }
 .skill-picker-icon { width: 28px; text-align: center; font-size: 19px; }
+.skill-picker-icon--letter {
+  width: 28px; height: 28px; border-radius: 8px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: #151515; color: #fff;
+  font-size: 13px; font-weight: 700; text-transform: uppercase;
+}
 .skill-picker-copy { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
 .skill-picker-copy strong { font-size: var(--fs-sm); }
 .skill-picker-copy small { color: var(--color-text-mute); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -1937,6 +1943,26 @@ details.tool-audit {
   color: var(--color-text);
 }
 
+.feishu-session-indicator[hidden] {
+  display: none !important;
+}
+
+.feishu-session-indicator.is-connected {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #166534;
+  background: #f0fdf4;
+  border-color: #bbf7d0;
+}
+
+.feishu-session-indicator.is-connected:hover {
+  color: #14532d;
+  background: #dcfce7;
+  border-color: #86efac;
+}
+
 /* ── Shared content rail ─────────────────────────────────────── */
 .messages {
   padding: 26px var(--workspace-gutter) 18px;
@@ -2006,6 +2032,32 @@ details.tool-audit {
 .msg.user .msg-bubble:hover {
   transform: none;
   box-shadow: 0 3px 9px rgba(37, 99, 235, .24);
+}
+
+/* Inbound Feishu turns are real conversation messages, with a quiet source
+   marker so a linked Web session stays easy to follow. */
+.msg-feishu .msg-body::before {
+  content: "来自飞书";
+  display: block;
+  width: fit-content;
+  margin: 0 0 4px 2px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: #eef6ff;
+  color: #1d4e89;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.msg.user.msg-feishu .msg-body::before {
+  margin-left: auto;
+  margin-right: 2px;
+}
+
+[data-theme="dark"] .msg-feishu .msg-body::before {
+  background: #172c4d;
+  color: #bfdbfe;
 }
 
 .msg-bubble h1,

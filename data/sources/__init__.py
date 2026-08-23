@@ -17,6 +17,7 @@ from .csv     import CSVDataSource
 from .sql     import SQLDataSource
 from .gsheets import GoogleSheetsDataSource
 from .http    import HTTPAPIDataSource
+from .feishu_bitable import FeishuBitableDataSource
 
 __all__ = [
     "DataSource",
@@ -26,4 +27,5 @@ __all__ = [
     "SQLDataSource",
     "GoogleSheetsDataSource",
     "HTTPAPIDataSource",
+    "FeishuBitableDataSource",
 ]

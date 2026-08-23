@@ -45,6 +45,7 @@ export function mountSettingsUi() {
     form: {              // add + edit 共用表单
       name: "", url: "", model: "", key: "",
       ctx: "", output: "",
+      inputPrice: "", outputPrice: "",
       think: false, budget: "8000",
     },
     formMsg: { err: "", ok: "" },
@@ -94,6 +95,8 @@ export function mountSettingsUi() {
     _set("ac-key",    state.form.key);
     _set("ac-ctx",    state.form.ctx);
     _set("ac-output", state.form.output);
+    _set("ac-input-price", state.form.inputPrice);
+    _set("ac-output-price", state.form.outputPrice);
     _set("ac-budget", state.form.budget);
     _chk("ac-think",  state.form.think);
 
@@ -190,6 +193,20 @@ export function mountSettingsUi() {
             onInput: e => { p.fields.output = e.target.value; },
           })
         ),
+        _pfRow("输入价格（可选）",
+          h("input", {
+            type: "number", min: "0", step: "any", inputmode: "decimal",
+            placeholder: "输入价格", value: p.fields.inputPrice,
+            onInput: e => { p.fields.inputPrice = e.target.value; },
+          })
+        ),
+        _pfRow("输出价格（可选）",
+          h("input", {
+            type: "number", min: "0", step: "any", inputmode: "decimal",
+            placeholder: "输出价格", value: p.fields.outputPrice,
+            onInput: e => { p.fields.outputPrice = e.target.value; },
+          })
+        ),
         h("div", { class: "pf-row pf-row-left" }, [
           h("label", {
             style: "display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:#475569;width:auto;flex-shrink:0",
@@ -274,6 +291,8 @@ export function mountSettingsUi() {
       model:   cfg.model || def.model || "",
       ctx:     cfg.context_window != null ? String(cfg.context_window) : (def.context_window != null ? String(def.context_window) : ""),
       output:  cfg.max_output_tokens != null ? String(cfg.max_output_tokens) : (def.max_output_tokens != null ? String(def.max_output_tokens) : ""),
+      inputPrice: cfg.input_price_per_million != null ? String(cfg.input_price_per_million) : "",
+      outputPrice: cfg.output_price_per_million != null ? String(cfg.output_price_per_million) : "",
       think:   !!cfg.enable_thinking,
       budget:  cfg.thinking_budget != null ? String(cfg.thinking_budget) : "8000",
     };
@@ -359,12 +378,14 @@ export function mountSettingsUi() {
         key: "",
         ctx: cfg.context_window != null ? String(cfg.context_window) : "",
         output: cfg.max_output_tokens != null ? String(cfg.max_output_tokens) : "",
+        inputPrice: cfg.input_price_per_million != null ? String(cfg.input_price_per_million) : "",
+        outputPrice: cfg.output_price_per_million != null ? String(cfg.output_price_per_million) : "",
         think: !!cfg.enable_thinking,
         budget: cfg.thinking_budget != null ? String(cfg.thinking_budget) : "8000",
       };
     } else {
       // 添加模式：清空
-      state.form = { name: "", url: "", model: "", key: "", ctx: "", output: "", think: false, budget: "8000" };
+      state.form = { name: "", url: "", model: "", key: "", ctx: "", output: "", inputPrice: "", outputPrice: "", think: false, budget: "8000" };
     }
     state.formOpen = true;
     _renderForm();
@@ -413,6 +434,8 @@ export function mountSettingsUi() {
       key:        _v("ac-key"),
       ctx:        _v("ac-ctx"),
       output:     _v("ac-output"),
+      inputPrice: _v("ac-input-price"),
+      outputPrice:_v("ac-output-price"),
       think:      _chk("ac-think"),
       budget:     _v("ac-budget"),
       editingKey: state.editingKey,

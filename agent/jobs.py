@@ -57,6 +57,12 @@ class JobContext:
         if self._store.append_event(self.job_id, serialize_event(event)) is not None:
             self._notify()
 
+    def record_event(self, event_type: str, **payload: Any) -> None:
+        """Persist a non-sensitive worker lifecycle event for SSE replay."""
+        event = {"type": event_type, **payload}
+        if self._store.append_event(self.job_id, event) is not None:
+            self._notify()
+
     def is_canceled(self) -> bool:
         return self._is_canceled(self.job_id)
 

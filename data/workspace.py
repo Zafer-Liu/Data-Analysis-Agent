@@ -21,6 +21,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
@@ -631,6 +632,55 @@ class WorkspaceManager:
         with self._lock:
             workspace_id = self._session_bindings.get(session_id)
             return self._runtimes_by_workspace.get(workspace_id) if workspace_id else None
+
+    @staticmethod
+    def _workflow_session_workspace_id(session_id: str) -> str:
+        """Stable, non-user-workdir identity for an unmounted Workflow session."""
+        digest = hashlib.sha256(str(session_id).encode("utf-8")).hexdigest()[:24]
+        return f"workflow-session-{digest}"
+
+    def workflow_workspace_id_for_session(self, session_id: str) -> str:
+        """Return the mounted workspace identity or the Workflow-only fallback."""
+        with self._lock:
+            mounted = self._session_bindings.get(session_id)
+        return mounted or self._workflow_session_workspace_id(session_id)
+
+    def workflow_runtime_for_session(self, session_id: str) -> WorkspaceRuntime:
+        """Resolve a usable Workflow runtime even when no user folder is mounted.
+
+        The fallback is deliberately not added to ``_session_bindings``: the UI
+        must continue to report that no user workspace is mounted, and file
+        tools must not gain access to an arbitrary user directory. Its only
+        writable surface is a session-isolated application-data directory.
+        """
+        mounted = self.get(session_id)
+        if mounted is not None:
+            return mounted
+        workspace_id = self._workflow_session_workspace_id(session_id)
+        with self._lock:
+            existing = self._runtimes_by_workspace.get(workspace_id)
+            if existing is not None:
+                return existing
+            workdir = data_path("outputs", "workflow_sessions", workspace_id)
+            runtime = WorkspaceRuntime(
+                workspace_id=workspace_id,
+                workdir=workdir,
+                permission="read_write",
+                name="Workflow session workspace",
+                extra_roots=list(self._default_extra_roots),
+            )
+            self._runtimes_by_workspace[workspace_id] = runtime
+            return runtime
+
+    def release_workflow_session(self, session_id: str) -> None:
+        """Release only the in-memory fallback; persisted Workflow data remains."""
+        workspace_id = self._workflow_session_workspace_id(session_id)
+        with self._lock:
+            runtime = self._runtimes_by_workspace.get(workspace_id)
+            if runtime is not None:
+                runtime.state = "closed"
+                self._runtimes_by_workspace.pop(workspace_id, None)
+                self._path_authorizations.pop(workspace_id, None)
 
     def get_by_workspace(self, workspace_id: str) -> Optional[WorkspaceRuntime]:
         """Return the shared runtime by stable identity (C3 dispatch hook)."""

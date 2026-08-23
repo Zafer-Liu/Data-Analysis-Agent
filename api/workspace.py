@@ -166,6 +166,28 @@ def _register_workdir_files(sid: str, runtime) -> dict:
                 })
                 continue
             if suffix == ".csv":
+                from data.sources.workspace_persistent import (
+                    csv_requires_job,
+                    parse_workspace_csv_job,
+                )
+                if csv_requires_job(file_path):
+                    job_id = sess.job_runner.create(
+                        lambda ctx, fp=file_path, table=base_table, key=file_key,
+                               digest=current_hash, previous=(old_entry or {}).get("tables", []):
+                            parse_workspace_csv_job(
+                                ctx, ctx.runtime or runtime, fp, table, key, digest, previous
+                            ),
+                        job_type="csv_import",
+                        label=name,
+                    )
+                    pending_jobs.append({
+                        "id": job_id,
+                        "type": "csv_import",
+                        "source_name": name,
+                        "status": "queued",
+                    })
+                    continue
+            if suffix == ".csv":
                 with runtime.db_lock:
                     ok = source._register_csv(file_path, base_table)
                 if ok:

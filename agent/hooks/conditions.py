@@ -46,6 +46,12 @@ def _eval_clause(clause: str, ctx: HookContext) -> bool:
 
 
 def _compare(left: Any, op: str, right: str) -> bool:
+    if isinstance(left, bool) and str(right).strip().lower() in {"true", "false"}:
+        expected = str(right).strip().lower() == "true"
+        if op == "==":
+            return left is expected
+        if op == "!=":
+            return left is not expected
     if isinstance(left, (dict, list)):
         left_text = str(left)
     elif left is None:

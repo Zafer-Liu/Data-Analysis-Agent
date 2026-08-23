@@ -1,0 +1,5 @@
+# G2 remote GPU connectivity. These are also listed in requirements.txt so a
+# normal installation includes the feature; keep this small file for users who
+# only need to repair/install remote-connectivity dependencies.
+paramiko>=3.4.0
+keyring>=24.0.0

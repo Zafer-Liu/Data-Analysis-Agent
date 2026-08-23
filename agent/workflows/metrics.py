@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any, Iterable, Mapping
 
 from agent.workflows.models import WorkflowContractError, WorkflowErrorCode
+from agent.workflows.pricing import estimate_model_cost
 from agent.workflows.service import WorkflowService
 
 
@@ -186,6 +187,13 @@ def workflow_metrics(runtime, workflow_version_id: str = "") -> dict[str, Any]:
                 node.get("cached_input_tokens") or 0
             )
 
+        for group in model_groups.values():
+            group["estimated_cost"] = estimate_model_cost(
+                group["provider"], group["model"], group["input_tokens"], group["output_tokens"],
+            )
+
+        model_costs = [item["estimated_cost"] for item in model_groups.values()]
+
         versions[version_id] = {
             "workflow_id": str((version or {}).get("workflow_id") or ""),
             "workflow_name": str((workflow or {}).get("name") or version_id),
@@ -211,7 +219,7 @@ def workflow_metrics(runtime, workflow_version_id: str = "") -> dict[str, Any]:
             "output_tokens": output_tokens,
             "cached_input_tokens": cached_tokens,
             "token_coverage": _rate(measured_nodes, len(executed_nodes)),
-            "estimated_cost": None,
+            "estimated_cost": (round(sum(model_costs), 8) if model_costs and all(value is not None for value in model_costs) else None),
             "artifact_count": len(produced_ids),
             "artifact_reuse_rate": _rate(
                 len(consumed_ids & produced_ids), len(produced_ids)
@@ -241,7 +249,7 @@ def workflow_metrics(runtime, workflow_version_id: str = "") -> dict[str, Any]:
             "success_rate": _rate(total_success, total_terminal),
             "input_tokens": sum(item["input_tokens"] for item in version_rows),
             "output_tokens": sum(item["output_tokens"] for item in version_rows),
-            "estimated_cost": None,
+            "estimated_cost": (round(sum(item["estimated_cost"] for item in version_rows), 8) if version_rows and all(item["estimated_cost"] is not None for item in version_rows) else None),
         },
         "versions": version_rows,
     }
@@ -307,6 +315,25 @@ def workflow_optimization_suggestions(
                     "title": f"减少节点返工：{node['node_id']}",
                     "rationale": f"节点重试率 {node['retry_rate']:.0%}。",
                     "proposed_change": "复制为草稿后，人工完善输入材料和输出契约。",
+                })
+            average_tokens = (
+                int(node["input_tokens"] or 0) + int(node["output_tokens"] or 0)
+            ) / max(1, int(node["runs"] or 1))
+            if node["runs"] >= 3 and average_tokens >= 4000:
+                suggestions.append({
+                    "id": _suggestion_id(
+                        version_id, "node-token-budget", str(node["node_id"])
+                    ),
+                    "workflow_version_id": version_id,
+                    "node_id": node["node_id"],
+                    "kind": "node_token_budget",
+                    "severity": "medium",
+                    "title": f"压缩高 Token 节点：{node['node_id']}",
+                    "rationale": (
+                        f"该节点平均每次消耗约 {average_tokens:.0f} Token，"
+                        "超过 4000 Token 观察阈值。"
+                    ),
+                    "proposed_change": "复制为草稿后，收紧输入材料、输出契约和 max_tokens；确认该节点的输出确实被下游使用。",
                 })
         if (
             version["knowledge_candidate_count"] >= 3

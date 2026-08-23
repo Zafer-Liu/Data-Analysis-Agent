@@ -223,6 +223,10 @@ AGENT_TOOLS = [
                         "type": "integer",
                         "description": "Number of buckets (default 10). Use 5 for quintiles, 4 for quartiles.",
                     },
+                    "analysis_options": {
+                        "type": "object",
+                        "description": "Analysis-specific options. For AB_Test_Analysis: control_group, metric_type (auto/binary/continuous), expected_allocation.",
+                    },
                 },
                 "required": ["analysis_name", "sql", "target_column"],
             },
@@ -770,6 +774,20 @@ AGENT_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "memory_read",
+            "description": "Read the full body of a named long-term memory record from the current user and workspace scope only. Use only when the injected memory index identifies a relevant record.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "The kebab-case memory name from the long-term memory index."}
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "ask_user",
             "description": (
                 "Ask the user a clarifying question when their request is ambiguous or "
@@ -899,6 +917,124 @@ HOOKS_AUTOMATION_TOOL_SCHEMAS = [
 AGENT_TOOLS.extend(HOOKS_AUTOMATION_TOOL_SCHEMAS)
 
 
+FEISHU_BITABLE_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "list_feishu_bitable_tables",
+            "description": (
+                "List tables that the configured Feishu application bot can access in a Bitable. "
+                "Use this before reading when the user provides an app-level Bitable link without a table ID. "
+                "This is read-only; accept a Feishu Bitable URL or app_token."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "bitable": {"type": "string", "description": "Feishu Bitable URL or app_token."},
+                },
+                "required": ["bitable"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "load_feishu_bitable",
+            "description": (
+                "Read a user-specified Feishu Bitable table through the configured application bot and attach its "
+                "bounded snapshot to this conversation as a normal analyzable data source. Use get_schema, query_data, "
+                "run_analysis, charts, and report tools after it loads. This is read-only."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "bitable": {"type": "string", "description": "Feishu Bitable URL or app_token."},
+                    "table_id": {"type": "string", "description": "Required only when bitable does not contain ?table=... ."},
+                    "source_name": {"type": "string", "description": "Optional display name for this conversation data source."},
+                    "max_records": {"type": "integer", "minimum": 1, "maximum": 500, "description": "Bounded record count to read; default 500."},
+                },
+                "required": ["bitable"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_feishu_bitable",
+            "description": (
+                "Create a NEW Feishu Bitable and one data table using the configured Feishu application bot. "
+                "Call only when the user explicitly asks to create a Feishu Bitable/table; this is an external write. "
+                "Use short, meaningful Chinese field names. All created fields are safe plain-text fields. "
+                "Optional records must use only the supplied field names. Return the generated Feishu URL to the user."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Name of the new Feishu Bitable."},
+                    "table_name": {"type": "string", "description": "Name of the first data table."},
+                    "fields": {
+                        "type": "array", "minItems": 1, "maxItems": 50,
+                        "items": {"type": "string"},
+                        "description": "Ordered column names for the data table.",
+                    },
+                    "records": {
+                        "type": "array", "maxItems": 500,
+                        "items": {"type": "object", "additionalProperties": {}},
+                        "description": "Optional initial records. Each key must be one of fields.",
+                    },
+                    "folder_token": {
+                        "type": "string",
+                        "description": "Optional target Feishu folder token. Omit to use the application-visible root folder.",
+                    },
+                },
+                "required": ["name", "table_name", "fields"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "append_feishu_bitable_records",
+            "description": (
+                "Append records to an EXISTING Feishu Bitable table. This is an external write: call it only after the "
+                "user explicitly asks to write these exact results back. Use field names that already exist in the target table."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "bitable": {"type": "string", "description": "Feishu Bitable URL or app_token."},
+                    "table_id": {"type": "string", "description": "Target table ID when absent from the URL."},
+                    "records": {"type": "array", "minItems": 1, "maxItems": 100, "items": {"type": "object", "additionalProperties": {}}, "description": "Exact records to append."},
+                },
+                "required": ["bitable", "table_id", "records"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_feishu_bitable_record",
+            "description": (
+                "Update one EXISTING Feishu Bitable record. This is an external write: call it only after explicit user approval. "
+                "Use a record_id returned by load_feishu_bitable, never guess one."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "bitable": {"type": "string", "description": "Feishu Bitable URL or app_token."},
+                    "table_id": {"type": "string", "description": "Target table ID when absent from the URL."},
+                    "record_id": {"type": "string", "description": "Exact record ID returned by a prior Bitable read."},
+                    "fields": {"type": "object", "additionalProperties": {}, "description": "Exact field values to update."},
+                },
+                "required": ["bitable", "table_id", "record_id", "fields"],
+            },
+        },
+    },
+]
+
+AGENT_TOOLS.extend(FEISHU_BITABLE_TOOL_SCHEMAS)
+
+
 WORKSPACE_TOOL_SCHEMAS = [
     {"type": "function", "function": {"name": "workspace_glob", "description": "Page through file metadata recursively. When a user workspace is mounted, omit path to search that mounted directory first; pattern '*' or '**/*' lists files under subfolders too. Returned user/... paths can be passed unchanged to read, move, or delete tools. Use explicit workspace://uploads, workspace://outputs, or workspace://mcp only for system roots. Contents are never read by this tool.", "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}, "path": {"type": "string", "description": "Optional root/base. Omit for the mounted user workspace; otherwise use workspace://user, workspace://uploads, workspace://outputs, or workspace://mcp."}, "max_results": {"type": "integer", "minimum": 1, "maximum": 100}, "cursor": {"type": "integer", "minimum": 0}}, "required": ["pattern"]}}},
     {"type": "function", "function": {"name": "workspace_grep", "description": "Regex-search allowlisted UTF-8 text files on demand. At most 50 matches and 200 candidate files are examined; dependency, cache and build directories are skipped.", "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}, "path": {"type": "string"}, "include": {"type": "string"}, "max_results": {"type": "integer", "minimum": 1, "maximum": 50}}, "required": ["pattern"]}}},
@@ -937,7 +1073,8 @@ TEAM_TOOL_SCHEMAS = [
 
 AGENT_TOOLS.extend(TEAM_TOOL_SCHEMAS)
 WORKFLOW_TOOL_SCHEMAS = [
-    {"type": "function", "function": {"name": "workflow_create", "description": "Create and publish a standard AI-team analysis Workflow from chat. Use when the user says create workflow/创建工作流/创建workflow. It creates agent profiles, a DAG, approval/retry edges, validates, and publishes the Workflow. After creation, the user can start it with workflow_start or inspect it in the Teams Workflow panel.", "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "description": {"type": "string"}, "mode": {"type": "string", "enum": ["full_auto", "key_approval", "exception_review"]}, "source_key": {"type": "string", "description": "Input field name, default source_snapshot."}}}}},
+    {"type": "function", "function": {"name": "workflow_create", "description": "Create and publish an explicit, auditable Workflow. Use only when the user asks to create a Workflow; ordinary Q&A stays on the single-Agent Loop. Templates: analysis (multi-role), insight (data query and insight), report (report delivery), cleaning_approval (data-cleaning proposal with approval).", "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "description": {"type": "string"}, "mode": {"type": "string", "enum": ["full_auto", "key_approval", "exception_review"]}, "template": {"type": "string", "enum": ["analysis", "insight", "report", "cleaning_approval"]}, "source_key": {"type": "string", "description": "Input field name, default source_snapshot."}}}}},
+    {"type": "function", "function": {"name": "workflow_create_custom", "description": "Create and publish a custom parallel-capable Agent Workflow from the user's described roles and responsibilities. Use this instead of workflow_create when the user specifies Agents, roles, steps, branches, or a bespoke template. Each agent must have instructions; only get_schema and query_data may be enabled as tools. `depends_on` may name one or more earlier agents: no dependency means independent entry Agents run in parallel; an Agent with dependencies waits for all of them. Do not invent agents or create the Workflow if roles or dependencies are unclear: ask a concise clarification first.", "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "description": {"type": "string"}, "mode": {"type": "string", "enum": ["full_auto", "key_approval", "exception_review"]}, "source_key": {"type": "string", "description": "Input field name, default source_snapshot."}, "agents": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "object", "properties": {"name": {"type": "string"}, "role": {"type": "string"}, "instructions": {"type": "string"}, "allowed_tools": {"type": "array", "items": {"type": "string", "enum": ["get_schema", "query_data"]}}, "depends_on": {"type": "array", "items": {"type": "string"}, "description": "Names of earlier agents that must finish first."}}, "required": ["name", "role", "instructions"]}}}, "required": ["name", "agents"]}}},
     {"type": "function", "function": {"name": "workflow_list", "description": "List published Workflows available in the mounted workspace. Use before starting a workflow when the user gives a name rather than an exact id.", "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {"name": "workflow_start", "description": "Start one published auto-edge Workflow by name, workflow id, or version id. Returns a durable Run and NodeRun status immediately while nodes continue through JobRunner.", "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "workflow_id": {"type": "string"}, "workflow_version_id": {"type": "string"}, "inputs": {"type": "object", "additionalProperties": true}}}}},
     {"type": "function", "function": {"name": "workflow_status", "description": "Advance/reconcile and return the durable status, nodes, and events of one Workflow Run.", "parameters": {"type": "object", "properties": {"run_id": {"type": "string"}}, "required": ["run_id"]}}},

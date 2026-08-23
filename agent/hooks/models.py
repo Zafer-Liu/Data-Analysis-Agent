@@ -31,10 +31,13 @@ class Hook:
     id: str
     event: str
     action: Action
+    name: str = ""
     enabled: bool = True
+    internal_endpoint: bool = False
     condition: str = ""
     reject: bool = False
     once: bool = False
+    once_scope: str = "session"
     async_exec: bool = False
     executed: bool = False
 

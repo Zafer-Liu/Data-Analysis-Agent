@@ -844,6 +844,9 @@ body.focus-mode #btn-focus-mode,
   min-width: 0;
 }
 #sb-panel-skills .skill-picker-icon { flex: 0 0 28px; overflow: hidden; }
+#sb-panel-skills .skill-picker-icon--letter {
+  background: color-mix(in srgb, #8b5cf6 18%, #1e1e2e); color: #a78bfa;
+}
 #sb-panel-skills .skill-picker-copy { min-width: 0; overflow: hidden; }
 #sb-panel-skills .skill-picker-copy strong {
   display: block; max-width: 100%; overflow: hidden;
@@ -890,6 +893,24 @@ body.focus-mode #btn-focus-mode,
 .skill-picker-view:hover { opacity: 1; }
 
 /* ── Skill detail / editor — right drawer (sidebar dark theme) ──── */
+/* Skill drawer — when inside sidebar-hub, slides from panel's right edge */
+.sidebar-hub > .skill-drawer {
+  position: absolute; top: 0; width: 560px; max-width: 90vw; height: 100vh;
+  z-index: 90; display: flex; flex-direction: column;
+  background: rgba(11, 18, 32, .93);
+  border-left: 1px solid var(--color-sidebar-divider);
+  box-shadow: 8px 0 28px rgba(0, 0, 0, .32);
+  opacity: 1;
+  transform: translateX(0);
+  transition: opacity .22s ease .06s, transform .3s var(--ease-out);
+  overflow: hidden;
+}
+.sidebar-hub > .skill-drawer.hidden {
+  display: flex; opacity: 0; transform: translateX(-20px); pointer-events: none;
+}
+.sidebar-hub > .skill-drawer:not(.hidden) { opacity: 1; transform: translateX(0); pointer-events: auto; }
+
+/* Skill drawer — standalone (fallback, e.g. opened from somewhere else) */
 .skill-drawer {
   position: fixed; top: 0; right: 0; width: 560px; max-width: 94vw; height: 100vh;
   z-index: 200; display: flex; flex-direction: column;
@@ -925,7 +946,7 @@ body.focus-mode #btn-focus-mode,
 }
 .skill-drawer-close:hover { background: var(--color-sidebar-hover); color: var(--color-sidebar-fg); }
 .skill-drawer-body {
-  flex: 1; overflow-y: auto; padding: 18px 22px; min-height: 0;
+  flex: 1; overflow-y: auto; padding: 18px 22px;
 }
 .skill-drawer-body::-webkit-scrollbar { width: 6px; }
 .skill-drawer-body::-webkit-scrollbar-track { background: transparent; }
@@ -943,11 +964,13 @@ body.focus-mode #btn-focus-mode,
 
 /* ── Form sections ── */
 .skill-form-section {
-  margin-bottom: 20px;
-  padding-bottom: 16px;
+  margin-bottom: 12px;
+  padding-bottom: 10px;
   border-bottom: 1px solid var(--color-sidebar-divider);
 }
+.skill-form-section:first-of-type { max-height: 50%; overflow-y: auto; flex-shrink: 0; }
 .skill-form-section:last-of-type { border-bottom: none; margin-bottom: 0; }
+.skill-form-section-prompt { min-height: 0; }
 .skill-form-section-title {
   font-size: var(--fs-xs);
   font-weight: 700;
@@ -1010,7 +1033,7 @@ body.focus-mode #btn-focus-mode,
 /* ── Prompt textarea ── */
 .skill-form-row-prompt { gap: 6px; }
 .skill-form-textarea {
-  width: 100%; min-height: 260px; flex: 1;
+  width: 100%; min-height: 80px; flex: 1;
   padding: 12px 14px;
   border: 1px solid var(--color-sidebar-divider);
   border-radius: var(--radius-md);

@@ -26,6 +26,26 @@ class HookEvent(str, Enum):
 
 SUPPORTED_EVENTS = {event.value for event in HookEvent}
 
+# These events have an in-process dispatch point today.  SESSION_END and
+# PERMISSION_REQUEST remain part of the compatibility vocabulary, but callers
+# should not present them as active lifecycle hooks until a real source exists.
+DISPATCHED_EVENTS = {
+    HookEvent.STARTUP.value,
+    HookEvent.SESSION_START.value,
+    HookEvent.USER_PROMPT_SUBMIT.value,
+    HookEvent.TURN_START.value,
+    HookEvent.TURN_END.value,
+    HookEvent.TOOL_CALL.value,
+    HookEvent.PRE_TOOL_USE.value,
+    HookEvent.POST_TOOL_USE.value,
+    HookEvent.SUBAGENT_START.value,
+    HookEvent.SUBAGENT_STOP.value,
+    HookEvent.PRE_COMPACT.value,
+    HookEvent.POST_COMPACT.value,
+    HookEvent.STOP.value,
+    HookEvent.ERROR.value,
+}
+
 EVENT_ALIASES = {
     "sessionstart": HookEvent.SESSION_START.value,
     "session_start": HookEvent.SESSION_START.value,

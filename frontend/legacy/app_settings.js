@@ -164,6 +164,107 @@ import { chatStream } from "../features/chat-stream.js";
     }
   }
 
+  async function loadFeishuBot() {
+    if (!uiState || uiState.feishuBotLoading) return;
+    uiState.feishuBotLoading = true;
+    uiState.feishuBotStatus = "";
+    draw();
+    try {
+      const response = await fetch("/api/feishu-bot");
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.ok) throw new Error(data.error || "读取飞书机器人配置失败");
+      uiState.feishuBot = data.connection || uiState.feishuBot;
+      if (uiState.feishuBot.app_secret_configured) loadFeishuChats();
+    } catch (error) {
+      uiState.feishuBotStatus = `加载失败：${error.message || error}`;
+      uiState.feishuBotStatusType = "error";
+    } finally {
+      uiState.feishuBotLoading = false;
+      draw();
+    }
+  }
+
+  async function loadFeishuChats() {
+    if (!uiState || uiState.feishuBotChatsLoading) return;
+    uiState.feishuBotChatsLoading = true;
+    uiState.feishuBotChatsStatus = "";
+    draw();
+    try {
+      const response = await fetch("/api/feishu-bot/chats");
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.ok) throw new Error(data.error || "读取群列表失败");
+      uiState.feishuBotChats = Array.isArray(data.chats) ? data.chats : [];
+      if (!uiState.feishuBotChats.length) {
+        uiState.feishuBotChatsStatus = "未读取到机器人所在的群。请确认机器人已加入群、应用已开通“获取群组信息”权限并发布。";
+      }
+    } catch (error) {
+      uiState.feishuBotChatsStatus = `读取群列表失败：${error.message || error}`;
+    } finally {
+      uiState.feishuBotChatsLoading = false;
+      draw();
+    }
+  }
+
+  async function saveFeishuBot() {
+    if (!uiState || uiState.feishuBotLoading) return;
+    uiState.feishuBotLoading = true;
+    uiState.feishuBotStatus = "";
+    draw();
+    try {
+      const response = await fetch("/api/feishu-bot", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          enabled: !!uiState.feishuBot.enabled,
+          app_id: String(uiState.feishuBot.app_id || "").trim(),
+          app_secret: String(uiState.feishuBotAppSecretDraft || "").trim(),
+          event_verification_token: String(uiState.feishuBotVerificationTokenDraft || "").trim(),
+          inbound_transport: uiState.feishuBot.inbound_transport || "long_connection",
+          receive_id_type: uiState.feishuBot.receive_id_type || "chat_id",
+          receive_id: String(uiState.feishuBot.receive_id || "").trim(),
+        }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.ok) throw new Error(data.error || "保存失败");
+      uiState.feishuBot = data.connection || uiState.feishuBot;
+      uiState.feishuBotAppSecretDraft = "";
+      uiState.feishuBotVerificationTokenDraft = "";
+      uiState.feishuBotStatus = uiState.feishuBot.configured
+        ? "配置已保存。App Secret 已交由系统凭据库保护。"
+        : "应用凭据已保存。请从下方群列表选择目标群，再保存一次。";
+      uiState.feishuBotStatusType = "ok";
+      toast("飞书机器人配置已保存");
+      if (uiState.feishuBot.app_secret_configured) loadFeishuChats();
+    } catch (error) {
+      uiState.feishuBotStatus = `保存失败：${error.message || error}`;
+      uiState.feishuBotStatusType = "error";
+    } finally {
+      uiState.feishuBotLoading = false;
+      draw();
+    }
+  }
+
+  async function testFeishuBot() {
+    if (!uiState || uiState.feishuBotLoading) return;
+    uiState.feishuBotLoading = true;
+    uiState.feishuBotStatus = "";
+    draw();
+    try {
+      const response = await fetch("/api/feishu-bot/test", { method: "POST" });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.ok) throw new Error(data.error || "测试发送失败");
+      uiState.feishuBotStatus = data.message || "测试消息已发送到飞书群。";
+      uiState.feishuBotStatusType = "ok";
+      toast("飞书机器人连接成功");
+    } catch (error) {
+      uiState.feishuBotStatus = `测试失败：${error.message || error}`;
+      uiState.feishuBotStatusType = "error";
+    } finally {
+      uiState.feishuBotLoading = false;
+      draw();
+    }
+  }
+
   async function validateHooks() {
     const raw = await parseHooksJson();
     if (!raw) return false;
@@ -858,6 +959,145 @@ import { chatStream } from "../features/chat-stream.js";
     ]);
   }
 
+  function renderGpu() {
+    const gpu = uiState.gpuStatus;
+    const kind = gpu ? gpu.kind : "none";
+    const hasNvidia = kind === "nvidia";
+    const hasDiscrete = kind === "nvidia" || kind === "discrete_wmi";
+    const hasIntegrated = kind === "integrated";
+    // 圆点：NVIDIA 独显=绿（online），集显=灰（offline），无=灰
+    const dotClass = hasNvidia ? "online" : "offline";
+
+    const gpuItems = [];
+    if (gpu && gpu.gpus && gpu.gpus.length) {
+      gpu.gpus.forEach(function (g) {
+        if (hasNvidia) {
+          // nvidia-smi 有详细显存/利用率
+          gpuItems.push(Vue.h("div", { class: "gpu-item" }, [
+            Vue.h("span", { class: "gpu-item-name" }, g.name),
+            Vue.h("span", { class: "gpu-item-meta" },
+              "显存 " + g.memory_used_mb + "/" + g.memory_total_mb + " MB · 利用率 " + g.utilization_pct + "%"),
+          ]));
+        } else {
+          // WMI 只有型号（集显/discrete_wmi），无显存/利用率
+          gpuItems.push(Vue.h("div", { class: "gpu-item" }, [
+            Vue.h("span", { class: "gpu-item-name" }, g.name),
+            Vue.h("span", { class: "gpu-item-meta" },
+              g.kind === "integrated" ? "集显" : "独显"),
+          ]));
+        }
+      });
+    }
+    // 无独显且有集显时不显示引导（已有型号列表）；纯无显卡时显示引导
+    if (kind === "none" && !gpuItems.length) {
+      gpuItems.push(Vue.h("div", { class: "gpu-hint" },
+        "未检测到显卡。如需 GPU 推理与训练，可在后续「远程 GPU 连接」中配置 AutoDL 等远程服务器。"));
+    } else if (hasIntegrated || (!hasNvidia && kind === "none" && gpuItems.length === 0)) {
+      gpuItems.push(Vue.h("div", { class: "gpu-hint" },
+        "本机无 NVIDIA 独显（不支持 CUDA）。如需 GPU 推理与训练，可在后续「远程 GPU 连接」中配置 AutoDL 等远程服务器。"));
+    }
+
+    const ollama = uiState.gpuOllama;
+    const remoteConnections = (uiState.gpuConnections || []).map(function (connection) {
+      const active = uiState.gpuConnectionStatus[connection.id] || {};
+      const connected = !!active.connected;
+      const models = uiState.gpuConnectionModels[connection.id] || [];
+      return Vue.h("div", { class: "gpu-remote-item", key: connection.id }, [
+        Vue.h("div", { class: "gpu-remote-copy" }, [
+          Vue.h("strong", null, connection.name),
+          Vue.h("span", null, connection.connection_type === "direct" ? connection.base_url : connection.username + "@" + connection.host + ":" + connection.port + " → " + connection.target_port),
+          connected ? Vue.h("span", { class: "gpu-remote-online" }, "已连接") : Vue.h("span", { class: "gpu-remote-offline" }, "未连接"),
+          connection.training_runner ? Vue.h("span", { class: connection.training_runner.runner_ready ? "gpu-remote-online" : "gpu-remote-offline" },
+            connection.training_runner.runner_ready ? "远程训练器已就绪 · " + connection.training_runner.gpu_name : "远程训练器未预检") : null,
+          models.length ? Vue.h("span", { class: "gpu-remote-models" }, "模型：" + models.join("、")) : null,
+          models.length ? Vue.h("div", { class: "gpu-remote-model-actions" }, models.map(model => Vue.h("button", {
+            class: "btn-sm btn-sm-ghost", type: "button", disabled: uiState.gpuRemoteBusy,
+            onClick: () => registerGpuModel(connection.id, model),
+          }, "注册 " + model)).concat(models.map(model => Vue.h("button", {
+            class: "btn-sm btn-sm-ghost", type: "button", disabled: uiState.gpuRemoteBusy,
+            onClick: () => testGpuModel(connection.id, model),
+          }, "测试 " + model)))) : null,
+        ]),
+        Vue.h("div", { class: "gpu-remote-actions" }, [
+          Vue.h("button", { class: "btn-sm btn-sm-ghost", type: "button", disabled: uiState.gpuRemoteBusy,
+            onClick: () => connected ? disconnectGpuConnection(connection.id) : connectGpuConnection(connection.id),
+          }, connected ? "断开" : "连接"),
+          connected ? Vue.h("button", { class: "btn-sm btn-sm-ghost", type: "button", disabled: uiState.gpuRemoteBusy,
+            onClick: () => discoverGpuModels(connection.id),
+          }, "模型") : null,
+          connected && connection.connection_type === "ssh" ? Vue.h("button", { class: "btn-sm btn-sm-ghost", type: "button", disabled: uiState.gpuRemoteBusy,
+            onClick: () => preflightTrainingRunner(connection.id),
+          }, "训练预检") : null,
+          Vue.h("button", { class: "btn-sm btn-sm-ghost", type: "button", disabled: uiState.gpuRemoteBusy,
+            onClick: () => deleteGpuConnection(connection.id),
+          }, "删除"),
+        ]),
+      ]);
+    });
+    const form = uiState.gpuConnectionForm;
+    return Vue.h("section", { class: "app-settings-panel" }, [
+      _renderPanelHead("GPU 算力", "检测本机 GPU 状态，控制 GPU 算力用于推理与训练。", [
+        Vue.h("button", {
+          class: "btn-sm btn-sm-ghost",
+          type: "button",
+          disabled: uiState.gpuRefreshing || uiState.gpuBusy || uiState.gpuLoading,
+          onClick: refreshGpuStatus,
+        }, uiState.gpuRefreshing ? "检测中…" : "重新检测"),
+      ]),
+      // 开关行
+      Vue.h("label", { class: "app-setting-row" }, [
+        Vue.h("span", { class: "app-setting-copy" }, [
+          Vue.h("strong", null, "启用 GPU 算力"),
+          Vue.h("span", null, "开启后本地 GPU 优先用于推理与训练；关闭则使用云端 API 与 CPU。"),
+        ]),
+        renderSwitch(uiState.gpuEnabled, setGpuEnabled),
+      ]),
+      // 检测状态行
+      Vue.h("div", { class: "gpu-status-row" }, [
+        Vue.h("span", { class: "gpu-dot " + dotClass }),
+        Vue.h("span", { class: "gpu-status-text" },
+          uiState.gpuLoading ? "检测中…" : (gpu && gpu.message) || "尚未检测"),
+      ]),
+      // GPU 型号列表 + 引导
+      ...gpuItems,
+      // Ollama 状态
+      ollama ? Vue.h("div", { class: "gpu-ollama-row" }, [
+        Vue.h("span", { class: "gpu-dot " + (ollama.online ? "online" : "offline") }),
+        ollama.online
+          ? "本地 Ollama：在线 · " + (ollama.models || []).length + " 个模型"
+          : "本地 Ollama：未运行（可安装 Ollama 后在 LLM 模型 tab 填写模型名）",
+      ]) : null,
+      Vue.h("div", { class: "gpu-remote-section" }, [
+        Vue.h("div", { class: "gpu-remote-head" }, [
+          Vue.h("div", null, [Vue.h("strong", null, "远程 GPU 连接"), Vue.h("span", null, "通过 SSH 隧道连接到远端 OpenAI 兼容服务。")]),
+          Vue.h("button", { class: "btn-sm btn-sm-ghost", type: "button", disabled: uiState.gpuRemoteBusy,
+            onClick: loadGpuConnections,
+          }, "刷新"),
+        ]),
+        ...(remoteConnections.length ? remoteConnections : [Vue.h("div", { class: "gpu-hint" }, "尚未添加远程连接。连接密码仅保存到系统凭据库，不会写入配置文件。")]),
+        Vue.h("div", { class: "gpu-remote-form" }, [
+          Vue.h("select", { value: form.connectionType, onChange: e => { form.connectionType = e.target.value; } }, [
+            Vue.h("option", { value: "ssh" }, "SSH 隧道（推荐）"),
+            Vue.h("option", { value: "direct" }, "公网 HTTPS 端点"),
+          ]),
+          Vue.h("input", { value: form.name, placeholder: "连接名称", onInput: e => { form.name = e.target.value; } }),
+          form.connectionType === "direct" ? Vue.h("input", { value: form.baseUrl, placeholder: "https://gpu.example.com", onInput: e => { form.baseUrl = e.target.value; } }) : Vue.h("input", { value: form.host, placeholder: "SSH 主机", onInput: e => { form.host = e.target.value; } }),
+          form.connectionType === "ssh" ? Vue.h("input", { value: form.username, placeholder: "SSH 用户名", onInput: e => { form.username = e.target.value; } }) : null,
+          form.connectionType === "ssh" ? Vue.h("input", { value: form.targetPort, placeholder: "远端服务端口（如 8000）", inputmode: "numeric", onInput: e => { form.targetPort = e.target.value; } }) : null,
+          form.connectionType === "ssh" ? Vue.h("select", { value: form.authMethod, onChange: e => { form.authMethod = e.target.value; } }, [
+            Vue.h("option", { value: "agent" }, "SSH Agent / 默认密钥"),
+            Vue.h("option", { value: "password" }, "密码（保存至系统凭据库）"),
+          ]) : null,
+          form.connectionType === "ssh" && form.authMethod === "password" ? Vue.h("input", { value: form.password, type: "password", autocomplete: "new-password", placeholder: "SSH 密码", onInput: e => { form.password = e.target.value; } }) : null,
+          Vue.h("button", { class: "btn-sm btn-sm-primary", type: "button", disabled: uiState.gpuRemoteBusy,
+            onClick: createGpuConnection,
+          }, "添加安全连接"),
+        ]),
+        uiState.gpuRemoteMessage ? Vue.h("div", { class: "gpu-remote-message" }, uiState.gpuRemoteMessage) : null,
+      ]),
+    ]);
+  }
+
   function renderModel() {
     const installed = uiState.bgeInstalled;
     const downloading = uiState.bgeDownloading;
@@ -1031,57 +1271,604 @@ import { chatStream } from "../features/chat-stream.js";
     ]);
   }
   function renderLlm() {
+    /* Full interactive LLM config: built-in providers (expand/collapse, API key,
+       save/test/clear) + custom model list + add-custom form.
+       Mirrors the quick-settings modal (⚙ LLM模型) but rendered inside the
+       app-settings panel, reusing the same /api/models endpoints. */
+
+    /* ── trigger data load (once, with guard) ── */
+    if (!uiState._llmLoading && !uiState._llmLoaded) {
+      uiState._llmLoading = true;
+      loadLlmData().then(function () {
+        uiState._llmLoaded = true;
+        uiState._llmLoading = false;
+        draw();
+      });
+      // Fall through with whatever data we have (or empty) — draw() will be
+      // called again after the data arrives.
+    }
+
     const configs = state.modelConfigs || {};
-    /* Dynamic load: the "models" module updates state.modelConfigs every time
-       the settings modal saves a change, so this tab always sees the latest
-       config without an extra fetch.  We only pull when the data is stale. */
-    const providers = Object.entries(configs);
-    const hasConfigs = providers.length > 0;
-    const builtin = providers.filter(([, c]) => !c.is_custom);
-    const custom = providers.filter(([, c]) => c.is_custom);
-    const BUILTIN_LABELS = {
-      deepseek: "DeepSeek", openai: "OpenAI / ChatGPT",
-      atlascloud: "AtlasCloud", ollama: "Ollama (本地)",
+    const llmDefaults = uiState.modelDefaults || {};  // loaded by loadLlmData()
+
+    const BUILTIN_META = {
+      deepseek:   { label: "DeepSeek",         icon: "/static/Images/icon.png" },
+      openai:     { label: "OpenAI / ChatGPT", icon: "/static/Images/icon.png" },
+      atlascloud: { label: "AtlasCloud",       icon: "/static/Images/icon.png" },
+      ollama:     { label: "Ollama (本地)",     icon: "/static/Images/icon.png", local: true },
     };
+    const BUILTIN_ORDER = ["deepseek", "openai", "atlascloud", "ollama"];
 
-    const providerCard = ([key, cfg]) => {
-      const label = cfg.is_custom ? (cfg.name || cfg.model || key) : (BUILTIN_LABELS[key] || key);
-      const model = cfg.model || "—";
-      const hasKey = !!cfg.has_api_key;
-      return Vue.h("div", { class: "llm-provider-card", key }, [
-        Vue.h("div", { class: "llm-provider-head" }, [
-          Vue.h("strong", null, label),
-          Vue.h("span", { class: `llm-badge ${hasKey ? "llm-badge-ok" : "llm-badge-off"}` },
-            hasKey ? "已配置" : "未配置"),
-        ]),
-        Vue.h("div", { class: "llm-provider-body" }, [
-          Vue.h("span", null, `模型：${model}`),
-          cfg.base_url ? Vue.h("span", null, `端点：${cfg.base_url}`) : null,
-        ].filter(Boolean)),
-      ]);
-    };
+    /* ── LLM tab reactive state ────────────────────── */
+    if (!uiState._llmProviders) {
+      uiState._llmProviders = [];
+      uiState._llmCustoms = [];
+      uiState._llmFormOpen = false;
+      uiState._llmEditingKey = null;
+      uiState._llmForm = { name: "", url: "", model: "", key: "", ctx: "", output: "", inputPrice: "", outputPrice: "", think: false, budget: "8000" };
+      uiState._llmFormMsg = { err: "", ok: "" };
+      uiState._llmMsg = null;
+    }
 
-    const empty = Vue.h("div", { class: "llm-empty" }, [
-      Vue.h("p", null, "尚未配置任何 LLM 模型。"),
-      Vue.h("p", { class: "llm-empty-hint" },
-        "点击聊天界面右上角的 ⚙ 按钮打开「LLM模型」面板，即可添加内置提供商或自定义模型的 API Key。"),
-    ]);
+    /* ── build provider state from defaults + configs ── */
+    var newProviders = BUILTIN_ORDER.map(function (key) {
+      var meta = BUILTIN_META[key] || { label: key, icon: "/static/Images/icon.png" };
+      var def = llmDefaults[key] || {};
+      var cfg = configs[key] || {};
+      var hasKey = !!cfg.has_api_key;
+      var existing = (uiState._llmProviders || []).find(function (p) { return p.key === key; });
+      var wasCleared = existing && existing.hasKey && !hasKey;
+      return {
+        key: key, label: meta.label, icon: meta.icon, local: !!meta.local,
+        hasKey: hasKey, defaults: def, cfg: cfg,
+        expanded: existing ? existing.expanded : false,
+        busy: existing ? existing.busy : null,
+        fields: (existing && !wasCleared) ? existing.fields : {
+          apiKey: "", baseUrl: cfg.base_url || def.base_url || "",
+          model: cfg.model || def.model || "",
+          ctx: cfg.context_window != null ? String(cfg.context_window) : (def.context_window != null ? String(def.context_window) : ""),
+          output: cfg.max_output_tokens != null ? String(cfg.max_output_tokens) : (def.max_output_tokens != null ? String(def.max_output_tokens) : ""),
+          inputPrice: cfg.input_price_per_million != null ? String(cfg.input_price_per_million) : "",
+          outputPrice: cfg.output_price_per_million != null ? String(cfg.output_price_per_million) : "",
+          think: !!cfg.enable_thinking,
+          budget: cfg.thinking_budget != null ? String(cfg.thinking_budget) : "8000",
+        },
+      };
+    });
+    uiState._llmProviders = newProviders;
 
+    /* ── custom models ── */
+    uiState._llmCustoms = Object.entries(configs)
+      .filter(function (e) { return e[1].is_custom; })
+      .map(function (e) { var key = e[0]; var c = e[1]; return { key: key, name: c.name || "", model: c.model || "", baseUrl: c.base_url || "" }; });
+
+    /* ── render the panel ── */
     return Vue.h("section", { class: "app-settings-panel llm-settings-panel" }, [
-      _renderPanelHead("LLM模型", "管理聊天、分析、团队协作使用的 LLM 后端。通过聊天界面右上角的快捷设置面板进行配置。", null),
+      _renderPanelHead("LLM模型", "管理聊天、分析、团队协作使用的 LLM 后端。", [
+        Vue.h("button", { class: "btn-sm btn-sm-ghost", type: "button", onClick: function () { loadLlmData().then(draw); } }, "刷新"),
+        Vue.h("button", { class: "btn-sm btn-sm-primary", type: "button", onClick: function () { _llmToggleForm(); draw(); } },
+          uiState._llmFormOpen ? "收起添加表单" : "＋ 添加自定义模型"),
+      ]),
 
-      hasConfigs ? [
-        builtin.length ? Vue.h("section", { class: "llm-section" }, [
-          Vue.h("div", { class: "llm-section-title" }, "内置提供商"),
-          Vue.h("div", { class: "llm-provider-grid" }, builtin.map(providerCard)),
-        ]) : null,
-        custom.length ? Vue.h("section", { class: "llm-section" }, [
-          Vue.h("div", { class: "llm-section-title" }, "自定义模型"),
-          Vue.h("div", { class: "llm-provider-grid" }, custom.map(providerCard)),
-        ]) : null,
-      ].filter(Boolean) : empty,
+      /* ── global status banner ── */
+      uiState._llmMsg ? Vue.h("div", { class: "llm-global-msg " + (uiState._llmMsg.type || "ok") }, uiState._llmMsg.text) : null,
+
+      /* ── built-in providers ── */
+      Vue.h("section", { class: "settings-sec" }, [
+        Vue.h("div", { class: "settings-sec-title" }, "内置模型提供商"),
+        Vue.h("div", null, uiState._llmProviders.map(function (p) { return _llmProviderCard(p); })),
+      ]),
+
+      /* ── custom models ── */
+      Vue.h("section", { class: "settings-sec" }, [
+        Vue.h("div", { class: "settings-sec-title" }, "自定义模型"),
+        uiState._llmCustoms.length
+          ? Vue.h("div", null, uiState._llmCustoms.map(function (c) { return _llmCustomItem(c); }))
+          : Vue.h("div", { class: "custom-empty" }, "暂无自定义模型"),
+        _llmFormContent(),
+      ]),
     ]);
   }
+
+  /* ── LLM tab helper functions ──────────────────────── */
+
+  function loadLlmData() {
+    return Promise.all([
+      fetch("/api/models").then(function (r) { return r.json(); }),
+      fetch("/api/models/defaults").then(function (r) { return r.json(); }),
+    ]).then(function (results) {
+      state.modelConfigs = results[0];
+      uiState.modelDefaults = results[1];
+      return results;
+    });
+  }
+
+  function _llmToggleForm() {
+    uiState._llmFormOpen = !uiState._llmFormOpen;
+    uiState._llmEditingKey = null;
+    uiState._llmForm = { name: "", url: "", model: "", key: "", ctx: "", output: "", inputPrice: "", outputPrice: "", think: false, budget: "8000" };
+    uiState._llmFormMsg = { err: "", ok: "" };
+  }
+
+  function _llmEditCustom(key) {
+    var cfg = state.modelConfigs ? state.modelConfigs[key] : null;
+    if (!cfg) return;
+    uiState._llmEditingKey = key;
+    uiState._llmForm = {
+      name: cfg.name || "", url: cfg.base_url || "", model: cfg.model || "", key: "",
+      ctx: cfg.context_window != null ? String(cfg.context_window) : "",
+      output: cfg.max_output_tokens != null ? String(cfg.max_output_tokens) : "",
+      inputPrice: cfg.input_price_per_million != null ? String(cfg.input_price_per_million) : "",
+      outputPrice: cfg.output_price_per_million != null ? String(cfg.output_price_per_million) : "",
+      think: !!cfg.enable_thinking,
+      budget: cfg.thinking_budget != null ? String(cfg.thinking_budget) : "8000",
+    };
+    uiState._llmFormOpen = true;
+    uiState._llmFormMsg = { err: "", ok: "" };
+    draw();
+  }
+
+  function _llmFormContent() {
+    if (!uiState._llmFormOpen) return null;
+    var f = uiState._llmForm;
+    var m = uiState._llmFormMsg;
+    var editing = !!uiState._llmEditingKey;
+
+    return Vue.h("div", { class: "add-custom-form show" }, [
+      Vue.h("div", { class: "acf-section-title" }, editing ? "编辑自定义模型" : "添加自定义模型"),
+
+      /* ── 基本信息 ── */
+      Vue.h("div", { class: "acf-field" }, [
+        Vue.h("label", null, "供应商名称"),
+        Vue.h("input", { type: "text", placeholder: "例如 DeepSeek", value: f.name, onInput: function (e) { f.name = e.target.value; } }),
+      ]),
+      Vue.h("div", { class: "acf-field" }, [
+        Vue.h("label", null, "API Base URL"),
+        Vue.h("input", { type: "text", placeholder: "例如 https://api.deepseek.com", value: f.url, onInput: function (e) { f.url = e.target.value; } }),
+      ]),
+      Vue.h("div", { class: "acf-field" }, [
+        Vue.h("label", null, "Model ID"),
+        Vue.h("input", { type: "text", placeholder: "例如 deepseek-chat", value: f.model, onInput: function (e) { f.model = e.target.value; } }),
+      ]),
+      Vue.h("div", { class: "acf-field" }, [
+        Vue.h("label", null, "API Key"),
+        Vue.h("input", { type: "password", autocomplete: "off", "data-lpignore": "true", placeholder: editing ? "留空保留原 Key" : "输入 API Key", value: f.key, onInput: function (e) { f.key = e.target.value; } }),
+      ]),
+
+      /* ── 模型参数 ── */
+      Vue.h("div", { class: "acf-section-title" }, "模型参数"),
+      Vue.h("div", { class: "acf-row-2" }, [
+        Vue.h("div", { class: "acf-field" }, [
+          Vue.h("label", null, "上下文窗口"),
+          Vue.h("input", { type: "number", placeholder: "1000000", value: f.ctx, onInput: function (e) { f.ctx = e.target.value; } }),
+        ]),
+        Vue.h("div", { class: "acf-field" }, [
+          Vue.h("label", null, "最大输出"),
+          Vue.h("input", { type: "number", placeholder: "384000", value: f.output, onInput: function (e) { f.output = e.target.value; } }),
+        ]),
+      ]),
+
+      /* ── 价格（可选） ── */
+      Vue.h("div", { class: "acf-section-title" }, "价格（可选）"),
+      Vue.h("div", { class: "acf-row-2" }, [
+        Vue.h("div", { class: "acf-field" }, [
+          Vue.h("label", null, "输入价格"),
+          Vue.h("input", { type: "number", min: "0", step: "any", inputmode: "decimal", placeholder: "每百万 token 价格", value: f.inputPrice, onInput: function (e) { f.inputPrice = e.target.value; } }),
+        ]),
+        Vue.h("div", { class: "acf-field" }, [
+          Vue.h("label", null, "输出价格"),
+          Vue.h("input", { type: "number", min: "0", step: "any", inputmode: "decimal", placeholder: "每百万 token 价格", value: f.outputPrice, onInput: function (e) { f.outputPrice = e.target.value; } }),
+        ]),
+      ]),
+
+      /* ── 思考模式 ── */
+      Vue.h("label", { class: "acf-check-row" }, [
+        Vue.h("input", { type: "checkbox", checked: f.think, onChange: function (e) { f.think = e.target.checked; draw(); } }),
+        Vue.h("span", null, "启用思考模式"),
+      ]),
+      f.think ? Vue.h("div", { class: "acf-field" }, [
+        Vue.h("label", null, "思考预算（tokens）"),
+        Vue.h("input", { type: "number", min: "1000", max: "100000", step: "1000", value: f.budget, onInput: function (e) { f.budget = e.target.value; } }),
+      ]) : null,
+
+      /* ── 消息 ── */
+      m.err ? Vue.h("div", { class: "msg-err" }, m.err) : null,
+      m.ok  ? Vue.h("div", { class: "msg-ok" }, m.ok)   : null,
+
+      /* ── 按钮 ── */
+      Vue.h("div", { class: "acf-actions" }, [
+        Vue.h("button", { class: "btn-sm btn-sm-ghost", type: "button", onClick: function () { _llmToggleForm(); draw(); } }, "取消"),
+        Vue.h("button", { class: "btn-sm btn-sm-primary", type: "button", onClick: function () { _llmSubmitForm(); } }, editing ? "保存修改" : "添加模型"),
+      ]),
+    ]);
+  }
+
+  function _llmIsLocalUrl(url) {
+    if (!url) return false;
+    var u = String(url).toLowerCase();
+    return ["localhost", "127.0.0.1", "0.0.0.0", "[::1]", "0:0:0:0:0:0:0:1"]
+      .some(function (m) { return u.includes(m); });
+  }
+
+  function _llmProviderCard(p) {
+    var isBusy = !!p.busy;
+    var isExpanded = !!p.expanded;
+
+    var header = Vue.h("div", {
+      class: "provider-head",
+      onClick: function () { p.expanded = !isExpanded; draw(); },
+    }, [
+      Vue.h("img", { class: "provider-icon", src: p.icon, alt: p.label }),
+      Vue.h("span", { class: "provider-name" }, p.label),
+      Vue.h("span", { class: "provider-status " + (p.hasKey ? "set" : "unset") },
+        p.hasKey ? "已配置" : "未配置"),
+      Vue.h("span", { class: "provider-toggle " + (isExpanded ? "open" : "") },
+        isExpanded ? "▾" : "▸"),
+    ]);
+
+    if (!isExpanded) {
+      return Vue.h("div", { class: "provider-card collapsed", key: p.key }, [ header ]);
+    }
+
+    var isLocal = !!(p.local) || _llmIsLocalUrl(p.fields.baseUrl);
+    return Vue.h("div", { class: "provider-card expanded", key: p.key }, [
+      header,
+      Vue.h("div", { class: "provider-fields" }, [
+        _llmPfRow("API Key",
+          Vue.h("input", {
+            type: isLocal ? "text" : "password", autocomplete: "off", "data-lpignore": "true",
+            placeholder: isLocal ? "本地模型无需 API Key，可留空" : "输入 API Key",
+            value: p.fields.apiKey,
+            onInput: function (e) { p.fields.apiKey = e.target.value; },
+          })
+        ),
+        _llmPfRow("Base URL",
+          Vue.h("input", { type: "text", autocomplete: "off", placeholder: p.defaults.base_url, value: p.fields.baseUrl, onInput: function (e) { p.fields.baseUrl = e.target.value; } })
+        ),
+        _llmPfRow("模型",
+          Vue.h("input", { type: "text", autocomplete: "off", placeholder: p.defaults.model, value: p.fields.model, onInput: function (e) { p.fields.model = e.target.value; } })
+        ),
+        _llmPfRow("上下文窗口",
+          Vue.h("input", { type: "number", autocomplete: "off", placeholder: "默认 1000000", value: p.fields.ctx, onInput: function (e) { p.fields.ctx = e.target.value; } })
+        ),
+        _llmPfRow("最大输出",
+          Vue.h("input", { type: "number", autocomplete: "off", placeholder: "默认 384000", value: p.fields.output, onInput: function (e) { p.fields.output = e.target.value; } })
+        ),
+        _llmPfRow("输入价格（可选）",
+          Vue.h("input", { type: "number", min: "0", step: "any", inputmode: "decimal", placeholder: "输入价格", value: p.fields.inputPrice, onInput: function (e) { p.fields.inputPrice = e.target.value; } })
+        ),
+        _llmPfRow("输出价格（可选）",
+          Vue.h("input", { type: "number", min: "0", step: "any", inputmode: "decimal", placeholder: "输出价格", value: p.fields.outputPrice, onInput: function (e) { p.fields.outputPrice = e.target.value; } })
+        ),
+        Vue.h("div", { class: "pf-row pf-row-left" }, [
+          Vue.h("label", { style: "display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:#475569;width:auto;flex-shrink:0" }, [
+            Vue.h("input", { type: "checkbox", checked: p.fields.think, onChange: function (e) { p.fields.think = e.target.checked; draw(); } }),
+            "启用思考模式",
+          ]),
+        ]),
+        p.fields.think ? Vue.h("div", { class: "pf-row", style: "align-items:center" }, [
+          Vue.h("label", null, "思考预算（tokens）"),
+          Vue.h("input", { type: "number", min: "1000", max: "100000", step: "1000", value: p.fields.budget, onInput: function (e) { p.fields.budget = e.target.value; } }),
+        ]) : null,
+      ]),
+      Vue.h("div", { class: "provider-actions" }, [
+        Vue.h("button", { class: "btn-sm btn-sm-danger", disabled: isBusy, onClick: function (e) { e.stopPropagation(); _llmClearBuiltin(p.key); } }, "清除"),
+        Vue.h("button", { class: "btn-sm btn-sm-ghost", disabled: isBusy, onClick: function (e) { e.stopPropagation(); _llmTestModel(p.key); } },
+          p.busy === "test" ? "测试中…" : "测试"),
+        Vue.h("button", { class: "btn-sm btn-sm-primary", disabled: isBusy, onClick: function (e) { e.stopPropagation(); _llmSaveBuiltin(p.key); } },
+          p.busy === "save" ? "保存中…" : "保存"),
+      ]),
+    ]);
+  }
+
+  function _llmPfRow(labelText, inputEl) {
+    return Vue.h("div", { class: "pf-row" }, [
+      Vue.h("label", null, labelText),
+      inputEl,
+    ]);
+  }
+
+  function _llmCustomItem(c) {
+    return Vue.h("div", { class: "custom-item" }, [
+      Vue.h("span", { class: "ci-name" }, c.name || c.model || c.key),
+      Vue.h("span", { class: "ci-model" }, c.model || c.baseUrl || ""),
+      Vue.h("button", { class: "btn-sm btn-sm-ghost", onClick: function () { _llmTestModel(c.key); } }, "测试"),
+      Vue.h("button", { class: "btn-sm btn-sm-ghost", onClick: function () { _llmEditCustom(c.key); } }, "编辑"),
+      Vue.h("button", { class: "btn-sm btn-sm-danger", onClick: function () { _llmDeleteCustom(c.key); } }, "删除"),
+    ]);
+  }
+
+  /* ── LLM tab API actions ──────────────────────────── */
+
+  function _llmSetProviderBusy(key, busy) {
+    var p = uiState._llmProviders.find(function (x) { return x.key === key; });
+    if (p) { p.busy = busy || null; }
+    uiState._llmMsg = null;
+    draw();
+  }
+
+  function _llmSetProviderMsg(key, type, text) {
+    uiState._llmMsg = { type: type, text: text };
+    draw();
+  }
+
+  function _llmSaveBuiltin(key) {
+    var p = uiState._llmProviders.find(function (x) { return x.key === key; });
+    if (!p) return;
+    var f = p.fields;
+    var apiKey = f.apiKey.trim();
+    var isLocalProvider = key === "ollama" || _llmIsLocalUrl(f.baseUrl);
+    if (!apiKey && !isLocalProvider) {
+      _llmSetProviderMsg(key, "err", "请输入 API Key");
+      return;
+    }
+    _llmSetProviderBusy(key, "save");
+    _llmSetProviderMsg(key, "", "保存中…");
+    var body = { provider: key, api_key: apiKey, base_url: f.baseUrl.trim(), model: f.model.trim(), enable_thinking: f.think, thinking_budget: f.budget ? parseInt(f.budget) : 8000 };
+    if (f.ctx) body.context_window = parseInt(f.ctx);
+    if (f.output) body.max_output_tokens = parseInt(f.output);
+    body.input_price_per_million = f.inputPrice === "" ? null : Number(f.inputPrice);
+    body.output_price_per_million = f.outputPrice === "" ? null : Number(f.outputPrice);
+    fetch("/api/models/set-builtin", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        _llmSetProviderBusy(key, null);
+        if (d.ok) {
+          _llmSetProviderMsg(key, "ok", "保存成功");
+          loadLlmData().then(function () {
+            // Reset API key field after successful save
+            var p2 = uiState._llmProviders.find(function (x) { return x.key === key; });
+            if (p2) { p2.fields.apiKey = ""; }
+            draw();
+          });
+        } else {
+          _llmSetProviderMsg(key, "err", d.error || "保存失败");
+        }
+      })
+      .catch(function (e) {
+        _llmSetProviderBusy(key, null);
+        _llmSetProviderMsg(key, "err", "网络错误: " + (e.message || "unknown"));
+      });
+  }
+
+  function _llmClearBuiltin(key) {
+    var label = (BUILTIN_META[key] || {}).label || key;
+    if (!window.BAA.ui || !window.BAA.ui.confirm) {
+      fetch("/api/models/clear", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider: key }) })
+        .then(function () { return loadLlmData(); }).then(draw);
+      return;
+    }
+    window.BAA.ui.confirm({ title: "确认", message: "清除 " + label + " 的 API Key 和配置？此操作不可恢复。", danger: true })
+      .then(function (ok) {
+        if (!ok) return;
+        return fetch("/api/models/clear", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider: key }) })
+          .then(function () { return loadLlmData(); }).then(draw);
+      });
+  }
+
+  function _llmTestModel(key) {
+    var p = uiState._llmProviders.find(function (x) { return x.key === key; });
+    if (!p) {
+      // Test a custom model
+      fetch("/api/models/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider: key }) })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          if (d.success) {
+            uiState._llmMsg = { type: "ok", text: (d.model || key) + " 连接成功" };
+          } else {
+            uiState._llmMsg = { type: "err", text: d.message || d.error || "连接失败" };
+          }
+          draw();
+        });
+      return;
+    }
+    _llmSetProviderBusy(key, "test");
+    fetch("/api/models/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider: key, base_url: p.fields.baseUrl.trim(), model: p.fields.model.trim(), api_key: p.fields.apiKey.trim() }) })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        _llmSetProviderBusy(key, null);
+        if (d.success) {
+          _llmSetProviderMsg(key, "ok", (d.model || key) + " 连接成功");
+        } else {
+          _llmSetProviderMsg(key, "err", d.message || d.error || "连接失败");
+        }
+      })
+      .catch(function (e) {
+        _llmSetProviderBusy(key, null);
+        _llmSetProviderMsg(key, "err", "网络错误: " + (e.message || "unknown"));
+      });
+  }
+
+  function _llmDeleteCustom(key) {
+    if (!window.BAA.ui || !window.BAA.ui.confirm) {
+      fetch("/api/models/delete", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider: key }) })
+        .then(function () { return loadLlmData(); }).then(draw);
+      return;
+    }
+    window.BAA.ui.confirm({ title: "确认", message: "删除自定义模型 " + key + "？此操作不可恢复。", danger: true })
+      .then(function (ok) {
+        if (!ok) return;
+        return fetch("/api/models/delete", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider: key }) })
+          .then(function () { return loadLlmData(); }).then(draw);
+      });
+  }
+
+  function _llmSubmitForm() {
+    var f = uiState._llmForm;
+    var editingKey = uiState._llmEditingKey;
+    var ctxRaw = (f.ctx || "").trim();
+    var outRaw = (f.output || "").trim();
+    var budgetRaw = (f.budget || "").trim();
+    var inputPriceRaw = (f.inputPrice || "").trim();
+    var outputPriceRaw = (f.outputPrice || "").trim();
+    uiState._llmFormMsg = { err: "", ok: "" };
+
+    if (editingKey) {
+      var body = { provider: editingKey, base_url: f.url.trim(), model_name: f.model.trim(), api_key: f.key.trim(), enable_thinking: f.think, thinking_budget: budgetRaw ? parseInt(budgetRaw) : 8000 };
+      if (ctxRaw) body.context_window = parseInt(ctxRaw);
+      if (outRaw) body.max_output_tokens = parseInt(outRaw);
+      body.input_price_per_million = inputPriceRaw === "" ? null : Number(inputPriceRaw);
+      body.output_price_per_million = outputPriceRaw === "" ? null : Number(outputPriceRaw);
+      fetch("/api/models/update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          if (d.error) { uiState._llmFormMsg = { err: d.error, ok: "" }; draw(); return; }
+          uiState._llmFormMsg = { err: "", ok: d.message || "保存成功" };
+          uiState._llmEditingKey = null;
+          loadLlmData().then(function () { draw(); });
+          setTimeout(function () { uiState._llmFormOpen = false; draw(); }, 1200);
+        });
+      return;
+    }
+
+    var data = { name: f.name.trim(), base_url: f.url.trim(), model_name: f.model.trim(), api_key: f.key.trim(), enable_thinking: f.think, thinking_budget: budgetRaw ? parseInt(budgetRaw) : 8000 };
+    if (ctxRaw) data.context_window = parseInt(ctxRaw);
+    if (outRaw) data.max_output_tokens = parseInt(outRaw);
+    if (inputPriceRaw || outputPriceRaw) {
+      data.input_price_per_million = inputPriceRaw === "" ? null : Number(inputPriceRaw);
+      data.output_price_per_million = outputPriceRaw === "" ? null : Number(outputPriceRaw);
+    }
+    fetch("/api/models/add", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d.error) { uiState._llmFormMsg = { err: d.error, ok: "" }; draw(); return; }
+        uiState._llmFormMsg = { err: "", ok: d.message || "添加成功" };
+        loadLlmData().then(function () { draw(); });
+        setTimeout(function () { uiState._llmFormOpen = false; draw(); }, 1200);
+      });
+  }
+
+  /* ── end LLM tab ─────────────────────────────────── */
+  function renderFeishuBot() {
+    const bot = uiState.feishuBot || {};
+    const configured = !!bot.configured;
+    const credentialsReady = !!bot.app_id && !!bot.app_secret_configured;
+    const statusLabel = configured
+      ? (bot.enabled ? "已连接，发送已启用" : "已连接，发送已暂停")
+      : (credentialsReady ? "应用凭据已保存，待选择目标群" : "尚未配置");
+    return Vue.h("section", { class: "app-settings-panel feishu-bot-panel" }, [
+      _renderPanelHead("飞书渠道", "使用 App ID 与 App Secret 连接飞书应用机器人，将分析结论安全同步到协作群。", [
+        Vue.h("button", {
+          class: "btn-sm btn-sm-ghost", type: "button", disabled: uiState.feishuBotLoading,
+          onClick: loadFeishuBot,
+        }, "重新加载"),
+        Vue.h("button", {
+          class: "btn-sm btn-sm-primary", type: "button", disabled: uiState.feishuBotLoading,
+          onClick: saveFeishuBot,
+        }, uiState.feishuBotLoading ? "保存中…" : "保存配置"),
+      ]),
+      Vue.h("div", { class: `feishu-bot-connection ${configured ? "configured" : "empty"}`, "aria-live": "polite" }, [
+        Vue.h("span", { class: "feishu-bot-connection-dot", "aria-hidden": "true" }),
+        Vue.h("div", { class: "feishu-bot-connection-copy" }, [
+          Vue.h("strong", null, statusLabel),
+          Vue.h("span", null, configured
+            ? `应用 ${bot.app_id_masked || "已配置"} · 目标 ${bot.receive_id_masked || "已配置"}`
+            : "保存应用凭据与目标群 chat_id 后，可通过应用机器人发送消息。"),
+        ]),
+        Vue.h("button", {
+          class: "btn-sm btn-sm-ghost", type: "button",
+          disabled: uiState.feishuBotLoading || !configured,
+          onClick: testFeishuBot,
+        }, "测试连接"),
+      ]),
+      Vue.h("label", { class: "app-setting-row" }, [
+        Vue.h("span", { class: "app-setting-copy" }, [
+          Vue.h("strong", null, "允许发送分析结果"),
+          Vue.h("span", null, "关闭后会保留连接信息，但项目不会向飞书群发送新的分析消息。"),
+        ]),
+        renderSwitch(!!bot.enabled, enabled => { uiState.feishuBot.enabled = enabled; draw(); }),
+      ]),
+      Vue.h("div", { class: "feishu-bot-form" }, [
+        Vue.h("label", { for: "feishu-bot-app-id" }, "App ID"),
+        Vue.h("input", {
+          id: "feishu-bot-app-id", type: "text", autocomplete: "off", spellcheck: "false",
+          value: uiState.feishuBot.app_id || "", placeholder: "cli_xxxxxxxxxxxxxxxx",
+          onInput: event => { uiState.feishuBot.app_id = event.target.value; },
+        }),
+        Vue.h("label", { for: "feishu-bot-app-secret" }, "App Secret"),
+        Vue.h("input", {
+          id: "feishu-bot-app-secret", type: "password", autocomplete: "new-password", spellcheck: "false",
+          value: uiState.feishuBotAppSecretDraft, placeholder: bot.app_secret_configured ? "已安全保存；留空可保留" : "输入 App Secret",
+          onInput: event => { uiState.feishuBotAppSecretDraft = event.target.value; },
+        }),
+        Vue.h("p", null, bot.app_secret_configured
+          ? "App Secret 已保存于系统凭据库，留空保存会保留当前凭据。"
+          : "App Secret 只会保存到系统凭据库，不会写入项目配置或显示在页面中。"),
+        Vue.h("label", { for: "feishu-bot-inbound-transport" }, "机器人入站方式"),
+        Vue.h("select", {
+          id: "feishu-bot-inbound-transport", value: bot.inbound_transport || "long_connection",
+          onChange: event => { uiState.feishuBot.inbound_transport = event.target.value; draw(); },
+        }, [
+          Vue.h("option", { value: "long_connection" }, "长连接（本地优先，无需公网 URL）"),
+          Vue.h("option", { value: "webhook" }, "Webhook（服务器部署备用）"),
+        ]),
+        bot.inbound_transport === "webhook" ? Vue.h("div", { class: "feishu-bot-webhook-fields" }, [
+          Vue.h("label", { for: "feishu-bot-verification-token" }, "事件校验 Token"),
+          Vue.h("input", {
+            id: "feishu-bot-verification-token", type: "password", autocomplete: "new-password", spellcheck: "false",
+            value: uiState.feishuBotVerificationTokenDraft,
+            placeholder: bot.event_verification_token_configured ? "已安全保存；留空可保留" : "在飞书事件订阅中生成",
+            onInput: event => { uiState.feishuBotVerificationTokenDraft = event.target.value; },
+          }),
+          Vue.h("p", null, bot.event_verification_token_configured
+            ? "事件校验 Token 已保存于系统凭据库。事件回调路径为 /api/feishu-bot/events。"
+            : "填写 Token，并把公开 HTTPS 地址 + /api/feishu-bot/events 填入飞书“事件与回调”。"),
+        ]) : Vue.h("p", null, "本机主动连接飞书即可接收群内 @机器人 消息；在飞书后台选择“使用长连接接收事件”，无需填写公网回调地址。"),
+        Vue.h("div", { class: "feishu-bot-target-head" }, [
+          Vue.h("label", { for: "feishu-bot-chat" }, "目标群"),
+          Vue.h("button", {
+            class: "btn-sm btn-sm-ghost", type: "button",
+            disabled: uiState.feishuBotLoading || uiState.feishuBotChatsLoading || !credentialsReady,
+            onClick: loadFeishuChats,
+          }, uiState.feishuBotChatsLoading ? "读取中…" : "刷新群列表"),
+        ]),
+        Vue.h("select", {
+          id: "feishu-bot-chat", value: bot.receive_id || "",
+          disabled: !credentialsReady || uiState.feishuBotChatsLoading,
+          onChange: event => { uiState.feishuBot.receive_id_type = "chat_id"; uiState.feishuBot.receive_id = event.target.value; draw(); },
+        }, [
+          Vue.h("option", { value: "" }, credentialsReady ? "请选择机器人已加入的群" : "请先保存 App ID 与 App Secret"),
+          ...(uiState.feishuBotChats || []).map(chat => Vue.h("option", { value: chat.chat_id, key: chat.chat_id }, chat.name)),
+        ]),
+        Vue.h("p", null, uiState.feishuBotChatsStatus || "不需要手动填写 chat_id；项目会读取应用机器人已加入的群。"),
+      ]),
+      Vue.h("details", { class: "feishu-bot-guide" }, [
+        Vue.h("summary", null, "如何完成飞书应用机器人配置"),
+        Vue.h("ol", null, [
+          Vue.h("li", null, "在飞书开放平台创建或打开应用机器人，复制 App ID 与 App Secret。"),
+          Vue.h("li", null, "开通发送消息和获取群组信息权限，并将该机器人加入目标飞书群。"),
+          Vue.h("li", null, "保存凭据后，从自动读取的群列表选择目标群，再点击“测试连接”。"),
+          Vue.h("li", null, "本地使用时，在“事件与回调”选择“使用长连接接收事件”并订阅“接收消息”；服务器可改为 Webhook，填写公开 HTTPS 地址 /api/feishu-bot/events 和事件校验 Token。"),
+        ]),
+      ]),
+      uiState.feishuBotStatus
+        ? Vue.h("div", { class: `app-hooks-status app-hooks-status-${uiState.feishuBotStatusType}`, role: "status" }, uiState.feishuBotStatus)
+        : null,
+    ]);
+  }
+
+  function renderBots() {
+    const channel = uiState.botChannel || "feishu";
+    return Vue.h("div", { class: "bots-settings-stack" }, [
+      Vue.h("section", { class: "app-settings-panel bots-overview-panel" }, [
+        _renderPanelHead("机器人", "集中管理协作平台机器人。每个渠道独立保存凭据、收发策略与会话连接。", null),
+        Vue.h("div", { class: "bot-channel-tabs", role: "tablist", "aria-label": "机器人渠道" }, [
+          Vue.h("button", {
+            class: `bot-channel-tab${channel === "feishu" ? " active" : ""}`,
+            type: "button", role: "tab", "aria-selected": String(channel === "feishu"),
+            onClick: () => { uiState.botChannel = "feishu"; draw(); loadFeishuBot(); },
+          }, [Vue.h("span", { "aria-hidden": "true" }, "飞"), Vue.h("span", null, "飞书")]),
+          Vue.h("button", {
+            class: "bot-channel-tab", type: "button", disabled: true,
+            title: "微信渠道正在规划，尚未接入。",
+          }, [Vue.h("span", { "aria-hidden": "true" }, "微"), Vue.h("span", null, "微信（规划中）")]),
+        ]),
+        Vue.h("p", { class: "bots-overview-hint" }, "当前可用：飞书应用机器人。后续接入微信时，不会影响已保存的飞书连接或会话绑定。"),
+      ]),
+      channel === "feishu" ? renderFeishuBot() : null,
+    ]);
+  }
+
   function renderHooks() {
     const hint = "示例条件：tool == 'query_data' && args.sql contains 'DROP'";
     return Vue.h("section", { class: "app-settings-panel app-hooks-panel" }, [
@@ -2242,25 +3029,34 @@ import { chatStream } from "../features/chat-stream.js";
     if (!root) return;
     const tabs = [
       ["general", "通用"],
-      ["model", "知识库检索"],
       ["llm", "LLM模型"],
+      ["model", "知识库检索"],
+      ["gpu", "GPU算力", "规划中"],
       ["memory", "记忆"],
+      ["bots", "机器人"],
       ["hooks", "Hooks"],
       ["storage", "存储"],
     ];
     Vue.render(Vue.h("div", { class: "app-settings-layout" }, [
-      Vue.h("aside", { class: "app-settings-nav", "aria-label": "Settings sections" }, tabs.map(([id, label]) =>
+      Vue.h("aside", { class: "app-settings-nav", "aria-label": "Settings sections" }, tabs.map(([id, label, status]) =>
         Vue.h("button", {
-          class: `app-settings-nav-item${uiState.tab === id ? " active" : ""}`,
+          class: `app-settings-nav-item${uiState.tab === id ? " active" : ""}${status ? " is-planned" : ""}`,
           type: "button",
-          onClick: () => { uiState.tab = id; draw(); if (id === "storage") loadLifecycle(); if (id === "memory") loadMemory(); },
-        }, label)
+          disabled: Boolean(status),
+          title: status ? `${label}${status}` : label,
+          onClick: () => { uiState.tab = id; draw(); if (id === "storage") loadLifecycle(); if (id === "memory") loadMemory(); if (id === "gpu") { loadGpuStatus(); loadGpuConnections(); } if (id === "bots") loadFeishuBot(); },
+        }, [
+          Vue.h("span", { class: "app-settings-nav-label" }, label),
+          status ? Vue.h("span", { class: "app-settings-nav-status" }, status) : null,
+        ])
       )),
       uiState.tab === "storage" ? renderStorage()
         : uiState.tab === "hooks" ? renderHooks()
+        : uiState.tab === "bots" ? renderBots()
         : uiState.tab === "memory" ? renderMemory()
         : uiState.tab === "model" ? renderModel()
         : uiState.tab === "llm" ? renderLlm()
+        : uiState.tab === "gpu" ? renderGpu()
         : renderGeneral(),
     ]), root);
   }
@@ -2288,6 +3084,16 @@ import { chatStream } from "../features/chat-stream.js";
       customHookName: "",
       customHookNames: {},
       testEvent: "turn_start",
+      feishuBot: { enabled: false, configured: false, app_id: "", app_id_masked: "", app_secret_configured: false, event_verification_token_configured: false, inbound_transport: "long_connection", receive_id_type: "chat_id", receive_id: "", receive_id_masked: "", updated_at: "" },
+      feishuBotAppSecretDraft: "",
+      feishuBotVerificationTokenDraft: "",
+      feishuBotLoading: false,
+      feishuBotChats: [],
+      feishuBotChatsLoading: false,
+      feishuBotChatsStatus: "",
+      feishuBotStatus: "",
+      feishuBotStatusType: "ok",
+      botChannel: "feishu",
       bgeInstalled: false,
       bgeNeural: false,
       bgeDownloading: false,
@@ -2347,15 +3153,185 @@ import { chatStream } from "../features/chat-stream.js";
       memoryForm: { name: "", scope: "user", title: "", body: "", why: "", how_to_apply: "" },
       memoryFormMsg: { err: "", ok: "" },
       memoryActivity: [],
+      // GPU 算力（G1）
+      gpuStatus: null,
+      gpuOllama: null,
+      gpuEnabled: true,
+      gpuLoading: false,
+      gpuRefreshing: false,
+      gpuBusy: false,
+      gpuConnections: [],
+      gpuConnectionStatus: {},
+      gpuConnectionModels: {},
+      gpuRemoteBusy: false,
+      gpuRemoteMessage: "",
+      gpuConnectionForm: { connectionType: "ssh", name: "", host: "", username: "", targetPort: "8000", baseUrl: "", authMethod: "agent", password: "" },
     });
     draw = renderApp;
     draw();
     loadHooks();
     loadEmbedMode();
     loadCloudConfig();
+    loadGpuStatus();
+    loadGpuConnections();
   }
 
   document.addEventListener("DOMContentLoaded", init);
+
+  // ── GPU 算力（G1/G2）──────────────────────────────────────────
+  async function loadGpuStatus() {
+    if (!uiState) return;
+    if (uiState.gpuLoading) return;
+    uiState.gpuLoading = true;
+    draw();
+    try {
+      const resp = await fetch("/api/gpu/status");
+      const data = await resp.json();
+      uiState.gpuStatus = data.gpu || null;
+      uiState.gpuOllama = data.ollama || null;
+      uiState.gpuEnabled = !!data.enabled;
+    } catch (err) {
+      uiState.gpuStatus = { kind: "none", gpus: [], message: "GPU 状态获取失败" };
+    }
+    uiState.gpuLoading = false;
+    draw();
+  }
+
+  async function refreshGpuStatus() {
+    if (!uiState || uiState.gpuRefreshing || uiState.gpuBusy) return;
+    uiState.gpuRefreshing = true;
+    draw();
+    try {
+      const resp = await fetch("/api/gpu/status");
+      const data = await resp.json();
+      uiState.gpuStatus = data.gpu || null;
+      uiState.gpuOllama = data.ollama || null;
+      uiState.gpuEnabled = !!data.enabled;
+    } catch (err) {
+      /* 保持旧状态 */
+    }
+    uiState.gpuRefreshing = false;
+    draw();
+  }
+
+  async function setGpuEnabled(enabled) {
+    if (!uiState || uiState.gpuBusy) return;
+    uiState.gpuBusy = true;
+    draw();
+    try {
+      await fetch("/api/gpu/enabled", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      });
+      uiState.gpuEnabled = !!enabled;
+    } catch (err) {
+      /* 保持原状态 */
+    }
+    uiState.gpuBusy = false;
+    draw();
+  }
+
+  async function _gpuRequest(url, options) {
+    const response = await fetch(url, options);
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.message || "操作失败");
+    return data;
+  }
+
+  async function loadGpuConnections() {
+    if (!uiState) return;
+    try {
+      const data = await _gpuRequest("/api/gpu/connections");
+      uiState.gpuConnections = data.connections || [];
+      await Promise.all(uiState.gpuConnections.map(async connection => {
+        const status = await _gpuRequest("/api/gpu/connections/" + connection.id + "/status");
+        uiState.gpuConnectionStatus[connection.id] = status;
+      }));
+      uiState.gpuRemoteMessage = "";
+    } catch (err) { uiState.gpuRemoteMessage = err.message || "读取连接失败"; }
+    draw();
+  }
+
+  async function createGpuConnection() {
+    if (!uiState || uiState.gpuRemoteBusy) return;
+    uiState.gpuRemoteBusy = true;
+    try {
+      const form = uiState.gpuConnectionForm;
+      await _gpuRequest("/api/gpu/connections", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+        connection_type: form.connectionType, name: form.name, base_url: form.baseUrl, host: form.host, username: form.username, target_port: form.targetPort,
+        auth_method: form.authMethod, password: form.password,
+      }) });
+      uiState.gpuConnectionForm = { connectionType: "ssh", name: "", host: "", username: "", targetPort: "8000", baseUrl: "", authMethod: "agent", password: "" };
+      await loadGpuConnections();
+    } catch (err) { uiState.gpuRemoteMessage = err.message || "添加连接失败"; }
+    uiState.gpuRemoteBusy = false;
+    draw();
+  }
+
+  async function connectGpuConnection(id) {
+    if (!uiState || uiState.gpuRemoteBusy) return;
+    uiState.gpuRemoteBusy = true;
+    try {
+      try { await _gpuRequest("/api/gpu/connections/" + id + "/connect", { method: "POST" }); }
+      catch (err) {
+        if (!String(err.message).includes("主机尚未确认")) throw err;
+        const inspected = await _gpuRequest("/api/gpu/connections/" + id + "/host-key", { method: "POST" });
+        const key = inspected.host_key;
+        if (!window.confirm("请核对 SSH 主机指纹后确认：\n" + key.fingerprint)) throw new Error("未确认 SSH 主机指纹");
+        await _gpuRequest("/api/gpu/connections/" + id + "/trust-host-key", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key_type: key.type, key_base64: key.base64 }) });
+        await _gpuRequest("/api/gpu/connections/" + id + "/connect", { method: "POST" });
+      }
+      await loadGpuConnections();
+    } catch (err) { uiState.gpuRemoteMessage = err.message || "连接失败"; }
+    uiState.gpuRemoteBusy = false;
+    draw();
+  }
+
+  async function disconnectGpuConnection(id) { await _gpuRequest("/api/gpu/connections/" + id + "/disconnect", { method: "POST" }); await loadGpuConnections(); }
+  async function deleteGpuConnection(id) { if (window.confirm("删除此远程连接？")) { await _gpuRequest("/api/gpu/connections/" + id, { method: "DELETE" }); await loadGpuConnections(); } }
+  async function discoverGpuModels(id) {
+    try { const data = await _gpuRequest("/api/gpu/connections/" + id + "/models"); uiState.gpuConnectionModels[id] = data.models || []; }
+    catch (err) { uiState.gpuRemoteMessage = err.message || "模型发现失败"; }
+    draw();
+  }
+  async function registerGpuModel(id, model) {
+    if (!uiState || uiState.gpuRemoteBusy) return;
+    uiState.gpuRemoteBusy = true;
+    try {
+      const data = await _gpuRequest("/api/gpu/connections/" + id + "/models/register", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model }),
+      });
+      uiState.gpuRemoteMessage = data.message || "模型已注册";
+    } catch (err) { uiState.gpuRemoteMessage = err.message || "模型注册失败"; }
+    uiState.gpuRemoteBusy = false;
+    draw();
+  }
+  async function testGpuModel(id, model) {
+    if (!uiState || uiState.gpuRemoteBusy) return;
+    uiState.gpuRemoteBusy = true;
+    uiState.gpuRemoteMessage = "正在验证 " + model + " 的实际推理…";
+    draw();
+    try {
+      const data = await _gpuRequest("/api/gpu/connections/" + id + "/models/test", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model }),
+      });
+      uiState.gpuRemoteMessage = data.message + (data.reply ? "：" + data.reply : "");
+    } catch (err) { uiState.gpuRemoteMessage = err.message || "模型推理测试失败"; }
+    uiState.gpuRemoteBusy = false;
+    draw();
+  }
+  async function preflightTrainingRunner(id) {
+    if (!uiState || uiState.gpuRemoteBusy) return;
+    uiState.gpuRemoteBusy = true;
+    try {
+      const data = await _gpuRequest("/api/gpu/connections/" + id + "/training/preflight", { method: "POST" });
+      uiState.gpuRemoteMessage = "远程训练器已就绪：" + (data.training_runner.gpu_name || "CUDA GPU");
+      await loadGpuConnections();
+    } catch (err) { uiState.gpuRemoteMessage = err.message || "远程训练器预检失败"; }
+    uiState.gpuRemoteBusy = false;
+    draw();
+  }
 
   export {
     init,
@@ -2373,4 +3349,7 @@ import { chatStream } from "../features/chat-stream.js";
     loadCloudConfig,
     saveCloudConfig,
     clearCloudToken,
+    loadGpuStatus,
+    refreshGpuStatus,
+    setGpuEnabled,
   };

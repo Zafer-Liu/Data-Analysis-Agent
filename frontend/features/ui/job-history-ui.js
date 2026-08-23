@@ -179,7 +179,8 @@ export function mountJobHistoryUi() {
 
   function renderJob(job) {
     const terminal = ["succeeded", "failed", "canceled"].includes(job.status);
-    const canCancel = !terminal && job.status !== "canceling" && job.type !== "filehistory_rewind";
+    const canCancel = !terminal && job.status !== "canceling"
+      && job.type !== "filehistory_rewind" && job.type !== "memory_extraction";
     const progress = Math.max(0, Math.min(100, Number(job.progress) || 0));
     const title = job.label || job.type || text("job.default_label", "Background job");
     const isConversation = job.type === "conversation_analysis";
@@ -310,7 +311,7 @@ export function mountJobHistoryUi() {
     requestAnimationFrame(() => {
       const escaped = globalThis.CSS?.escape
         ? globalThis.CSS.escape(state.focusJobId)
-        : state.focusJobId.replace(/["\\]/g, "\\  function setOpen(open) { state.open = Boolean(open); draw(); }");
+        : state.focusJobId.replace(/["\\]/g, "\\$&");
       root.querySelector(`[data-job-id="${escaped}"]`)?.scrollIntoView({
         block: "center",
         behavior: "smooth",

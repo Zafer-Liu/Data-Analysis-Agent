@@ -37,7 +37,7 @@ def _settings_path() -> Path:
 
 
 def load_lifecycle_settings() -> dict[str, Any]:
-    defaults = {"retention_preset": "custom", "retention_custom_days": 30}
+    defaults = {"retention_preset": "forever", "retention_custom_days": 30}
     path = _settings_path()
     if not path.exists():
         return defaults
@@ -57,7 +57,7 @@ def load_lifecycle_settings() -> dict[str, Any]:
 
 
 def save_lifecycle_settings(settings: dict[str, Any]) -> dict[str, Any]:
-    preset = str(settings.get("retention_preset") or "custom")
+    preset = str(settings.get("retention_preset") or "forever")
     if preset not in {"7", "14", "forever", "custom"}:
         raise ValueError("保留策略无效")
     try:
@@ -95,10 +95,45 @@ def register_session_file(path: Path, *, session_id: str, autosave: bool) -> Non
     })
 
 
-def soft_delete_session_group(session_dir: Path, filename: str) -> dict[str, Any]:
-    """Move a saved session and same-session autosaves to the managed trash.
+def _session_owned_artifacts(session_id: str, exclude_files: set[Path]) -> list[dict[str, Any]]:
+    """Active registry artifacts owned by this session that no OTHER saved
+    session references (the archived session's own files are excluded from the
+    reference corpus so its self-references do not block the archive)."""
+    if not session_id:
+        return []
+    corpus, _ = _artifact_reference_corpus(exclude_files=exclude_files)
+    data_root = data_path().resolve(strict=False)
+    with _LOCK:
+        items = _load_registry()
+    owned: list[dict[str, Any]] = []
+    for item in _active_registry_items(items):
+        if str(item.get("session_id") or "") != session_id:
+            continue
+        if str(item.get("type") or "") not in {"chart", "export", "report", "upload"}:
+            continue
+        relative = str(item.get("path") or "")
+        if not relative or not (data_root / relative).is_file():
+            continue
+        tokens = _artifact_reference_tokens(item)
+        if any(token and token in corpus for token in tokens):
+            continue
+        owned.append({
+            "registry_id": str(item.get("id") or ""),
+            "type": str(item.get("type") or ""),
+            "filename": Path(relative).name,
+            "relative_path": relative.replace("\\", "/"),
+            "size_bytes": int(item.get("size_bytes") or 0),
+        })
+    return owned
+
+
+def soft_delete_session_group(session_dir: Path, filename: str, *, archive_artifacts: bool = True) -> dict[str, Any]:
+    """Move a saved session, same-session autosaves and the session's own
+    artifacts into the managed trash as one recoverable group.
 
     Files without a readable matching session id are deliberately left in place.
+    Artifacts (charts / exports / reports / uploads) owned by this session are
+    archived together only when no other active saved session references them.
     The returned summary is safe for an API response and audit log.
     """
     root = session_dir.resolve(strict=False)
@@ -123,9 +158,12 @@ def soft_delete_session_group(session_dir: Path, filename: str) -> dict[str, Any
             if str(data.get("session_id") or "").strip() == session_id and bool(data.get("autosave")):
                 candidates.append(path)
 
+    owned_artifacts = _session_owned_artifacts(session_id, set(candidates)) if (archive_artifacts and session_id) else []
+
     trash = data_path("outputs", ".trash", "sessions", f"{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex}")
     moved: list[dict[str, Any]] = []
     failed: list[dict[str, str]] = []
+    moved_artifacts: list[dict[str, Any]] = []
     with _LOCK:
         trash.mkdir(parents=True, exist_ok=False)
         for path in candidates:
@@ -135,24 +173,52 @@ def soft_delete_session_group(session_dir: Path, filename: str) -> dict[str, Any
                 moved.append({"filename": path.name, "size_bytes": destination.stat().st_size})
             except OSError as exc:
                 failed.append({"filename": path.name, "error": str(exc)})
+
+        data_root = data_path().resolve(strict=False)
+        for artifact in owned_artifacts:
+            relative = artifact["relative_path"]
+            source_path = (data_root / relative).resolve(strict=False)
+            artifact_filename = f"{artifact['registry_id'].replace(':', '_')}__{artifact['filename']}"
+            destination = (trash / "artifacts" / artifact_filename).resolve(strict=False)
+            if not source_path.is_file() or not _within(source_path, data_root) or not _within(destination, trash):
+                failed.append({"filename": artifact_filename, "error": "产物路径无效"})
+                continue
+            try:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(source_path, destination)
+                moved_artifacts.append({**artifact, "moved_filename": artifact_filename})
+            except OSError as exc:
+                failed.append({"filename": artifact_filename, "error": str(exc)})
+
+        if moved_artifacts:
+            items = _load_registry()
+            for artifact in moved_artifacts:
+                rid = artifact["registry_id"]
+                if rid in items:
+                    items[rid]["status"] = "archived"
+                    items[rid]["trash_id"] = trash.name
+            _save_registry(items)
+
         manifest = {
             "kind": "saved_session",
             "deleted_at": _now(),
             "session_id": session_id,
             "source_filename": target.name,
             "files": moved,
+            "artifacts": moved_artifacts,
             "failed": failed,
         }
         (trash / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
     summary = {
         "deleted": [item["filename"] for item in moved],
+        "archived_artifacts": [item["filename"] for item in moved_artifacts],
         "retained": [],
-        "pending_reclaim": [item["filename"] for item in moved],
+        "pending_reclaim": [item["filename"] for item in moved] + [item["filename"] for item in moved_artifacts],
         "failed": failed,
         "trash_id": trash.name,
     }
-    _record("session_soft_deleted", {"session_id": session_id, **summary})
+    _record("session_soft_deleted", {"session_id": session_id, "archived_artifacts": len(moved_artifacts), **summary})
     return summary
 
 
@@ -210,9 +276,11 @@ def lifecycle_report() -> dict[str, Any]:
         "session_trash": data_path("outputs", ".trash", "sessions"),
         "artifact_trash": data_path("outputs", ".trash", "artifacts"),
         "upload_trash": data_path("outputs", ".trash", "uploads"),
+        "memory_trash": data_path("outputs", ".trash", "memories"),
         "uploads": data_path("uploads"),
         "charts": data_path("outputs", "charts"),
         "exports": data_path("outputs", "exports"),
+        "memories": data_path("memory"),
     }
     report: dict[str, Any] = {"locations": {}, "total_files": 0, "total_bytes": 0}
     for name, root in locations.items():
@@ -249,13 +317,16 @@ def list_session_trash() -> list[dict[str, Any]]:
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             files = manifest.get("files") or []
+            artifacts = manifest.get("artifacts") or []
             items.append({
                 "id": group.name,
                 "deleted_at": str(manifest.get("deleted_at") or ""),
                 "source_filename": str(manifest.get("source_filename") or ""),
                 "session_id": str(manifest.get("session_id") or ""),
                 "files": len(files),
-                "bytes": sum(int(item.get("size_bytes") or 0) for item in files if isinstance(item, dict)),
+                "artifacts": len(artifacts) if isinstance(artifacts, list) else 0,
+                "bytes": sum(int(item.get("size_bytes") or 0) for item in files if isinstance(item, dict))
+                    + sum(int(item.get("size_bytes") or 0) for item in artifacts if isinstance(item, dict)),
             })
         except (OSError, ValueError, json.JSONDecodeError):
             log.warning("[lifecycle] skip invalid trash group: %s", group.name)
@@ -263,7 +334,8 @@ def list_session_trash() -> list[dict[str, Any]]:
 
 
 def restore_session_trash(trash_id: str) -> dict[str, Any]:
-    """Restore a soft-deleted session group only when no target file conflicts."""
+    """Restore a soft-deleted session group (session JSON + autosaves + archived
+    artifacts) only when no target file conflicts."""
     if not trash_id or Path(trash_id).name != trash_id:
         raise FileNotFoundError(trash_id)
     root = _session_trash_root()
@@ -278,10 +350,13 @@ def restore_session_trash(trash_id: str) -> dict[str, Any]:
         raise ValueError("回收站项目已损坏，无法恢复") from exc
     if not isinstance(files, list) or not files:
         raise ValueError("回收站项目不包含可恢复文件")
+    artifacts = manifest.get("artifacts") or []
+    if not isinstance(artifacts, list):
+        artifacts = []
 
     session_dir = data_path("outputs", "Session")
     session_dir.mkdir(parents=True, exist_ok=True)
-    sources: list[tuple[Path, Path]] = []
+    sources: list[tuple[Path, Path, str, str]] = []  # (source, destination, kind, registry_id)
     for item in files:
         name = str(item.get("filename") or "") if isinstance(item, dict) else ""
         source = (group / Path(name).name).resolve(strict=False)
@@ -290,14 +365,38 @@ def restore_session_trash(trash_id: str) -> dict[str, Any]:
             raise ValueError("回收站项目包含无效文件")
         if destination.exists():
             raise ValueError(f"无法恢复：{destination.name} 已存在")
-        sources.append((source, destination))
+        sources.append((source, destination, "json", ""))
+
+    data_root = data_path().resolve(strict=False)
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            raise ValueError("回收站项目包含无效产物")
+        registry_id = str(artifact.get("registry_id") or "")
+        relative = str(artifact.get("relative_path") or "")
+        moved_filename = str(artifact.get("moved_filename") or artifact.get("filename") or "")
+        source = (group / "artifacts" / Path(moved_filename).name).resolve(strict=False)
+        destination = (data_root / relative).resolve(strict=False)
+        if not registry_id or not moved_filename or not relative:
+            raise ValueError("回收站项目包含无效产物")
+        if not source.is_file() or not _within(source, group) or not _within(destination, data_root):
+            raise ValueError("回收站项目包含无效产物")
+        if destination.exists():
+            raise ValueError(f"无法恢复：{destination.name} 已存在")
+        sources.append((source, destination, "artifact", registry_id))
 
     with _LOCK:
-        for source, destination in sources:
+        for source, destination, kind, registry_id in sources:
+            destination.parent.mkdir(parents=True, exist_ok=True)
             os.replace(source, destination)
+            if kind == "artifact" and registry_id:
+                items = _load_registry()
+                if registry_id in items:
+                    items[registry_id]["status"] = "active"
+                    items[registry_id].pop("trash_id", None)
+                    _save_registry(items)
         manifest_path.unlink(missing_ok=True)
         group.rmdir()
-    summary = {"restored": [destination.name for _, destination in sources], "trash_id": trash_id}
+    summary = {"restored": [destination.name for _, destination, _, _ in sources], "trash_id": trash_id}
     _record("session_trash_restored", summary)
     return summary
 
@@ -324,6 +423,57 @@ def _save_registry(items: dict[str, dict[str, Any]]) -> None:
     temp = path.with_suffix(".tmp")
     temp.write_text(json.dumps(items, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     os.replace(temp, path)
+
+
+def prune_registry_for_paths(relative_paths: set[str]) -> int:
+    """Drop ACTIVE registry entries whose files were physically removed by the
+    cleanup sweeper, so they do not linger as "registered but missing".
+
+    `relative_paths` are paths relative to the managed data root (separator
+    normalized to `/`). Only entries whose file is gone AND whose status is
+    active are removed; archived/recycled entries are never touched.
+    """
+    normalized = {str(value).replace("\\", "/") for value in (relative_paths or ()) if str(value or "")}
+    if not normalized:
+        return 0
+    with _LOCK:
+        items = _load_registry()
+        removed = 0
+        for key, item in list(items.items()):
+            if str(item.get("status") or "active") != "active":
+                continue
+            if str(item.get("path") or "").replace("\\", "/") in normalized:
+                items.pop(key, None)
+                removed += 1
+        if removed:
+            _save_registry(items)
+    if removed:
+        _record("registry_pruned", {"removed": removed, "scope": "sweep"})
+    return removed
+
+
+def prune_missing_registered() -> dict[str, int]:
+    """Remove ACTIVE registry entries whose files no longer exist on disk.
+
+    Used to reconcile historical "registered but missing" entries (e.g. files
+    removed by earlier cleanup sweeps before registry sync existed).
+    """
+    root = data_path().resolve(strict=False)
+    with _LOCK:
+        items = _load_registry()
+        removed: list[str] = []
+        for key, item in list(items.items()):
+            if str(item.get("status") or "active") != "active":
+                continue
+            relative = str(item.get("path") or "")
+            if not relative or not (root / relative).is_file():
+                removed.append(key)
+                items.pop(key, None)
+        if removed:
+            _save_registry(items)
+    if removed:
+        _record("registry_pruned", {"removed": len(removed), "scope": "missing_reconcile"})
+    return {"removed": len(removed)}
 
 
 def _active_registry_items(items: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
@@ -641,17 +791,25 @@ def _artifact_reference_tokens(item: dict[str, Any]) -> set[str]:
     return {token for token in tokens if len(token) >= 4}
 
 
-def _artifact_reference_corpus() -> tuple[str, int]:
-    """Build a bounded text corpus from managed metadata likely to hold refs."""
+def _artifact_reference_corpus(exclude_files: set[Path] | None = None) -> tuple[str, int]:
+    """Build a bounded text corpus from managed metadata likely to hold refs.
+
+    `exclude_files` lets an archiving operation drop the session files that are
+    being archived themselves, so their own references do not count as
+    "external" references that would block the archive.
+    """
     roots = [data_path("outputs", "Session")]
     chunks: list[str] = []
     files = 0
     max_file_bytes = 2_000_000
+    exclude = {path.resolve(strict=False) for path in (exclude_files or ())}
     for root in roots:
         if not root.exists():
             continue
         for path in root.rglob("*.json"):
             if not path.is_file():
+                continue
+            if path.resolve(strict=False) in exclude:
                 continue
             try:
                 text = path.read_text(encoding="utf-8", errors="ignore")[:max_file_bytes]
@@ -705,6 +863,7 @@ def registered_artifact_reference_preview() -> dict[str, Any]:
         "reference_sources": source_count,
         "referenced_samples": referenced[:20],
         "unreferenced_samples": unreferenced[:20],
+        "unreferenced_ids": [str(item.get("id") or "") for item in unreferenced],
         "missing_samples": missing[:20],
         "dry_run": True,
     }
@@ -753,7 +912,9 @@ def recycle_registered_artifact(artifact_id: str) -> dict[str, Any]:
     if not artifact_id:
         raise ValueError("artifact_id 不能为空")
     preview = registered_artifact_reference_preview()
-    candidate_ids = {str(item.get("id") or "") for item in preview.get("unreferenced_samples") or []}
+    # Use the full unreferenced id set, not the 20-sample preview list, so
+    # every unreferenced registered artifact remains recyclable.
+    candidate_ids = {str(item) for item in preview.get("unreferenced_ids") or []}
     if artifact_id not in candidate_ids:
         raise ValueError("该产物仍有引用或未进入可回收候选")
     root = data_path().resolve(strict=False)

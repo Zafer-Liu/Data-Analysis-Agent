@@ -410,6 +410,7 @@ import { getUiIsland } from "../core/ui-registry.js";
       return {
         name: _v("ac-name"), url: _v("ac-url"), model: _v("ac-model"),
         key: _v("ac-key"), ctx: _v("ac-ctx"), output: _v("ac-output"),
+        inputPrice: _v("ac-input-price"), outputPrice: _v("ac-output-price"),
         think: _chk("ac-think"), budget: _v("ac-budget"), editingKey: null,
       };
     }
@@ -428,6 +429,8 @@ import { getUiIsland } from "../core/ui-registry.js";
     const ctxRaw    = f.ctx.trim();
     const outRaw    = f.output.trim();
     const budgetRaw = f.budget.trim();
+    const inputPriceRaw = f.inputPrice.trim();
+    const outputPriceRaw = f.outputPrice.trim();
     (vs ? vs.setFormMsg : _setMsg)("", "");
 
     if (f.editingKey) {
@@ -440,6 +443,8 @@ import { getUiIsland } from "../core/ui-registry.js";
         thinking_budget: budgetRaw ? parseInt(budgetRaw) : 8000,
         ...(ctxRaw ? { context_window:    parseInt(ctxRaw) } : {}),
         ...(outRaw ? { max_output_tokens: parseInt(outRaw) } : {}),
+        input_price_per_million: inputPriceRaw === "" ? null : Number(inputPriceRaw),
+        output_price_per_million: outputPriceRaw === "" ? null : Number(outputPriceRaw),
       };
       const r = await fetch("/api/models/update", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -466,6 +471,10 @@ import { getUiIsland } from "../core/ui-registry.js";
       thinking_budget: budgetRaw ? parseInt(budgetRaw) : 8000,
       ...(ctxRaw ? { context_window:    parseInt(ctxRaw) } : {}),
       ...(outRaw ? { max_output_tokens: parseInt(outRaw) } : {}),
+      ...(inputPriceRaw || outputPriceRaw ? {
+        input_price_per_million: inputPriceRaw === "" ? null : Number(inputPriceRaw),
+        output_price_per_million: outputPriceRaw === "" ? null : Number(outputPriceRaw),
+      } : {}),
     };
     const r = await fetch("/api/models/add", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -504,7 +513,7 @@ import { getUiIsland } from "../core/ui-registry.js";
         const isOpen = form.classList.toggle("show");
         console.log("[models] toggleAddCustom fallback, isOpen now:", isOpen, "form.display:", getComputedStyle(form).display);
         // 清空表单值（添加模式）
-        ["ac-name","ac-url","ac-model","ac-key","ac-ctx","ac-output","ac-budget"].forEach(id => {
+        ["ac-name","ac-url","ac-model","ac-key","ac-ctx","ac-output","ac-input-price","ac-output-price","ac-budget"].forEach(id => {
           const el = document.getElementById(id);
           if (el) { el.value = ""; }
         });
@@ -552,6 +561,8 @@ import { getUiIsland } from "../core/ui-registry.js";
     const outRaw   = f.output.trim();
     const think    = f.think;
     const budgetRaw = f.budget.trim();
+    const inputPriceRaw = f.inputPrice.trim();
+    const outputPriceRaw = f.outputPrice.trim();
 
     // 本地 provider（ollama 等）无需 API Key；其余 provider 必填
     const isLocalProvider = key === "ollama" || _isLocalBaseUrl(baseUrl);
@@ -570,6 +581,8 @@ import { getUiIsland } from "../core/ui-registry.js";
     };
     if (ctxRaw) body.context_window    = parseInt(ctxRaw);
     if (outRaw) body.max_output_tokens = parseInt(outRaw);
+    body.input_price_per_million = inputPriceRaw === "" ? null : Number(inputPriceRaw);
+    body.output_price_per_million = outputPriceRaw === "" ? null : Number(outputPriceRaw);
     const r = await fetch("/api/models/set-builtin", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),

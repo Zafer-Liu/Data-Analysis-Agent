@@ -3,6 +3,12 @@ from flask import Blueprint, jsonify, request
 
 from data.workspace import workspace_manager
 
+from data.memory_store import (
+    list_memory_trash,
+    reclaim_expired_memory_trash,
+    restore_memory_trash,
+)
+
 from infrastructure.artifact_lifecycle import (
     artifact_cleanup_preview,
     lifecycle_audit,
@@ -11,6 +17,7 @@ from infrastructure.artifact_lifecycle import (
     list_artifact_trash,
     list_session_trash,
     list_upload_trash,
+    prune_missing_registered,
     reclaim_expired_artifact_trash,
     reclaim_expired_session_trash,
     reclaim_expired_upload_trash,
@@ -147,6 +154,12 @@ def get_artifact_reference_preview():
     return jsonify({"ok": True, "preview": registered_artifact_reference_preview()})
 
 
+@bp.post("/api/lifecycle/artifacts/prune-missing")
+def prune_missing_artifacts():
+    """Drop active registry entries whose files no longer exist on disk."""
+    return jsonify({"ok": True, "summary": prune_missing_registered()})
+
+
 @bp.post("/api/lifecycle/artifacts/unregistered/recycle")
 def recycle_legacy_artifact():
     payload = request.json or {}
@@ -219,6 +232,31 @@ def restore_session(trash_id: str):
         summary = restore_session_trash(trash_id)
     except FileNotFoundError:
         return jsonify({"ok": False, "error": "回收站项目不存在"}), 404
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    return jsonify({"ok": True, "summary": summary})
+
+
+@bp.get("/api/lifecycle/memory-trash")
+def get_memory_trash():
+    return jsonify({"ok": True, "items": list_memory_trash()})
+
+
+@bp.post("/api/lifecycle/memory-trash/reclaim")
+def reclaim_memory_trash():
+    try:
+        days = _retention_days()
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    return jsonify({"ok": True, "summary": reclaim_expired_memory_trash(retention_days=days)})
+
+
+@bp.post("/api/lifecycle/memory-trash/<trash_id>/restore")
+def restore_memory(trash_id: str):
+    try:
+        summary = restore_memory_trash(trash_id)
+    except FileNotFoundError:
+        return jsonify({"ok": False, "error": "记忆回收站项目不存在"}), 404
     except ValueError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400
     return jsonify({"ok": True, "summary": summary})

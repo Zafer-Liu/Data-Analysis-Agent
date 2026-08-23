@@ -164,6 +164,39 @@ BUILTIN_TOOL_REGISTRY = ToolRegistry([
         ),
         discovery_summary="Validate and save user Hooks configuration proposed by the model.",
     ),
+    _spec(
+        "create_feishu_bitable", "write", default_exposed=False, discoverable=True,
+        skills=("feishu-bitable",),
+        discovery_keywords=(
+            "飞书多维表格", "多维表格", "bitable", "base 表格", "创建飞书表格",
+            "新建飞书表格", "创建多维表", "新建多维表",
+        ),
+        discovery_summary="Create a Feishu Bitable with a named table, text fields, and optional initial records through the configured application bot.",
+    ),
+    _spec(
+        "list_feishu_bitable_tables", "read", default_exposed=False, discoverable=True,
+        skills=("feishu-bitable",),
+        discovery_keywords=("飞书多维表格", "bitable", "多维表格数据表", "表格列表", "读取飞书表格"),
+        discovery_summary="List data tables visible to the configured Feishu application bot in one Bitable.",
+    ),
+    _spec(
+        "load_feishu_bitable", "read", default_exposed=False, discoverable=True,
+        skills=("feishu-bitable",),
+        discovery_keywords=("分析飞书表格", "读取飞书表格", "飞书多维表格", "bitable", "多维表格分析"),
+        discovery_summary="Read a bounded Feishu Bitable table into the current conversation as an analyzable data source.",
+    ),
+    _spec(
+        "append_feishu_bitable_records", "write", default_exposed=False, discoverable=True,
+        skills=("feishu-bitable",),
+        discovery_keywords=("写入飞书表格", "回写飞书表格", "追加多维表格", "append bitable"),
+        discovery_summary="Append explicitly requested records to an existing Feishu Bitable table.",
+    ),
+    _spec(
+        "update_feishu_bitable_record", "write", default_exposed=False, discoverable=True,
+        skills=("feishu-bitable",),
+        discovery_keywords=("更新飞书表格", "编辑飞书表格", "修改多维表格", "update bitable"),
+        discovery_summary="Update one explicitly identified Feishu Bitable record using a record ID returned by a read.",
+    ),
     _spec("read_tool_result", "read"),
     _spec("search_mcp_tools", "read"),
     _spec("query_knowledge", "read", concurrency_safe=True),
@@ -403,6 +436,14 @@ BUILTIN_TOOL_REGISTRY = ToolRegistry([
         requires_runtime=True, requires_workspace=True,
     ),
     _spec(
+        "workflow_create_custom", "write", default_exposed=False, discoverable=True,
+        discovery_keywords=(
+            "自定义 workflow", "自定义工作流", "自定义 agent", "agent workflow", "创建模板", "创建流程",
+        ),
+        discovery_summary="Create and publish a custom Agent Workflow defined in conversation.",
+        requires_runtime=True, requires_workspace=True,
+    ),
+    _spec(
         "workflow_list", "read", default_exposed=False, discoverable=True,
         discovery_keywords=("workflow", "工作流", "流程", "场景", "可用流程"),
         discovery_summary="List published Workflows in the mounted workspace.",
@@ -465,6 +506,14 @@ BUILTIN_TOOL_REGISTRY = ToolRegistry([
             "draw.io", "diagram", "图表", "画图",
         ),
         discovery_summary="Discover available draw.io shape/icon libraries before creating diagrams.",
+    ),
+    _spec(
+        "memory_read", "read", default_exposed=False, discoverable=True,
+        discovery_keywords=(
+            "memory", "记忆", "长期记忆", "偏好", "反馈", "preference", "remember",
+            "previous preference", "之前说的", "上次提到",
+        ),
+        discovery_summary="Read the full body of a named long-term memory record from the current scope.",
     ),
 ])
 

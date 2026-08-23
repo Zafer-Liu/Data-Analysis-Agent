@@ -65,6 +65,7 @@ if (globalThis.__baaAppDelegationRegistered) {
     clearSkill:   ()    => window.BAA.skills.clearSkill(),
     openSkillPicker: () => sidebar.openPanel("skills"),
     closeSkillPicker: () => sidebar.closePanel("skills"),
+    closeSkillModal: () => window.BAA.skills?.closeSkillModal?.(),
     openModelPicker: (el) => window.BAA.models.openModelPicker(el),
     closeModelPicker: () => window.BAA.models.closeModelPicker(),
     fillHint:     (el)  => window.BAA.slash.fillHint(el),
@@ -324,7 +325,15 @@ if (globalThis.__baaAppDelegationRegistered) {
       window.BAA.chatStream?.onComposerInput?.(e);
       window.BAA.slash.onInput(e);
     });
-    msgInput.addEventListener("keydown", e => window.BAA.slash.onKeyDown(e));
+  msgInput.addEventListener("keydown", e => window.BAA.slash.onKeyDown(e));
+
+  document.getElementById("feishu-session-indicator")?.addEventListener("click", () => {
+    const input = document.getElementById("msg-input");
+    if (!input) return;
+    input.value = "/robot ";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    window.BAA.chatStream?.onSendOrStop?.();
+  });
   }
 
   // Model select change
@@ -508,11 +517,16 @@ if (globalThis.__baaAppDelegationRegistered) {
     }
 
     if (!sessionRestored) {
-      const r = await fetch("/api/session/new", { method: "POST" });
+      const r = await fetch("/api/session/new", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ memory_enabled: state.memoryEnabled !== false }),
+      });
       state.SID = (await r.json()).session_id;
     }
     localStorage.setItem("baa_session_id", state.SID);
     sessionStorage.setItem("baa_session_id", state.SID);
+    await window.BAA.chatStream?.loadFeishuConversationStatus?.();
     setSessionName(state.sessionName || "新会话", state.loadedSessionFilename || "");
     await Promise.all([
       window.BAA.slash.loadCommands(),

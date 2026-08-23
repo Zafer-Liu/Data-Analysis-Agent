@@ -31,6 +31,8 @@ import { open as openJobHistory } from "../legacy/job_history.js";
     selectedRun: "",
     runDetail: null,
     workflowInputs: {},
+    workflowInputSavedAt: {},
+    workflowInputAdvanced: {},
     workflowExpanded: {},
     workflowStarting: "",
     workflowDeleting: "",
@@ -38,20 +40,68 @@ import { open as openJobHistory } from "../legacy/job_history.js";
     workflowCanceling: "",
     workflowResuming: "",
     workflowRetrying: "",
+    workflowForking: "",
     workflowSavingTemplate: "",
     workflowGeneratingCandidates: "",
     workflowCandidateDeciding: "",
     workflowApproving: "",
     workflowApprovalForms: {},
+    workflowArtifactLoading: "",
+    workflowArtifactContents: {},
     workflowCreating: false,
     workflowCreateOpen: false,
     workflowCreate: {
+      creationMode: "template",
       name: "经营分析 Workflow",
       description: "自动检查数据、分析关键指标、复核发现并生成报告。",
       mode: "full_auto",
       sourceKey: "source_snapshot",
+      template: "analysis",
+      customAgents: [
+        {
+          name: "数据分析员",
+          role: "data_analyst",
+          instructions: "检查输入数据并给出可追溯的分析结论。",
+          tools: "get_schema, query_data",
+          dependsOn: "",
+        },
+        {
+          name: "结论编辑",
+          role: "report_editor",
+          instructions: "仅依据上游产出整理最终结论，明确证据与不确定性。",
+          tools: "",
+          dependsOn: "数据分析员",
+        },
+      ],
     },
   };
+
+  const WORKFLOW_TEMPLATES = Object.freeze({
+    analysis: {
+      label: "经营分析",
+      name: "经营分析 Workflow",
+      description: "检查数据、分析指标与异常、复核发现并生成经营报告。",
+      hint: "5 个节点；适合需要交叉验证与正式经营报告的任务。",
+    },
+    insight: {
+      label: "数据查询与洞察",
+      name: "数据查询与洞察 Workflow",
+      description: "检查数据后分析关键指标，输出可追溯的数据洞察。",
+      hint: "2 个节点；适合探索性查询和指标洞察。",
+    },
+    report: {
+      label: "数据报告",
+      name: "数据报告 Workflow",
+      description: "检查输入数据并直接生成基于证据的数据报告。",
+      hint: "2 个节点；适合已有清晰数据源的快速报告。",
+    },
+    cleaning_approval: {
+      label: "受控数据清洗",
+      name: "受控数据清洗 Workflow",
+      description: "先提出可审计的清洗方案；审批通过后真实执行，并生成基于实际结果的报告。原始数据不会被覆盖。",
+      hint: "4 个节点；批准后写入 cleaned_data 派生表；补充要求会重新生成方案并再次审批。",
+    },
+  });
 
   function formatTime(value) {
     if (!value) return "";
@@ -214,6 +264,24 @@ import { open as openJobHistory } from "../legacy/job_history.js";
     return fetchJson(`/api/session/${state.SID}/workflow-runs/${encodeURIComponent(runId)}`);
   }
 
+  async function loadWorkflowArtifact(runId, artifactId) {
+    if (!runId || !artifactId || local.workflowArtifactLoading) return;
+    local.workflowArtifactLoading = artifactId;
+    local.workflowsError = "";
+    renderPanel();
+    try {
+      const result = await fetchJson(
+        `/api/session/${state.SID}/workflow-runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactId)}`,
+      );
+      local.workflowArtifactContents[artifactId] = result.content;
+    } catch (error) {
+      local.workflowsError = String(error.message || error);
+    } finally {
+      local.workflowArtifactLoading = "";
+      renderPanel();
+    }
+  }
+
   async function createAgentProfile(profile) {
     return fetchJson(`/api/session/${state.SID}/agent-profiles`, {
       method: "POST",
@@ -263,6 +331,11 @@ import { open as openJobHistory } from "../legacy/job_history.js";
         ? form.mode
         : "full_auto",
       sourceKey,
+      template: Object.prototype.hasOwnProperty.call(WORKFLOW_TEMPLATES, form.template)
+        ? form.template
+        : "analysis",
+      creationMode: form.creationMode === "custom" ? "custom" : "template",
+      customAgents: Array.isArray(form.customAgents) ? form.customAgents : [],
     };
   }
 
@@ -306,7 +379,7 @@ import { open as openJobHistory } from "../legacy/job_history.js";
     const value = Object.prototype.hasOwnProperty.call(item, "data")
       ? item.data
       : item.data_preview || item.uri || "";
-    if (typeof value === "string") return value;
+    if (typeof value === "string") return decodeWorkflowEscapes(value);
     try {
       return JSON.stringify(value, null, 2);
     } catch {
@@ -395,6 +468,9 @@ import { open as openJobHistory } from "../legacy/job_history.js";
     const form = getApprovalForm(approval);
     const comment = String(form.comment || "").trim();
     const revisedSummary = String(form.revisedSummary || "").trim();
+    if (decision === "reject_and_retry" && !comment) {
+      throw new Error("请填写需要补充或修改的要求；系统会据此重新生成方案并再次发起审批。");
+    }
     const payload = {
       decision,
       decided_by: "teams_panel",
@@ -424,32 +500,161 @@ import { open as openJobHistory } from "../legacy/job_history.js";
     return payload;
   }
 
+  function buildCustomWorkflow(profileIds, form, agents) {
+    const outputKey = "workflow_result";
+    const agentIndexByName = new Map(agents.map((agent, index) => [agent.name, index]));
+    const nodes = agents.map((agent, index) => {
+      const isLast = index === agents.length - 1;
+      const dependencies = agent.dependsOn.map(name => agentIndexByName.get(name));
+      return {
+        node_id: `custom_agent_${index + 1}`,
+        type: "agent",
+        agent_profile_id: profileIds[`custom_${index}`],
+        input_contract: dependencies.length === 0
+          ? [form.sourceKey, "business_context"]
+          : dependencies.map(dependency => `custom_agent_${dependency + 1}_output`),
+        output_contract: [isLast ? outputKey : `custom_agent_${index + 1}_output`],
+        output_artifacts: {
+          [isLast ? outputKey : `custom_agent_${index + 1}_output`]: isLast ? "report" : "insight",
+        },
+        side_effects: agent.allowedTools.length ? ["read_data"] : [],
+        limits: { max_tokens: 384000, max_run_seconds: 900, max_tool_calls: agent.allowedTools.length ? 200 : 0 },
+      };
+    });
+    const edges = agents.flatMap((agent, index) => agent.dependsOn.map(name => {
+      const dependency = agentIndexByName.get(name);
+      return {
+        edge_id: `custom-${dependency + 1}-to-${index + 1}`,
+        from_node: `custom_agent_${dependency + 1}`,
+        to_node: `custom_agent_${index + 1}`,
+        type: "auto",
+      };
+    }));
+    return {
+      outputKey,
+      graph: {
+        run_policy: { mode: form.mode },
+        entry_node_ids: nodes.filter((_, index) => agents[index].dependsOn.length === 0).map(node => node.node_id),
+        nodes,
+        edges,
+        limits: { max_run_minutes: 120, max_total_node_runs: Math.max(8, agents.length * 3) },
+      },
+    };
+  }
+
   function buildWorkflowTemplate(profileIds, form) {
     const approvalEdgeType = form.mode === "key_approval" ? "approval" : "auto";
-    return {
+    const inspectNode = {
+      node_id: "inspect_data",
+      type: "agent",
+      agent_profile_id: profileIds.inspect,
+      input_contract: [form.sourceKey, "business_context"],
+      output_contract: ["data_quality_report"],
+      output_artifacts: { data_quality_report: "validation" },
+      side_effects: ["read_data"],
+      limits: { max_tokens: 384000, max_run_seconds: 900, max_tool_calls: 200 },
+    };
+    if (form.template === "insight") {
+      return {
+        outputKey: "metric_analysis",
+        graph: {
+          run_policy: { mode: form.mode }, entry_node_ids: ["inspect_data"],
+          nodes: [inspectNode, {
+            node_id: "analyze_metrics", type: "agent", agent_profile_id: profileIds.metrics,
+            input_contract: ["data_quality_report"], output_contract: ["metric_analysis"],
+            output_artifacts: { metric_analysis: "insight" }, side_effects: ["read_data"],
+            limits: { max_tokens: 384000, max_run_seconds: 900, max_tool_calls: 200 },
+          }],
+          edges: [{ edge_id: "inspect-to-metrics", from_node: "inspect_data", to_node: "analyze_metrics", type: "auto" }],
+          limits: { max_run_minutes: 30, max_total_node_runs: 8 },
+        },
+      };
+    }
+    if (form.template === "report") {
+      return {
+        outputKey: "operating_report",
+        graph: {
+          run_policy: { mode: form.mode }, entry_node_ids: ["inspect_data"],
+          nodes: [inspectNode, {
+            node_id: "generate_report", type: "agent", agent_profile_id: profileIds.cleaning_reporter,
+            input_contract: ["data_quality_report"], output_contract: ["operating_report"],
+            output_artifacts: { operating_report: "report" },
+            output_validation: { forbidden_substrings: ["empty / not provided", "no upstream findings"] },
+            limits: { max_tokens: 384000, max_run_seconds: 900, max_tool_calls: 0 },
+          }],
+          edges: [{ edge_id: "inspect-to-report", from_node: "inspect_data", to_node: "generate_report", type: approvalEdgeType }],
+          limits: { max_run_minutes: 45, max_total_node_runs: 8 },
+        },
+      };
+    }
+    if (form.template === "cleaning_approval") {
+      return {
+        outputKey: "operating_report",
+        graph: {
+          run_policy: { mode: "key_approval" }, entry_node_ids: ["validate_input"],
+          nodes: [{
+            node_id: "validate_input", type: "validation", input_contract: [form.sourceKey],
+            output_contract: ["validated_input"], output_artifacts: { validated_input: "validation" },
+            validation: { required: [form.sourceKey], non_empty: [form.sourceKey] },
+          }, {
+            node_id: "propose_cleaning", type: "agent", agent_profile_id: profileIds.cleaning,
+            input_contract: ["validated_input", "business_context", "revision_request"], output_contract: ["cleaning_plan"],
+            output_artifacts: { cleaning_plan: "insight" }, side_effects: ["read_data"],
+            limits: { max_tokens: 384000, max_run_seconds: 900, max_tool_calls: 200, max_iterations: 3 },
+          }, {
+            node_id: "verify_cleaning", type: "verifier", agent_profile_id: profileIds.cleaning_verifier,
+            input_contract: ["cleaning_plan"], output_contract: ["decision", "issues", "evidence"],
+            output_artifacts: { decision: "validation", issues: "validation", evidence: "validation" },
+            verifier: { standards: [
+              "The plan names exactly one existing source table and never overwrites it",
+              "Every proposed operation is fill_na, winsorize, or trimming with explicit fields and parameters",
+              "The plan includes expected impact and a rollback path",
+            ] },
+            limits: { max_tokens: 12000, max_run_seconds: 300, max_tool_calls: 0 },
+          }, {
+            node_id: "apply_cleaning", type: "agent", agent_profile_id: profileIds.cleaning_executor,
+            input_contract: ["cleaning_plan"], output_contract: ["cleaning_execution"],
+            output_artifacts: { cleaning_execution: "dataset" }, side_effects: ["write_data"],
+            limits: { max_tokens: 12000, max_run_seconds: 900, max_tool_calls: 3 },
+          }, {
+            node_id: "generate_report", type: "agent", agent_profile_id: profileIds.cleaning_reporter,
+            input_contract: ["cleaning_plan", "cleaning_execution"], output_contract: ["operating_report"],
+            output_artifacts: { operating_report: "report" },
+            limits: { max_tokens: 384000, max_run_seconds: 900, max_tool_calls: 0 },
+          }],
+          edges: [
+            { edge_id: "validate-to-plan", from_node: "validate_input", to_node: "propose_cleaning", type: "auto" },
+            { edge_id: "plan-to-verify", from_node: "propose_cleaning", to_node: "verify_cleaning", type: "auto" },
+            { edge_id: "plan-to-clean", from_node: "propose_cleaning", to_node: "apply_cleaning", type: "auto" },
+            { edge_id: "verify-to-clean-approval", from_node: "verify_cleaning", to_node: "apply_cleaning", type: "approval" },
+            { edge_id: "clean-to-report", from_node: "apply_cleaning", to_node: "generate_report", type: "auto" },
+            { edge_id: "plan-to-report", from_node: "propose_cleaning", to_node: "generate_report", type: "auto" },
+            { edge_id: "verify-rework", from_node: "verify_cleaning", to_node: "propose_cleaning", type: "retry_loop", max_iterations: 3 },
+          ],
+          limits: { max_run_minutes: 60, max_total_node_runs: 14 },
+        },
+      };
+    }
+    return { outputKey: "operating_report", graph: {
       run_policy: { mode: form.mode },
       entry_node_ids: ["inspect_data"],
       nodes: [
-        {
-          node_id: "inspect_data",
-          type: "agent",
-          agent_profile_id: profileIds.inspect,
-          input_contract: [form.sourceKey],
-          output_contract: ["data_quality_report", "metric_scope"],
-        },
+        inspectNode,
         {
           node_id: "analyze_metrics",
           type: "agent",
           agent_profile_id: profileIds.metrics,
-          input_contract: ["metric_scope"],
+          input_contract: ["data_quality_report"],
           output_contract: ["metric_analysis"],
+          limits: { max_tokens: 384000, max_run_seconds: 900, max_tool_calls: 200 },
         },
         {
           node_id: "analyze_anomalies",
           type: "agent",
           agent_profile_id: profileIds.anomalies,
-          input_contract: ["metric_scope"],
+          input_contract: ["data_quality_report"],
           output_contract: ["anomaly_analysis"],
+          limits: { max_tokens: 384000, max_run_seconds: 900, max_tool_calls: 200 },
         },
         {
           node_id: "verify_findings",
@@ -458,13 +663,19 @@ import { open as openJobHistory } from "../legacy/job_history.js";
           join_policy: "all_success",
           input_contract: ["metric_analysis", "anomaly_analysis"],
           output_contract: ["verification_report"],
+          output_artifacts: { verification_report: "validation" },
+          limits: { max_tokens: 384000, max_run_seconds: 900, max_tool_calls: 0 },
         },
         {
           node_id: "generate_report",
           type: "agent",
           agent_profile_id: profileIds.reporter,
-          input_contract: ["verification_report"],
+          input_contract: ["metric_analysis", "anomaly_analysis", "verification_report"],
           output_contract: ["operating_report"],
+          output_validation: {
+            forbidden_substrings: ["empty / not provided", "no verification report content", "no upstream findings"],
+          },
+          limits: { max_tokens: 384000, max_run_seconds: 900, max_tool_calls: 0 },
         },
       ],
       edges: [
@@ -473,13 +684,15 @@ import { open as openJobHistory } from "../legacy/job_history.js";
         { edge_id: "metrics-to-verify", from_node: "analyze_metrics", to_node: "verify_findings", type: "auto" },
         { edge_id: "anomalies-to-verify", from_node: "analyze_anomalies", to_node: "verify_findings", type: "auto" },
         { edge_id: "verify-to-report", from_node: "verify_findings", to_node: "generate_report", type: approvalEdgeType },
+        { edge_id: "metrics-to-report", from_node: "analyze_metrics", to_node: "generate_report", type: "auto" },
+        { edge_id: "anomalies-to-report", from_node: "analyze_anomalies", to_node: "generate_report", type: "auto" },
         { edge_id: "verify-retry", from_node: "verify_findings", to_node: "analyze_metrics", type: "retry_loop", max_iterations: 2 },
       ],
       limits: {
         max_run_minutes: 120,
         max_total_node_runs: 30,
       },
-    };
+    }};
   }
 
   async function createWorkflowFromTemplate() {
@@ -489,15 +702,29 @@ import { open as openJobHistory } from "../legacy/job_history.js";
     local.workflowsError = "";
     renderPanel();
     try {
+      const customAgents = form.creationMode === "custom" ? normalizedCustomAgents(form) : [];
       const suffix = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
-      const baseTools = ["get_schema", "query_data", "read_tool_result"];
-      const specs = [
-        ["inspect", "数据检查员", "data_inspector", "识别数据表、字段质量、可用指标范围，输出 data_quality_report 与 metric_scope。", baseTools],
+      // Workflow materials are injected through declared contracts.  Do not
+      // advertise read_tool_result here: delegated Workflow agents cannot read
+      // arbitrary session artifacts, and that stale permission caused empty
+      // downstream reviews in older templates.
+      const baseTools = ["get_schema", "query_data"];
+      const templateSpecs = [
+        ["inspect", "数据检查员", "data_inspector", "识别数据表、字段质量和可用指标范围，直接输出一份非空的 data_quality_report。报告必须包含“数据质量”和“可用指标范围”两节；可使用 Markdown。", baseTools],
         ["metrics", "指标分析师", "metric_analyst", "围绕业务目标执行 SQL/指标分析，输出 metric_analysis。", baseTools],
         ["anomalies", "异常分析师", "anomaly_analyst", "发现波动、异常与可解释原因，输出 anomaly_analysis。", baseTools],
-        ["reviewer", "结论复核员", "finding_reviewer", "交叉检查指标分析与异常分析，输出 verification_report。", ["read_tool_result"]],
-        ["reporter", "报告编辑", "report_editor", "把复核后的发现整理成可读经营报告，输出 operating_report。", ["read_tool_result"]],
+        ["reviewer", "结论复核员", "finding_reviewer", "只使用上游 metric_analysis 与 anomaly_analysis 交叉复核。必须直接输出非空的 verification_report：先写复核结论，再列出已证实证据、待验证项和风险。材料不足时也必须明确写出材料不足、不能确认的非空结论；不得只输出思考过程、工具调用或空白。", []],
+        ["reporter", "报告编辑", "report_editor", "输出完整、可供管理层使用的经营分析报告：管理摘要、经营表现与关键指标、结构表现与业务驱动、风险与数据可信度、管理建议与行动计划。把技术复核压缩为一小节，直接解释业务影响；不得输出 artifact ID、预览截断说明、表清单、原始计算、SQL 或字段级审计细节。", []],
+        ["cleaning", "数据清洗方案员", "data_cleaning_planner", "只提出待审批的可审计数据清洗方案，不得写入数据。方案必须列出源表、仅可执行的操作（fill_na、winsorize 或 trimming）、精确字段与参数、预期影响和回滚方式。若提供 revision_request，必须针对该要求重新制定方案。", baseTools],
+        ["cleaning_verifier", "清洗方案复核员", "data_cleaning_verifier", "独立复核清洗方案，不得修改方案或写入数据。只返回 JSON：decision（pass、rework 或 escalate）、issues（字符串数组）和 evidence（字符串数组）。只有方案满足全部安全标准时才返回 pass。", []],
+        ["cleaning_executor", "数据清洗执行员", "data_cleaning_executor", "仅在上游 cleaning_plan 已获审批后执行。必须调用 clean_data 恰好一次，并且只执行获批方案中一个支持的操作：fill_na、winsorize 或 trimming。不得覆盖源表，output_table 固定为 cleaned_data；工具返回后如实输出 cleaning_execution，包含源表、操作、参数、结果表、实际影响与失败信息。", ["clean_data"]],
+        ["cleaning_reporter", "清洗执行报告员", "data_cleaning_reporter", "仅依据获批方案和 cleaning_execution 写执行报告。必须清楚区分审批的计划与实际执行结果；只可陈述工具返回证实的写入。说明源表未覆盖、清洗结果保存在 cleaned_data，以及任何未执行或失败项。", []],
       ];
+      const specs = form.creationMode === "custom"
+        ? customAgents.map((agent, index) => [
+          `custom_${index}`, agent.name, agent.role, agent.instructions, agent.allowedTools,
+        ])
+        : templateSpecs;
       const profileIds = {};
       for (const [id, name, role, instructions, allowedTools] of specs) {
         const result = await createAgentProfile({
@@ -511,30 +738,37 @@ import { open as openJobHistory } from "../legacy/job_history.js";
         });
         profileIds[id] = result.profile?.id;
       }
+      const template = form.creationMode === "custom"
+        ? buildCustomWorkflow(profileIds, form, customAgents)
+        : buildWorkflowTemplate(profileIds, form);
       const workflow = await createWorkflowDraft({
         name: form.name,
-        description: form.description || `${workflowModeLabel(form.mode)}模式的团队分析模板`,
-        graph: buildWorkflowTemplate(profileIds, form),
+        description: form.description || (form.creationMode === "custom"
+          ? `${workflowModeLabel(form.mode)}模式的自定义 Agent 工作流`
+          : `${workflowModeLabel(form.mode)}模式的${WORKFLOW_TEMPLATES[form.template].label}模板`),
+        graph: template.graph,
         input_schema: {
           type: "object",
           properties: {
-            [form.sourceKey]: { type: "string" },
+            [form.sourceKey]: { type: "string", title: "数据来源或范围", description: "例如：当前工作区数据、2026 年 7 月销售表" },
+            business_context: { type: "string", title: "业务补充说明", description: "可填写字段单位、口径、业务目标或需要重点核查的问题" },
+            revision_request: { type: "string", title: "方案重做要求", description: "仅在审批时要求重做后由系统自动写入，无需首次启动时填写" },
           },
           required: [form.sourceKey],
         },
         output_schema: {
           type: "object",
           properties: {
-            operating_report: { type: "string" },
+            [template.outputKey]: { type: "string" },
           },
-          required: ["operating_report"],
+          required: [template.outputKey],
         },
         created_by: "teams_panel",
       });
       const workflowId = workflow.workflow?.id;
       await validateWorkflow(workflowId);
       const published = await publishWorkflow(workflowId);
-      local.workflowInputs[workflowId] = JSON.stringify({ [form.sourceKey]: "当前工作区数据" }, null, 2);
+      saveWorkflowInputRaw(workflowId, JSON.stringify({ [form.sourceKey]: "当前工作区数据" }, null, 2));
       local.selectedRun = "";
       local.runDetail = null;
       await refreshWorkflows({ silent: true, keepSelection: true });
@@ -593,6 +827,99 @@ import { open as openJobHistory } from "../legacy/job_history.js";
     }
   }
 
+  function decodeWorkflowEscapes(value) {
+    let text = String(value ?? "");
+    for (let pass = 0; pass < 2; pass += 1) {
+      const trimmed = text.trim();
+      if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
+        try {
+          const parsed = JSON.parse(trimmed);
+          if (typeof parsed === "string") {
+            text = parsed;
+            continue;
+          }
+        } catch {
+          // Legacy model output can contain invalid Markdown escapes such as
+          // "\\#". Repair only display-safe formatting escapes below.
+        }
+      }
+      const decoded = text
+        .replace(/\\\\r\\\\n/g, "\n")
+        .replace(/\\\\n/g, "\n")
+        .replace(/\\\\r/g, "\n")
+        .replace(/\\\\t/g, "\t")
+        .replace(/\\r\\n/g, "\n")
+        .replace(/\\n/g, "\n")
+        .replace(/\\r/g, "\n")
+        .replace(/\\t/g, "\t")
+        .replace(/\\\\([`#])/g, "$1")
+        .replace(/\\([`#])/g, "$1");
+      if (decoded === text) break;
+      text = decoded;
+    }
+    return text;
+  }
+
+  function selectWorkflowTemplate(template) {
+    const selected = WORKFLOW_TEMPLATES[template] || WORKFLOW_TEMPLATES.analysis;
+    local.workflowCreate = {
+      ...local.workflowCreate,
+      template,
+      name: selected.name,
+      description: selected.description,
+      mode: template === "cleaning_approval" ? "key_approval" : local.workflowCreate.mode,
+    };
+  }
+
+  function normalizedCustomAgents(form) {
+    const allowedTools = new Set(["get_schema", "query_data"]);
+    const agents = (form.customAgents || []).map((agent, index) => {
+      const name = String(agent?.name || "").trim() || `Agent ${index + 1}`;
+      const role = String(agent?.role || "").trim() || "workflow_specialist";
+      const instructions = String(agent?.instructions || "").trim();
+      const requestedTools = String(agent?.tools || "").split(",")
+        .map(item => item.trim()).filter(Boolean);
+      const invalidTools = requestedTools.filter(tool => !allowedTools.has(tool));
+      if (!instructions) throw new Error(`${name} 缺少 Agent 指令`);
+      if (invalidTools.length) throw new Error(`${name} 包含不支持的工具：${invalidTools.join(", ")}`);
+      const dependsOn = String(agent?.dependsOn || "").split(",")
+        .map(item => item.trim()).filter(Boolean);
+      return { name, role, instructions, allowedTools: [...new Set(requestedTools)], dependsOn: [...new Set(dependsOn)] };
+    });
+    if (agents.length < 1) throw new Error("至少需要定义一个 Agent");
+    if (agents.length > 8) throw new Error("自定义工作流最多支持 8 个 Agent");
+    const names = new Set();
+    agents.forEach((agent, index) => {
+      if (names.has(agent.name)) throw new Error(`Agent 名称重复：${agent.name}`);
+      names.add(agent.name);
+      const priorNames = new Set(agents.slice(0, index).map(item => item.name));
+      const invalidDependencies = agent.dependsOn.filter(name => !priorNames.has(name));
+      if (invalidDependencies.length) {
+        throw new Error(`${agent.name} 的依赖必须是前面已定义的 Agent：${invalidDependencies.join("、")}`);
+      }
+    });
+    return agents;
+  }
+
+  function updateCustomAgent(index, key, value) {
+    const customAgents = [...(local.workflowCreate.customAgents || [])];
+    if (!customAgents[index]) return;
+    customAgents[index] = { ...customAgents[index], [key]: value };
+    updateWorkflowCreate("customAgents", customAgents);
+  }
+
+  function addCustomAgent() {
+    const customAgents = [...(local.workflowCreate.customAgents || [])];
+    if (customAgents.length >= 8) return;
+    customAgents.push({ name: `Agent ${customAgents.length + 1}`, role: "workflow_specialist", instructions: "", tools: "", dependsOn: "" });
+    updateWorkflowCreate("customAgents", customAgents);
+  }
+
+  function removeCustomAgent(index) {
+    const customAgents = (local.workflowCreate.customAgents || []).filter((_, itemIndex) => itemIndex !== index);
+    updateWorkflowCreate("customAgents", customAgents);
+  }
+
   async function retryWorkflowNode(node) {
     const runId = local.runDetail?.run?.id || "";
     if (!runId || !node?.id || local.workflowRetrying) return;
@@ -612,6 +939,37 @@ import { open as openJobHistory } from "../legacy/job_history.js";
       window.BAA.ui?.toast?.(local.workflowsError, "err");
     } finally {
       local.workflowRetrying = "";
+      renderPanel();
+    }
+  }
+
+  async function forkWorkflowRunFromCheckpoint(node) {
+    const runId = local.runDetail?.run?.id || "";
+    if (!runId || !node?.id || local.workflowForking) return;
+    local.workflowForking = node.id;
+    local.workflowsError = "";
+    renderPanel();
+    try {
+      const detail = await fetchJson(
+        `/api/session/${state.SID}/workflow-runs/${encodeURIComponent(runId)}/fork`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            checkpoint_node_run_id: node.id,
+            started_by: "teams_panel",
+          }),
+        },
+      );
+      local.selectedRun = detail.run?.id || "";
+      local.runDetail = detail;
+      await refreshWorkflows({ silent: true, keepSelection: true });
+      window.BAA.ui?.toast?.(`已从 ${node.node_id || "检查点"} 创建分叉 Run`, "ok");
+    } catch (error) {
+      local.workflowsError = String(error.message || error);
+      window.BAA.ui?.toast?.(local.workflowsError, "err");
+    } finally {
+      local.workflowForking = "";
       renderPanel();
     }
   }
@@ -756,17 +1114,79 @@ import { open as openJobHistory } from "../legacy/job_history.js";
     }
   }
 
+  function defaultWorkflowInputs(schema) {
+    const required = Array.isArray(schema?.required) ? schema.required : [];
+    return Object.fromEntries(required.map(key => [
+      key,
+      schema?.properties?.[key]?.type === "string" ? "当前工作区数据" : {},
+    ]));
+  }
+
+  function workflowInputStorageKey(workflowId) {
+    return `baa_workflow_inputs:${state.SID || "default"}:${workflowId}`;
+  }
+
+  function readWorkflowInputRaw(workflowId) {
+    if (Object.prototype.hasOwnProperty.call(local.workflowInputs, workflowId)) {
+      return String(local.workflowInputs[workflowId] || "");
+    }
+    try {
+      const saved = localStorage.getItem(workflowInputStorageKey(workflowId)) || "";
+      if (saved) local.workflowInputs[workflowId] = saved;
+      return saved;
+    } catch {
+      return "";
+    }
+  }
+
+  function saveWorkflowInputRaw(workflowId, raw) {
+    const value = String(raw || "");
+    local.workflowInputs[workflowId] = value;
+    local.workflowInputSavedAt[workflowId] = Date.now();
+    try {
+      localStorage.setItem(workflowInputStorageKey(workflowId), value);
+    } catch {
+      // Input remains usable for this page even if browser storage is disabled.
+    }
+  }
+
+  function workflowInputValues(workflowId, schema) {
+    const fallback = defaultWorkflowInputs(schema);
+    const raw = readWorkflowInputRaw(workflowId).trim();
+    if (!raw) return fallback;
+    try {
+      const value = JSON.parse(raw);
+      return value && typeof value === "object" && !Array.isArray(value) ? { ...fallback, ...value } : fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
+  function updateWorkflowInputValue(workflowId, schema, key, value) {
+    saveWorkflowInputRaw(workflowId, JSON.stringify({
+      ...workflowInputValues(workflowId, schema),
+      [key]: value,
+    }, null, 2));
+  }
+
+  function workflowInputLabel(key, property = {}) {
+    if (property.title) return property.title;
+    const labels = { source_snapshot: "数据来源或范围", business_context: "业务补充说明" };
+    return labels[key] || key;
+  }
+
   async function startWorkflow(workflow) {
     if (!workflow?.current_version_id || local.workflowStarting) return;
     let inputs = {};
-    const raw = String(local.workflowInputs[workflow.id] || "{}").trim();
+    const schema = workflow.current_version?.input_schema || workflow.draft_input_schema || {};
+    const raw = JSON.stringify(workflowInputValues(workflow.id, schema));
     try {
       inputs = raw ? JSON.parse(raw) : {};
       if (!inputs || typeof inputs !== "object" || Array.isArray(inputs)) {
         throw new Error("输入必须是 JSON object");
       }
     } catch (error) {
-      local.workflowsError = `输入 JSON 无效：${error.message || error}`;
+      local.workflowsError = `运行输入无效：${error.message || error}`;
       renderPanel();
       return;
     }
@@ -815,6 +1235,8 @@ import { open as openJobHistory } from "../legacy/job_history.js";
         { method: "DELETE" },
       );
       delete local.workflowInputs[workflow.id];
+      delete local.workflowInputSavedAt[workflow.id];
+      try { localStorage.removeItem(workflowInputStorageKey(workflow.id)); } catch { /* browser storage unavailable */ }
       delete local.workflowExpanded[workflow.id];
       local.selectedRun = "";
       local.runDetail = null;
@@ -1391,6 +1813,51 @@ import { open as openJobHistory } from "../legacy/job_history.js";
             },
           }, "收起"),
         ]),
+        h("div", { class: "workflow-create-mode", role: "group", "aria-label": "创建方式" }, [
+          h("button", {
+            type: "button", class: form.creationMode === "template" ? "is-active" : "",
+            disabled: local.workflowCreating,
+            onClick: () => { updateWorkflowCreate("creationMode", "template"); renderPanel(); },
+          }, "使用标准模板"),
+          h("button", {
+            type: "button", class: form.creationMode === "custom" ? "is-active" : "",
+            disabled: local.workflowCreating,
+            onClick: () => { updateWorkflowCreate("creationMode", "custom"); renderPanel(); },
+          }, "自定义 Agent"),
+        ]),
+        form.creationMode === "template"
+          ? h("div", { class: "workflow-create-template" }, [
+            h("label", null, [
+              h("span", null, "标准模板"),
+              h("select", {
+                value: form.template,
+                disabled: local.workflowCreating,
+                onChange: event => { selectWorkflowTemplate(event.target.value); renderPanel(); },
+              }, Object.entries(WORKFLOW_TEMPLATES).map(([key, template]) =>
+                h("option", { value: key }, template.label),
+              )),
+            ]),
+            h("p", { class: "workflow-create-hint" }, WORKFLOW_TEMPLATES[form.template].hint),
+          ])
+          : h("div", { class: "workflow-custom-agents" }, [
+            h("div", { class: "workflow-custom-agents-head" }, [
+              h("strong", null, "自定义 Agent 链路"),
+              h("button", {
+                type: "button", class: "btn-sm btn-sm-ghost", disabled: local.workflowCreating || form.customAgents.length >= 8,
+                onClick: () => { addCustomAgent(); renderPanel(); },
+              }, "添加 Agent"),
+            ]),
+            h("p", { class: "workflow-create-hint" }, "未填写依赖的 Agent 会并行执行；复核/汇总 Agent 可依赖多个前序 Agent。依赖名称必须来自前面已定义的 Agent。工具仅支持 get_schema、query_data。"),
+            ...form.customAgents.map((agent, index) => h("fieldset", { class: "workflow-custom-agent", key: `custom-agent-${index}` }, [
+              h("legend", null, `Agent ${index + 1}`),
+              h("label", null, [h("span", null, "名称"), h("input", { value: agent.name, disabled: local.workflowCreating, onInput: event => updateCustomAgent(index, "name", event.target.value) })]),
+              h("label", null, [h("span", null, "角色"), h("input", { value: agent.role, disabled: local.workflowCreating, onInput: event => updateCustomAgent(index, "role", event.target.value) })]),
+              h("label", null, [h("span", null, "Agent 指令"), h("textarea", { rows: 3, value: agent.instructions, disabled: local.workflowCreating, onInput: event => updateCustomAgent(index, "instructions", event.target.value) })]),
+              h("label", null, [h("span", null, "允许工具（可留空）"), h("input", { value: agent.tools, placeholder: "get_schema, query_data", disabled: local.workflowCreating, onInput: event => updateCustomAgent(index, "tools", event.target.value) })]),
+              h("label", null, [h("span", null, "依赖上游 Agent（可留空，以逗号分隔）"), h("input", { value: agent.dependsOn || "", placeholder: "例如：数据分析员, 异常分析员", disabled: local.workflowCreating, onInput: event => updateCustomAgent(index, "dependsOn", event.target.value) })]),
+              h("button", { type: "button", class: "btn-sm btn-sm-ghost", disabled: local.workflowCreating || form.customAgents.length <= 1, onClick: () => { removeCustomAgent(index); renderPanel(); } }, "移除 Agent"),
+            ])),
+          ]),
         h("label", null, [
           h("span", null, "名称"),
           h("input", {
@@ -1462,12 +1929,18 @@ import { open as openJobHistory } from "../legacy/job_history.js";
         const graph = version.graph || workflow.draft_graph || {};
         const schema = version.input_schema || workflow.draft_input_schema || {};
         const requiredInputs = Array.isArray(schema.required) ? schema.required : [];
-        const defaultInputs = Object.fromEntries(requiredInputs.map(key => [
-          key,
-          schema.properties?.[key]?.type === "string" ? "当前工作区数据" : {},
-        ]));
-        const inputValue = local.workflowInputs[workflow.id]
-          ?? JSON.stringify(defaultInputs, null, 2);
+        const inputValues = workflowInputValues(workflow.id, schema);
+        const inputProperties = schema.properties && typeof schema.properties === "object"
+          ? schema.properties
+          : {};
+        const displayInputProperties = {
+          ...inputProperties,
+          business_context: inputProperties.business_context || {
+            type: "string",
+            title: "业务补充说明",
+            description: "可填写字段单位、口径、业务目标或需要重点核查的问题",
+          },
+        };
         const published = Boolean(workflow.current_version_id);
         const expanded = Object.prototype.hasOwnProperty.call(local.workflowExpanded, workflow.id)
           ? local.workflowExpanded[workflow.id]
@@ -1525,19 +1998,41 @@ import { open as openJobHistory } from "../legacy/job_history.js";
             h("div", { class: "workflow-input-head" }, [
               h("strong", null, "运行输入（JSON）"),
               h("small", null, requiredInputs.length
-                ? `必填：${requiredInputs.join("、")}`
-                : "无必填字段"),
+                ? `必填：${requiredInputs.join("、")} · 自动保存`
+                : "无必填字段 · 自动保存"),
             ]),
-            h("textarea", {
-              class: "workflow-inputs",
-              rows: 4,
-              spellcheck: "false",
-              value: inputValue,
-              placeholder: '{"source":"sales.csv"}',
-              onInput: event => {
-                local.workflowInputs[workflow.id] = event.target.value;
-              },
-            }),
+            h("div", { class: "workflow-input-form" }, Object.entries(displayInputProperties).map(([key, property]) => {
+              const value = inputValues[key] == null ? "" : String(inputValues[key]);
+              const isLongText = key === "business_context" || value.length > 80;
+              return h("label", { key }, [
+                h("span", null, `${workflowInputLabel(key, property)}${requiredInputs.includes(key) ? " *" : ""}`),
+                isLongText
+                  ? h("textarea", {
+                    rows: 3, value, disabled: !published || local.workflowStarting === workflow.id,
+                    placeholder: property.description || "可选补充说明",
+                    onInput: event => updateWorkflowInputValue(workflow.id, schema, key, event.target.value),
+                  })
+                  : h("input", {
+                    value, disabled: !published || local.workflowStarting === workflow.id,
+                    placeholder: property.description || "请输入",
+                    onInput: event => updateWorkflowInputValue(workflow.id, schema, key, event.target.value),
+                  }),
+                property.description ? h("small", null, property.description) : null,
+              ]);
+            })),
+            h("details", {
+              class: "workflow-input-advanced",
+              open: Boolean(local.workflowInputAdvanced[workflow.id]),
+              onToggle: event => { local.workflowInputAdvanced[workflow.id] = event.currentTarget.open; },
+            }, [
+              h("summary", null, "高级：编辑 JSON 输入"),
+              h("textarea", {
+                class: "workflow-inputs", rows: 4, spellcheck: "false",
+                value: JSON.stringify(inputValues, null, 2),
+                disabled: !published || local.workflowStarting === workflow.id,
+                onInput: event => { saveWorkflowInputRaw(workflow.id, event.target.value); },
+              }),
+            ]),
             !published ? h("button", {
               class: "btn-sm btn-sm-primary workflow-start",
               type: "button",
@@ -1657,12 +2152,18 @@ import { open as openJobHistory } from "../legacy/job_history.js";
     }
 
     function workflowOutputText(value) {
-      if (typeof value === "string") return value;
+      if (typeof value === "string") return decodeWorkflowEscapes(value);
       try {
         return JSON.stringify(value, null, 2);
       } catch {
         return String(value ?? "");
       }
+    }
+
+    function unwrapWorkflowMarkdownFence(text) {
+      const source = String(text || "");
+      const match = source.trim().match(/^```(?:markdown|md)?\s*\r?\n([\s\S]*?)\r?\n?```\s*$/i);
+      return match ? match[1] : source;
     }
 
     async function copyWorkflowOutput(value) {
@@ -1681,7 +2182,7 @@ import { open as openJobHistory } from "../legacy/job_history.js";
           class: compact
             ? "workflow-output-content team-markdown compact"
             : "workflow-output-content team-markdown",
-          innerHTML: renderMarkdown(text),
+          innerHTML: renderMarkdown(unwrapWorkflowMarkdownFence(text)),
         });
       }
       return h("pre", {
@@ -1702,6 +2203,20 @@ import { open as openJobHistory } from "../legacy/job_history.js";
         operating_report: "经营分析报告",
         report: "分析报告",
       };
+      const cleaningWorkflow = (detail?.graph?.nodes || []).some(node =>
+        node.node_id === "propose_cleaning"
+          && Array.isArray(node.output_contract)
+          && node.output_contract.includes("cleaning_plan")
+      );
+      const executionNode = (detail?.nodes || []).filter(node => node.node_id === "apply_cleaning")
+        .sort((left, right) => (right.iteration || 1) - (left.iteration || 1) || (right.attempt || 1) - (left.attempt || 1))[0];
+      const supportsControlledCleaning = !!executionNode || (detail?.graph?.nodes || []).some(node => node.node_id === "apply_cleaning");
+      const executionStatus = String(executionNode?.status || "pending").toLowerCase();
+      const executionCopy = executionStatus === "succeeded"
+        ? ["执行状态：已完成受控清洗", "已按获批方案生成 cleaned_data 派生表；原始源数据未被覆盖。最终报告仅依据实际工具执行结果生成。"]
+        : executionStatus === "failed"
+          ? ["执行状态：清洗未完成", "清洗节点执行失败，最终报告应列出失败原因；原始源数据未被覆盖。"]
+          : ["执行状态：等待审批后执行", "清洗方案尚未获批。获批后系统才会创建 cleaned_data 派生表，原始源数据不会被覆盖。"];
       return h("section", { class: "workflow-final-output" }, [
         h("div", { class: "workflow-output-section-head" }, [
           h("div", null, [
@@ -1709,6 +2224,10 @@ import { open as openJobHistory } from "../legacy/job_history.js";
             h("span", null, `${entries.length} 项结果`),
           ]),
         ]),
+        cleaningWorkflow ? h("div", { class: "workflow-execution-status planning-only" }, [
+          h("strong", null, supportsControlledCleaning ? executionCopy[0] : "旧版本：未执行数据清洗"),
+          h("span", null, supportsControlledCleaning ? executionCopy[1] : "此运行来自旧版仅审批方案的 Workflow；没有执行真实清洗。请新建“受控数据清洗”版本后再运行。"),
+        ]) : null,
         ...entries.map(([key, value]) => h("div", {
           key,
           class: "workflow-output-field",
@@ -1732,14 +2251,42 @@ import { open as openJobHistory } from "../legacy/job_history.js";
     function renderRunNodes(detail) {
       const nodes = detail?.nodes || [];
       const latestNodes = latestNodeRunsById(nodes);
+      const definitions = new Map((detail?.graph?.nodes || []).map(item => [item.node_id, item]));
       if (!nodes.length) {
         return h("div", { class: "teams-empty compact" }, "该 Run 暂无节点记录。");
       }
+      const nodeDuration = node => {
+        if (!node?.started_at || !node?.finished_at) return "";
+        const started = new Date(node.started_at).getTime();
+        const finished = new Date(node.finished_at).getTime();
+        if (!Number.isFinite(started) || !Number.isFinite(finished) || finished < started) return "";
+        return formatWorkflowDuration((finished - started) / 1000);
+      };
+      const nodeCost = value => {
+        if (value === null || value === undefined || value === "") return "";
+        const amount = Number(value);
+        if (!Number.isFinite(amount)) return "";
+        return `成本 $${amount.toLocaleString(undefined, { maximumFractionDigits: 6 })}`;
+      };
       return h("div", { class: "workflow-run-nodes" }, nodes.map(node => {
         const outputs = Object.entries(node.output || {});
+        const definition = definitions.get(node.node_id) || {};
+        const limits = definition.limits || {};
+        const usage = [
+          node.model_name ? `模型 ${node.model_name}` : "",
+          Number.isFinite(Number(node.input_tokens)) || Number.isFinite(Number(node.output_tokens))
+            ? `输入 ${Number(node.input_tokens || 0).toLocaleString()} · 输出 ${Number(node.output_tokens || 0).toLocaleString()} Token`
+            : "",
+          node.tool_calls != null ? `工具调用 ${node.tool_calls} 次` : "",
+          nodeDuration(node) ? `运行时长 ${nodeDuration(node)}` : "",
+          nodeCost(node.estimated_cost),
+          limits.max_tokens ? `Token 预算 ${Number(limits.max_tokens).toLocaleString()}` : "",
+        ].filter(Boolean);
         const canRetry = detail?.run?.status === "failed"
           && node.status === "failed"
           && latestNodes.get(node.node_id)?.id === node.id;
+        const canFork = ["succeeded", "failed", "canceled"].includes(detail?.run?.status)
+          && node.status === "succeeded";
         return h("div", {
           key: node.id,
           class: "workflow-run-node",
@@ -1749,23 +2296,33 @@ import { open as openJobHistory } from "../legacy/job_history.js";
             h("span", { class: workflowStatusClass(node.status) }, workflowStatusLabel(node.status)),
           ]),
           h("div", { class: "workflow-node-meta" }, [
-            h("span", null, `Agent ${node.agent_profile_id || "-"}`),
+            h("span", null, definition.type ? `类型 ${definition.type}` : `Agent ${node.agent_profile_id || "-"}`),
             node.job_id ? h("button", {
               class: "workflow-job-link",
               type: "button",
               title: "在 Job 历史中查看",
               onClick: () => openWorkflowJob(node.job_id),
             }, `Job ${node.job_id}`) : h("span", null, "Job -"),
-            h("span", null, `Attempt ${node.attempt || 1}`),
+            h("span", { title: "同一节点因重试或返工产生的新执行次数" }, `第 ${node.attempt || 1} 次尝试`),
           ]),
+          usage.length ? h("div", { class: "workflow-node-observability" }, usage.map(item =>
+            h("span", { key: item }, item)
+          )) : null,
           node.error ? h("div", { class: "workflow-node-error" }, node.error) : null,
-          canRetry ? h("div", { class: "workflow-node-actions" }, [
-            h("button", {
+          canRetry || canFork ? h("div", { class: "workflow-node-actions" }, [
+            canRetry ? h("button", {
               class: "btn-sm btn-sm-primary",
               type: "button",
-              disabled: Boolean(local.workflowRetrying),
+              disabled: Boolean(local.workflowRetrying || local.workflowForking),
               onClick: () => retryWorkflowNode(node),
-            }, local.workflowRetrying === node.id ? "重新派发中..." : "重试节点"),
+            }, local.workflowRetrying === node.id ? "重新派发中..." : "重试节点") : null,
+            canFork ? h("button", {
+              class: "btn-sm btn-sm-ghost",
+              type: "button",
+              title: "复用该节点及其已成功的上游输出，创建新的可审计 Run",
+              disabled: Boolean(local.workflowRetrying || local.workflowForking),
+              onClick: () => forkWorkflowRunFromCheckpoint(node),
+            }, local.workflowForking === node.id ? "创建分叉中..." : "从此检查点分叉") : null,
           ]) : null,
           outputs.length ? h("details", { class: "workflow-node-output" }, [
             h("summary", null, `查看节点输出 · ${outputs.length} 项`),
@@ -1790,21 +2347,100 @@ import { open as openJobHistory } from "../legacy/job_history.js";
       }));
     }
 
+    function workflowNodeLabel(nodeId) {
+      const labels = {
+        inspect_data: "数据检查",
+        analyze_metrics: "指标分析",
+        analyze_anomalies: "异常分析",
+        verify_findings: "结论复核",
+        generate_report: "报告生成",
+        propose_cleaning: "清洗方案",
+        verify_cleaning: "清洗方案复核",
+        apply_cleaning: "执行清洗",
+      };
+      return labels[nodeId] || nodeId || "节点";
+    }
+
+    function workflowEventSummary(event) {
+      const type = String(event?.type || "");
+      const node = workflowNodeLabel(String(event?.node_id || ""));
+      if (type === "workflow_run_created") {
+        return { title: "已创建运行", detail: "已创建一条独立的 Workflow 运行记录。", tone: "info" };
+      }
+      if (type === "workflow_run_status") {
+        return {
+          title: `运行状态：${workflowStatusLabel(event?.status)}`,
+          detail: event?.status === "succeeded" ? "全部节点已完成，运行已结算。" : "Workflow 状态已更新。",
+          tone: event?.status || "info",
+        };
+      }
+      if (type === "workflow_node_status") {
+        return {
+          title: `${node}：${workflowStatusLabel(event?.status)}`,
+          detail: "节点执行状态已更新。",
+          tone: event?.status || "info",
+        };
+      }
+      if (type === "workflow_node_usage") {
+        return {
+          title: `${node}：已记录模型用量`,
+          detail: `输入 ${Number(event?.input_tokens || 0).toLocaleString()} Token，输出 ${Number(event?.output_tokens || 0).toLocaleString()} Token。`,
+          tone: "info",
+        };
+      }
+      if (type === "workflow_checkpoint_node_reused") {
+        return {
+          title: `复用节点：${node}`,
+          detail: "复用了来源 Run 的成功结果，未重新执行该节点。",
+          tone: "succeeded",
+        };
+      }
+      if (type === "workflow_run_checkpoint_forked") {
+        const reused = Array.isArray(event?.reused_node_ids) ? event.reused_node_ids : [];
+        return {
+          title: "已从检查点创建分叉运行",
+          detail: reused.length ? `已复用 ${reused.length} 个节点：${reused.map(workflowNodeLabel).join("、")}。` : "已复用检查点前的成功节点。",
+          tone: "succeeded",
+        };
+      }
+      if (type === "workflow_policy_denied") {
+        return {
+          title: `${node}：策略已拒绝`,
+          detail: String(event?.reason || "当前权限策略不允许执行此节点。"),
+          tone: "failed",
+        };
+      }
+      return { title: "Workflow 审计事件", detail: type || "系统记录了一条运行事件。", tone: "info" };
+    }
+
     function renderRunEvents(detail) {
       const events = detail?.events || [];
-      if (!events.length) {
-        return h("div", { class: "teams-empty compact" }, "暂无事件。");
-      }
-      return h("div", { class: "workflow-events" }, events.slice(-80).reverse().map(event => h("div", {
-        key: `${event.sequence}-${event.type}`,
-        class: "workflow-event",
-      }, [
-        h("div", { class: "workflow-event-head" }, [
-          h("strong", null, event.type || "event"),
-          h("small", null, `#${event.sequence || ""} ${formatTime(event.created_at)}`),
+      if (!events.length) return null;
+      return h("details", { class: "workflow-events-panel workflow-traceability-panel" }, [
+        h("summary", { class: "workflow-traceability-summary" }, [
+          h("span", null, `运行事件（${events.length} 条）`),
+          h("small", null, "查看状态变化、复用和策略记录"),
         ]),
-        h("pre", null, JSON.stringify(event, null, 2)),
-      ])));
+        h("div", { class: "workflow-events" }, events.slice(-80).reverse().map(event => {
+          const summary = workflowEventSummary(event);
+          return h("details", {
+            key: `${event.sequence}-${event.type}`,
+            class: `workflow-event workflow-event-${summary.tone}`,
+          }, [
+            h("summary", { class: "workflow-event-head" }, [
+              h("div", { class: "workflow-event-summary" }, [
+                h("strong", null, summary.title),
+                h("span", null, summary.detail),
+              ]),
+              h("small", null, formatTime(event.created_at)),
+            ]),
+            h("details", { class: "workflow-event-audit" }, [
+              h("summary", null, "查看审计详情"),
+              h("pre", null, JSON.stringify(event, null, 2)),
+            ]),
+          ]);
+        })),
+      ]);
     }
 
     function renderWorkflowDag(detail) {
@@ -1871,6 +2507,14 @@ import { open as openJobHistory } from "../legacy/job_history.js";
           if (pending) seedApprovalRevisionFields(approval, sourceManifest);
           const form = getApprovalForm(approval);
           const revisionFields = form.revisionFields || [];
+          const sourceNode = (detail?.nodes || []).find(node => node.id === approval.node_run_id) || {};
+          const cleaningApproval = approval.node_id === "propose_cleaning"
+            || approval.node_id === "verify_cleaning"
+            || (sourceManifest?.items || []).some(item => manifestItemName(item) === "cleaning_plan");
+          const supportsControlledCleaning = (detail?.graph?.nodes || []).some(node => node.node_id === "apply_cleaning");
+          const planNode = (detail?.nodes || []).filter(node => node.node_id === "propose_cleaning")
+            .sort((left, right) => (right.iteration || 1) - (left.iteration || 1) || (right.attempt || 1) - (left.attempt || 1))[0] || {};
+          const planValue = sourceNode?.output?.cleaning_plan ?? planNode?.output?.cleaning_plan;
           const commentRows = [
             approval.comment ? `意见：${approval.comment}` : "",
             approval.comments && Object.keys(approval.comments).length
@@ -1906,6 +2550,16 @@ import { open as openJobHistory } from "../legacy/job_history.js";
               ? h("div", { class: "workflow-approval-note" }, commentRows.join("\n"))
               : null,
             pending ? h("div", { class: "workflow-approval-form" }, [
+              cleaningApproval ? h("div", { class: "workflow-approval-scope" }, [
+                h("strong", null, supportsControlledCleaning ? "本次审批授权执行清洗" : "旧版本仅审批方案，不执行清洗"),
+                h("span", null, supportsControlledCleaning
+                  ? "方案已通过独立复核。批准后系统会按获批方案执行一次 clean_data，并将结果写入 cleaned_data 派生表；原始源数据不会被覆盖。"
+                  : "此运行来自旧版仅审批方案的 Workflow；批准后只会生成说明，不会执行数据清洗。"),
+              ]) : null,
+              planValue != null ? h("details", { class: "workflow-approval-source", open: true }, [
+                h("summary", null, "查看待审批方案"),
+                renderWorkflowOutputValue(planValue, true),
+              ]) : null,
               h("label", null, [
                 h("span", null, "审批意见"),
                 h("textarea", {
@@ -1916,7 +2570,9 @@ import { open as openJobHistory } from "../legacy/job_history.js";
                   onInput: event => updateApprovalForm(approval, "comment", event.target.value),
                 }),
               ]),
-              h("div", { class: "workflow-approval-revision-head" }, [
+              !cleaningApproval ? h("details", { class: "workflow-approval-revision-details" }, [
+                h("summary", null, "需要人工改写方案时，再展开修订草稿"),
+                h("div", { class: "workflow-approval-revision-head" }, [
                 h("strong", null, "修订草稿"),
                 h("div", { class: "workflow-approval-revision-actions" }, [
                   h("button", {
@@ -1989,6 +2645,7 @@ import { open as openJobHistory } from "../legacy/job_history.js";
                   }),
                 ]),
               ]),
+              ]) : null,
             ]) : null,
             pending ? h("div", { class: "workflow-approval-actions" }, [
               h("button", {
@@ -1996,19 +2653,19 @@ import { open as openJobHistory } from "../legacy/job_history.js";
                 type: "button",
                 disabled: local.workflowApproving === approval.id,
                 onClick: () => decideWorkflowApproval(approval, "approve"),
-              }, "批准继续"),
-              h("button", {
+              }, cleaningApproval && supportsControlledCleaning ? "批准方案并执行清洗" : cleaningApproval ? "批准方案并生成说明" : "批准继续"),
+              !cleaningApproval ? h("button", {
                 class: "btn-sm btn-sm-primary",
                 type: "button",
                 disabled: local.workflowApproving === approval.id,
                 onClick: () => decideWorkflowApproval(approval, "approve_with_changes"),
-              }, "带修改批准"),
+              }, "带修改批准") : null,
               h("button", {
                 class: "btn-sm btn-sm-ghost",
                 type: "button",
                 disabled: local.workflowApproving === approval.id,
                 onClick: () => decideWorkflowApproval(approval, "reject_and_retry"),
-              }, "要求重做"),
+              }, cleaningApproval ? "补充要求并重新生成方案" : "要求重做"),
               h("button", {
                 class: "btn-sm btn-sm-danger",
                 type: "button",
@@ -2024,38 +2681,88 @@ import { open as openJobHistory } from "../legacy/job_history.js";
     function renderRunMaterials(detail) {
       const manifests = detail?.manifests || [];
       const consumptions = detail?.consumptions || [];
-      if (!manifests.length) {
-        return h("div", { class: "teams-empty compact" }, "暂无材料 Manifest。");
-      }
-      return h("div", { class: "workflow-materials" }, [
-        ...manifests.map(manifest => h("details", {
-          key: manifest.id,
-          class: "workflow-material",
-        }, [
+      const lineage = detail?.lineage || [];
+      if (!manifests.length && !lineage.length && !consumptions.length) return [];
+      const nodesByRunId = new Map((detail?.nodes || []).map(node => [node.id, node]));
+      const artifactsById = new Map(manifests.flatMap(manifest => (manifest.items || []).map(item => [item.artifact_id, item])));
+      const sourceLabel = nodeRunId => workflowNodeLabel(nodesByRunId.get(nodeRunId)?.node_id || "");
+      const artifactLabel = artifactId => artifactsById.get(artifactId)?.logical_name || artifactsById.get(artifactId)?.name || "上游材料";
+      return [
+        lineage.length ? h("details", { class: "workflow-traceability-panel" }, [
           h("summary", null, [
-            h("span", null, `${manifest.kind || "manifest"} · ${manifest.items?.length || 0} 项`),
-            h("small", null, manifest.id),
+            h("span", null, `最终输出来源（${lineage.length} 项）`),
+            h("small", null, "查看报告由哪些节点和证据生成"),
           ]),
-          h("div", { class: "workflow-material-items" }, (manifest.items || []).map(item => h("div", {
-            key: item.artifact_id || item.uri,
-            class: "workflow-material-item",
+          h("p", { class: "workflow-traceability-hint" }, "每项最终输出都可追溯到生成节点、质量检查和证据引用。"),
+          ...lineage.map(item => h("div", { class: "workflow-consumption", key: `${item.output}:${item.artifact_id}` }, [
+            h("strong", null, item.output),
+            h("span", null, `由${workflowNodeLabel(item.producer_node_id)}生成`),
+            item.quality?.status ? h("small", null, `质量 ${item.quality.status}`) : null,
+            item.evidence?.length ? h("small", null, `证据 ${item.evidence.length} 条`) : null,
+          ])),
+        ]) : null,
+        manifests.length ? h("details", { class: "workflow-traceability-panel" }, [
+          h("summary", null, [
+            h("span", null, `节点输出与材料（${manifests.length} 份）`),
+            h("small", null, "查看节点产生的可追溯结果"),
+          ]),
+          h("div", { class: "workflow-materials" }, manifests.map(manifest => h("details", {
+            key: manifest.id,
+            class: "workflow-material",
           }, [
-            h("strong", null, item.logical_name || item.name || item.artifact_id),
-            h("span", null, item.uri || item.artifact_id || ""),
-            item.source_tool ? h("small", null, `tool ${item.source_tool}`) : null,
-            item.source_job_id ? h("small", null, `job ${item.source_job_id}`) : null,
-            item.data_snapshot_id ? h("small", null, `snapshot ${item.data_snapshot_id}`) : null,
-            item.sql_hash ? h("small", null, `sql ${item.sql_hash.slice(0, 12)}`) : null,
-            item.tool_artifacts ? h("small", null, "workflow_artifact tool result") : null,
+            h("summary", null, h("span", null, `${sourceLabel(manifest.node_run_id)}的输出 · ${manifest.items?.length || 0} 项`)),
+            h("div", { class: "workflow-material-items" }, (manifest.items || []).map(item => h("div", {
+              key: item.artifact_id || item.uri,
+              class: "workflow-material-item",
+            }, [
+              h("strong", null, item.logical_name || item.name || item.artifact_id),
+              item.type ? h("small", { class: "workflow-material-type" }, `类型 ${item.type} · ${item.schema_version || "v1"}`) : null,
+              item.quality?.status ? h("small", { class: `workflow-material-quality ${item.quality.status}` }, `质量 ${item.quality.status}`) : null,
+              item.evidence?.length ? h("small", { class: "workflow-material-evidence" }, `证据 ${item.evidence.length} 条`) : null,
+              item.content_available ? h("button", {
+                class: "btn-sm btn-sm-ghost workflow-artifact-open",
+                type: "button",
+                disabled: local.workflowArtifactLoading === item.artifact_id,
+                onClick: () => loadWorkflowArtifact(detail?.run?.id, item.artifact_id),
+              }, local.workflowArtifactLoading === item.artifact_id ? "读取中..." : "查看完整内容") : null,
+              Object.prototype.hasOwnProperty.call(local.workflowArtifactContents, item.artifact_id)
+                ? h("details", { class: "workflow-artifact-content", open: true }, [
+                  h("summary", null, "完整 Artifact 内容"),
+                  renderWorkflowOutputValue(local.workflowArtifactContents[item.artifact_id], true),
+                ]) : null,
+            ]))),
           ]))),
-        ])),
-        consumptions.length ? h("div", { class: "workflow-consumptions" }, [
-          h("div", { class: "team-section-title" }, "消费关系"),
-          ...consumptions.map(item => h("div", {
+        ]) : null,
+        consumptions.length ? h("details", { class: "workflow-traceability-panel" }, [
+          h("summary", null, [
+            h("span", null, `材料传递（${consumptions.length} 条）`),
+            h("small", null, "查看下游节点使用了哪些上游结果"),
+          ]),
+          h("div", { class: "workflow-consumptions" }, consumptions.map(item => h("div", {
             key: item.id,
             class: "workflow-consumption",
-          }, `${item.consumer_node_run_id} ← ${item.artifact_id} (${item.purpose || "material"})`)),
+          }, [
+            h("strong", null, `${sourceLabel(item.consumer_node_run_id)} 使用了“${artifactLabel(item.artifact_id)}”`),
+            h("span", null, `来源：${sourceLabel(item.producer_node_run_id)}`),
+          ]))),
         ]) : null,
+      ].filter(Boolean);
+    }
+
+    function renderWorkflowTraceability(detail) {
+      const materialPanels = renderRunMaterials(detail);
+      const events = renderRunEvents(detail);
+      if (!materialPanels.length && !events) return null;
+      return h("details", { class: "workflow-traceability" }, [
+        h("summary", { class: "team-section-title" }, [
+          h("span", null, "追溯与审计"),
+          h("small", null, `${(detail?.manifests || []).length} 份材料 · ${(detail?.events || []).length} 条事件`),
+        ]),
+        h("p", { class: "workflow-traceability-intro" }, "用于核对最终输出的来源、节点间材料传递及完整运行记录；日常查看结果时无需展开。"),
+        h("div", { class: "workflow-traceability-sections" }, [
+          ...materialPanels,
+          events,
+        ]),
       ]);
     }
 
@@ -2150,8 +2857,11 @@ import { open as openJobHistory } from "../legacy/job_history.js";
             h("span", { class: version.success_rate >= 0.9 ? "good" : "warn" }, `${Math.round((version.success_rate || 0) * 100)}% 成功`),
           ]),
         )) : h("div", { class: "workflow-metrics-empty" }, "运行后将显示版本成功率、时长和 Token 用量。"),
-        suggestions.length ? h("div", { class: "workflow-suggestions" }, [
-          h("div", { class: "team-section-title" }, "规则化优化建议"),
+        suggestions.length ? h("details", { class: "workflow-suggestions" }, [
+          h("summary", null, [
+            h("span", { class: "team-section-title" }, "规则化优化建议"),
+            h("small", null, `${suggestions.length} 项`),
+          ]),
           ...suggestions.map(suggestion => h("div", { class: "workflow-suggestion", key: suggestion.id }, [
             h("div", null, [
               h("strong", null, suggestion.title),
@@ -2236,14 +2946,7 @@ import { open as openJobHistory } from "../legacy/job_history.js";
             h("div", { class: "team-section-title" }, "节点"),
             renderRunNodes(detail),
           ]),
-          h("section", null, [
-            h("div", { class: "team-section-title" }, "事件"),
-            renderRunEvents(detail),
-          ]),
-          h("section", null, [
-            h("div", { class: "team-section-title" }, "材料"),
-            renderRunMaterials(detail),
-          ]),
+          renderWorkflowTraceability(detail),
         ]),
       ]);
     }

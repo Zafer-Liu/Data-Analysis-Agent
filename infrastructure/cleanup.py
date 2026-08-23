@@ -39,15 +39,20 @@ import threading
 import time
 from pathlib import Path
 from typing import Iterable, Tuple
-from infrastructure.artifact_lifecycle import reclaim_expired_session_trash
+from infrastructure.artifact_lifecycle import (
+    prune_registry_for_paths,
+    soft_delete_session_group,
+)
 from infrastructure.paths import data_root
 
 log = logging.getLogger(__name__)
 
 # (relative path, max age in days, "label for logs")
-# Session/ and Dashboard/ are intentionally NOT swept — those are user-saved
-# artifacts with their own UI delete buttons, and losing them silently would
-# be a worse failure than disk growth.
+# Session/ and Dashboard/ are intentionally NOT swept by these age rules —
+# those are user-saved artifacts with their own UI delete buttons, and losing
+# them silently would be a worse failure than disk growth. The only exception
+# is _sweep_stale_autosaves below: long-idle autosave_*.json go to the
+# recoverable session trash, never straight to unlink.
 DEFAULT_RULES: Tuple[Tuple[str, int, str], ...] = (
     ("uploads",          int(os.environ.get("BAA_CLEANUP_UPLOAD_DAYS", "30")), "uploads"),
     ("outputs/charts",   int(os.environ.get("BAA_CLEANUP_OUTPUT_DAYS", "90")), "outputs/charts"),
@@ -55,13 +60,19 @@ DEFAULT_RULES: Tuple[Tuple[str, int, str], ...] = (
 )
 
 
-def _sweep_one(root: Path, max_age_days: int, label: str) -> Tuple[int, int]:
-    """Delete files older than max_age_days under root. Returns (n_files_removed, bytes_freed)."""
+def _sweep_one(root: Path, max_age_days: int, label: str, base_dir: Path | None = None) -> Tuple[int, int]:
+    """Delete files older than max_age_days under root. Returns (n_files_removed, bytes_freed).
+
+    When `base_dir` is provided, every removed file's registry entry (if any)
+    is dropped too, so the artifact registry never reports "registered but
+    missing" for files the sweeper physically deleted.
+    """
     if not root.exists() or not root.is_dir():
         return 0, 0
     cutoff = time.time() - (max_age_days * 86400)
     removed = 0
     freed = 0
+    removed_paths: set[str] = set()
     for path in root.rglob("*"):
         if not path.is_file():
             continue
@@ -72,19 +83,58 @@ def _sweep_one(root: Path, max_age_days: int, label: str) -> Tuple[int, int]:
                 path.unlink()
                 removed += 1
                 freed += size
+                if base_dir is not None:
+                    try:
+                        removed_paths.add(str(path.relative_to(base_dir)).replace("\\", "/"))
+                    except ValueError:
+                        pass
         except OSError as exc:
             log.warning("[cleanup] cannot remove %s: %s", path, exc)
-    # Prune empty directories (deepest first)
+    # Prune empty directories (deepest first).
+    # 防御：显式检查目录为空再 rmdir——不能依赖「rmdir 对非空目录必然失败」的假设
+    # （部分环境/沙箱下 rmdir 会递归删除非空目录，导致误删新文件）。
     for path in sorted(root.rglob("*"), key=lambda p: -len(p.parts)):
         if path.is_dir():
             try:
-                path.rmdir()  # only succeeds when empty
+                if not any(path.iterdir()):
+                    path.rmdir()
             except OSError:
                 pass
+    if removed_paths:
+        try:
+            pruned = prune_registry_for_paths(removed_paths)
+            if pruned:
+                log.info("[cleanup] registry: dropped %d active entry/ies for swept files", pruned)
+        except Exception as exc:
+            log.warning("[cleanup] registry prune failed: %s", exc)
     if removed:
         log.info("[cleanup] %s: removed %d file(s), freed %.1f MB (>%d days old)",
                  label, removed, freed / 1024 / 1024, max_age_days)
     return removed, freed
+
+
+def _sweep_stale_autosaves(session_dir: Path, max_age_days: int) -> int:
+    """Soft-delete autosaves untouched for max_age_days (manual saves exempt).
+
+    Uses the session trash (not unlink) so an accidental sweep stays
+    recoverable for the trash retention window.
+    """
+    if max_age_days <= 0 or not session_dir.is_dir():
+        return 0
+    cutoff = time.time() - (max_age_days * 86400)
+    removed = 0
+    for path in session_dir.glob("autosave_*.json"):
+        try:
+            if path.stat().st_mtime >= cutoff:
+                continue
+            soft_delete_session_group(session_dir, path.name)
+            removed += 1
+        except (OSError, ValueError, FileNotFoundError) as exc:
+            log.warning("[cleanup] stale autosave %s skipped: %s", path.name, exc)
+    if removed:
+        log.info("[cleanup] session autosaves: soft-deleted %d group(s) (>%d days idle)",
+                 removed, max_age_days)
+    return removed
 
 
 def run_cleanup(base_dir: Path, rules: Iterable[Tuple[str, int, str]] = DEFAULT_RULES) -> None:
@@ -92,12 +142,17 @@ def run_cleanup(base_dir: Path, rules: Iterable[Tuple[str, int, str]] = DEFAULT_
     total_removed = 0
     total_freed = 0
     for rel, days, label in rules:
-        n, b = _sweep_one(base_dir / rel, days, label)
+        n, b = _sweep_one(base_dir / rel, days, label, base_dir)
         total_removed += n
         total_freed += b
-    session_summary = reclaim_expired_session_trash(retention_days=int(os.environ.get("BAA_SESSION_TRASH_DAYS", "30")))
-    total_removed += session_summary["files"]
-    total_freed += session_summary["bytes"]
+    total_removed += _sweep_stale_autosaves(
+        base_dir / "outputs" / "Session",
+        int(os.environ.get("BAA_AUTOSAVE_IDLE_DAYS", "30")),
+    )
+    # Archived conversations (session trash) are NEVER auto-reclaimed: a
+    # conversation can only be archived or emptied by the user, per product
+    # decision (Settings → Storage). Artifacts/uploads/memory trash are still
+    # governed by the retention preset through the UI.
     if total_removed == 0:
         log.debug("[cleanup] sweep complete — nothing to remove")
 

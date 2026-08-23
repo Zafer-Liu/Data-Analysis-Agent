@@ -10,6 +10,7 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 _TIME_SERIES_PREFIX = "Time_Series_"
+_JOB_ANALYSIS_IDS = {"Torch_MLP"}
 _ANALYSIS_JOB_ROW_THRESHOLD = 1000
 _CHART_JOB_ROW_THRESHOLD = 50_000
 _PROFILE_JOB_ROW_THRESHOLD = 50_000
@@ -28,6 +29,7 @@ def _execute_analysis(
     target_column: str,
     groupby_column: str,
     n_deciles: int,
+    analysis_options: dict | None = None,
     progress_callback=None,
 ):
     """Run one analysis without holding an Agent or data-source reference."""
@@ -43,8 +45,12 @@ def _execute_analysis(
         "groupby_column": groupby_column or None,
         "n_deciles": n_deciles,
     }
-    if progress_callback is not None and analysis_name.startswith(_TIME_SERIES_PREFIX):
+    if progress_callback is not None and (
+        analysis_name.startswith(_TIME_SERIES_PREFIX) or analysis_name in _JOB_ANALYSIS_IDS
+    ):
         kwargs["progress_callback"] = progress_callback
+    if analysis_name == "AB_Test_Analysis":
+        kwargs["analysis_options"] = analysis_options or {}
     return entry, run_fn(**kwargs)
 
 
@@ -655,7 +661,13 @@ class DataToolsMixin:
         ds = self.data_source
 
         try:
-            ds.create_analysis_table(sql=None, table_name=table_name, _df=df)
+            created = ds.create_analysis_table(sql=None, table_name=table_name, _df=df)
+            # Some connectors report failures as text instead of raising.  Do
+            # not let a caller subsequently claim a derived table was written.
+            if isinstance(created, str) and (
+                "失败" in created or "error" in created.lower()
+            ):
+                raise RuntimeError(created)
             self._schema_cache = None
             return
         except TypeError:
@@ -681,6 +693,7 @@ class DataToolsMixin:
         target_column: str,
         groupby_column: str = "",
         n_deciles: int = 10,
+        analysis_options: dict | None = None,
     ) -> str:
         if not self.data_source:
             return "No data source connected."
@@ -698,6 +711,7 @@ class DataToolsMixin:
                 target_column,
                 groupby_column,
                 n_deciles,
+                analysis_options,
             )
         except KeyError as exc:
             return str(exc)
@@ -715,6 +729,7 @@ class DataToolsMixin:
         target_column: str,
         groupby_column: str = "",
         n_deciles: int = 10,
+        analysis_options: dict | None = None,
     ):
         """Run large time-series analyses as cancellable JobRunner work."""
         if not self.data_source:
@@ -726,15 +741,14 @@ class DataToolsMixin:
         if df.empty:
             return "Query returned no rows — cannot run analysis."
 
-        should_job = (
-            analysis_name.startswith(_TIME_SERIES_PREFIX)
-            and len(df) >= _ANALYSIS_JOB_ROW_THRESHOLD
-            and self._job_runner is not None
+        should_job = self._job_runner is not None and (
+            analysis_name in _JOB_ANALYSIS_IDS
+            or (analysis_name.startswith(_TIME_SERIES_PREFIX) and len(df) >= _ANALYSIS_JOB_ROW_THRESHOLD)
         )
         if not should_job:
             try:
                 entry, ret = _execute_analysis(
-                    analysis_name, df, target_column, groupby_column, n_deciles
+                    analysis_name, df, target_column, groupby_column, n_deciles, analysis_options
                 )
             except KeyError as exc:
                 return str(exc)
@@ -751,7 +765,7 @@ class DataToolsMixin:
                 ctx.check_canceled()
                 ctx.set_progress(pct, message)
 
-            _progress(2, "正在准备时序分析")
+            _progress(2, "正在准备深度学习训练" if analysis_name in _JOB_ANALYSIS_IDS else "正在准备时序分析")
             entry, ret = _execute_analysis(
                 analysis_name,
                 df,

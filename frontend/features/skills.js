@@ -21,7 +21,9 @@ import { $, state } from "../core/runtime.js";
   }
 
   function displaySkillName(skill) {
-    return skill?.display_name || skill?.name || "Skill";
+    const raw = skill?.display_name || skill?.name || "Skill";
+    // Capitalize each word: "ab-test-analysis" → "Ab-Test-Analysis"
+    return raw.replace(/(^|[-\s])([a-z])/g, (_, sep, ch) => sep + ch.toUpperCase());
   }
 
   function esc(value) {
@@ -48,7 +50,7 @@ import { $, state } from "../core/runtime.js";
       button.className = `skill-picker-item${index === state.skillPickerIndex ? " active" : ""}`;
       button.dataset.skill = skill.name;
       button.innerHTML = `
-        <span class="skill-picker-icon">${esc(skill.icon || "🧩")}</span>
+        <span class="skill-picker-icon skill-picker-icon--letter">${esc((skill.display_name || skill.name || "S")[0].toUpperCase())}</span>
         <span class="skill-picker-copy">
           <strong title="${esc(displaySkillName(skill))}">${esc(displaySkillName(skill))}</strong>
           <small>${esc(skill.description || displaySkillName(skill))}</small>
@@ -100,6 +102,11 @@ import { $, state } from "../core/runtime.js";
   }
 
   function close() {
+    // Close skill drawer first if open
+    const overlay = document.getElementById("skill-modal-overlay");
+    if (overlay && !overlay.classList.contains("hidden")) {
+      closeSkillModal();
+    }
     if (window.BAA?.sidebar?.closePanel) {
       window.BAA.sidebar.closePanel("skills");
     }
@@ -113,7 +120,7 @@ import { $, state } from "../core/runtime.js";
     const skill = SKILLS.find(item => item.name === name) || { name, icon: "🧩" };
     window.BAA.slash?.clearCmd?.();
     state.activeSkill = skill.name;
-    $("skill-badge-text").textContent = `${skill.icon || "🧩"} ${displaySkillName(skill)}`;
+    $("skill-badge-text").textContent = displaySkillName(skill);
     $("skill-badge")?.classList.add("show");
     if (window.BAA?.sidebar?.closePanel) window.BAA.sidebar.closePanel("skills");
     $("msg-input")?.focus();
@@ -143,7 +150,7 @@ import { $, state } from "../core/runtime.js";
     if (!name) return;
     const skill = SKILLS.find(item => item.name === name) || { name, icon: "🧩" };
     state.activeSkill = skill.name;
-    $("skill-badge-text").textContent = `${skill.icon || "🧩"} ${displaySkillName(skill)}`;
+    $("skill-badge-text").textContent = displaySkillName(skill);
     $("skill-badge")?.classList.add("show");
   }
 
@@ -189,6 +196,18 @@ import { $, state } from "../core/runtime.js";
     const saveBtn = $("skill-save-btn");
     const deleteBtn = $("skill-delete-btn");
     msgEl.textContent = "";
+
+    // Move drawer inside sidebar-hub and position it at panel's right edge
+    const hub = document.getElementById("app-sidebar");
+    const panel = document.getElementById("sb-panel-skills");
+    if (hub && overlay.parentElement !== hub) {
+      hub.appendChild(overlay);
+    }
+    // Dynamically set left to sidebar width + panel width (340px)
+    if (panel) {
+      const sidebarWidth = hub ? hub.querySelector(".sb-main")?.offsetWidth || 280 : 280;
+      overlay.style.left = (sidebarWidth + 340) + "px";
+    }
 
     if (name) {
       // Fetch skill detail
@@ -248,6 +267,8 @@ import { $, state } from "../core/runtime.js";
     }
 
     overlay.classList.remove("hidden");
+    // Auto-size prompt textarea to fill remaining drawer space
+    _resizePromptTextarea();
     // Refresh counters after values are set
     requestAnimationFrame(() => {
       updateCounter($("skill-form-desc"));
@@ -256,8 +277,14 @@ import { $, state } from "../core/runtime.js";
   }
 
   function closeSkillModal() {
-    $("skill-modal-overlay")?.classList.add("hidden");
+    const overlay = $("skill-modal-overlay");
+    overlay?.classList.add("hidden");
     _editingSkill = null;
+    // Move drawer back to body and clear inline style
+    if (overlay && overlay.parentElement !== document.body) {
+      overlay.style.left = "";
+      document.body.appendChild(overlay);
+    }
   }
 
   // ── Tools multiselect ──
@@ -355,6 +382,35 @@ import { $, state } from "../core/runtime.js";
     });
   }
 
+  // ── Auto-size prompt textarea to fill remaining drawer space ──
+  function _resizePromptTextarea() {
+    const body = document.querySelector('.skill-drawer-body');
+    const textarea = document.getElementById('skill-form-prompt');
+    const promptSection = document.querySelector('.skill-form-section-prompt');
+    if (!body || !textarea || !promptSection) return;
+    const bodyStyle = getComputedStyle(body);
+    const padTop = parseFloat(bodyStyle.paddingTop) || 0;
+    const padBottom = parseFloat(bodyStyle.paddingBottom) || 0;
+    // Sum height of all siblings before the prompt section
+    let usedHeight = padTop;
+    for (const child of body.children) {
+      if (child === promptSection) break;
+      usedHeight += child.offsetHeight;
+      const cs = getComputedStyle(child);
+      usedHeight += (parseFloat(cs.marginTop) || 0) + (parseFloat(cs.marginBottom) || 0);
+    }
+    // The prompt section itself: title + counter consume space
+    const title = promptSection.querySelector('.skill-form-section-title');
+    const counter = document.querySelector('[data-counter-for="skill-form-prompt"]');
+    const sectionTitleH = title ? title.offsetHeight : 17;
+    const counterH = counter ? counter.offsetHeight : 18;
+    const promptSectionPadBottom = parseFloat(getComputedStyle(promptSection).paddingBottom) || 10;
+    const rowGap = 6;
+    const available = body.offsetHeight - usedHeight - padBottom - sectionTitleH - promptSectionPadBottom - counterH - rowGap;
+    textarea.style.height = Math.max(80, Math.floor(available)) + 'px';
+    textarea.style.flex = 'none';
+  }
+
   // ── Character counter ──
   function updateCounter(input) {
     const counter = document.querySelector(`[data-counter-for="${input.id}"]`);
@@ -447,20 +503,8 @@ import { $, state } from "../core/runtime.js";
     }
   }
 
-  document.addEventListener("click", event => {
-    // Close the skills panel when clicking outside of it
-    if (!event.target.closest("#sb-panel-skills") &&
-        !event.target.closest('[data-action="openSkillPicker"]') &&
-        !event.target.closest('[data-action^="openPanel:skills"]') &&
-        !event.target.closest("#skill-modal-overlay") &&
-        !event.target.closest("#skill-form-tools-dropdown")) {
-      if (isOpen()) close();
-    }
-    // Skill drawer actions
-    if (event.target.closest('[data-action="closeSkillModal"]')) {
-      closeSkillModal();
-    }
-  });
+  // closeSkillModal 由 app.js 的 ACTIONS 分发器统一处理（data-action="closeSkillModal"），
+  // 此处不再挂 document 委托监听，避免与 ACTIONS 表双触发。
 
   // Wire up buttons after DOM ready
   function _wireButtons() {

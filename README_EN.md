@@ -67,15 +67,15 @@
 
 # 📝 Changelog
 
-> **Current version [`v1.2.0 LTS`](https://github.com/Zafer-Liu/Data-Analysis-Agent/releases/latest)** · July 17, 2026 · [📦 Download Installer](https://github.com/Zafer-Liu/Data-Analysis-Agent/releases/latest)
+> **Current development version [`v1.4.0 LTS`](https://github.com/Zafer-Liu/Data-Analysis-Agent/releases/latest)** · August 21, 2026 · Until a release installer is published, use the source version and changelog as the reference.
 
-v1.2.0 LTS focuses on a smoother, more reliable data-analysis experience:
+v1.4.0 enters the Feishu AI Skills Hackathon, adds a Feishu bot and built-in Bitable analysis, and delivers targeted feature improvements:
 
-1. **AI Team Collaboration**: Break complex work into tasks for specialist Agents, with progress and results clearly visible.
-2. **Business Canvas and Skills**: Map business relationships, reuse proven analysis methods, and create dashboards and visual results faster.
-3. **More Reliable Data Processing**: Long-running tasks and local-data workflows are more dependable and reassuring.
-4. **Local Data Cleanup**: Review storage and cleanup candidates in **Settings → Storage**; files go to the Recycle Bin first and important data remains protected.
-5. **Refined Everyday Experience**: Chat, workspace, and frequent actions are clearer and easier to use.
+1. **Feishu bot and Bitable loop**: Mention the bot in a group to read a Feishu Bitable, load records into DuckDB / SQL analysis, and reply in the same group. Creating result tables or changing records always requires an explicit request.
+2. **More dependable long-term memory**: Fixes extraction failures caused by thinking-model output, JSON formatting, and scope detection; adds result notices, 24-hour consolidation, safer session restore, and a global memory switch.
+3. **Trustworthy knowledge-retrieval status**: Repairs local Embedding model download/compatibility and makes cloud retrieval status an explicit real check. The former Hash mode is now labelled **Basic** in the UI.
+4. **Clearer settings and reading experience**: Unifies settings headers, cards, and spacing; fixes LLM provider-row inset, hover, spacing, and long-content clipping; wide chat layouts now use available space more effectively.
+5. **Compatibility and delivery reliability**: Clarifies SQL Server connection/error boundaries and workflow observability. GPU compute is labelled **Planned** until end-to-end validation is complete; existing implementation and configuration remain preserved.
 
 ## 📖 Detailed Changelog
 

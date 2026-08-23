@@ -166,7 +166,6 @@ import { loadSavedList } from "../legacy/sessions.js";
       && !state.isStreaming
       && !state.pendingMessages.length
       && !state.activeCommand
-      && !state.activeSkill
       && !state.editingQueuedId
     );
   }
@@ -500,6 +499,148 @@ import { loadSavedList } from "../legacy/sessions.js";
     }
   }
 
+  function _setFeishuConversationStatus(payload = {}) {
+    const connected = !!payload.connected;
+    const chatName = String(payload.chat_name || "").trim();
+    const chatId = String(payload.chat_id || "").trim();
+    state.feishuConversation = { connected, chatName, chatId };
+    const button = $("feishu-session-indicator");
+    if (!button) return;
+    button.hidden = !connected;
+    button.classList.toggle("is-connected", connected);
+    button.setAttribute("aria-hidden", String(!connected));
+    if (connected) {
+      button.textContent = `🤖 ${chatName || "飞书机器人"}`;
+      button.title = `当前对话已连接飞书机器人：${chatName || chatId}。点击可切换或断开。`;
+      button.setAttribute("aria-label", button.title);
+    } else {
+      // Do not leave a dormant robot control in the header. /robot is the
+      // only entry point for connecting a new conversation to a group.
+      button.textContent = "";
+      button.title = "";
+      button.removeAttribute("aria-label");
+    }
+    _syncFeishuConversationPolling();
+  }
+
+  let _feishuEventCursor = 0;
+  let _feishuPollingTimer = null;
+  let _feishuPollingInFlight = false;
+
+  function _stopFeishuConversationPolling() {
+    if (_feishuPollingTimer) window.clearInterval(_feishuPollingTimer);
+    _feishuPollingTimer = null;
+    _feishuPollingInFlight = false;
+  }
+
+  function _appendFeishuInboundEvent(event) {
+    const role = event?.role === "assistant" ? "assistant" : "user";
+    const content = String(event?.content || "").trim();
+    if (!content) return;
+    appendMsg(role, content, { variant: "feishu" });
+  }
+
+  async function _pollFeishuConversationEvents() {
+    if (_feishuPollingInFlight || !state.SID || !state.feishuConversation?.connected) return;
+    _feishuPollingInFlight = true;
+    const sid = state.SID;
+    try {
+      const response = await fetch(`/api/session/${encodeURIComponent(sid)}/feishu-bot/events?after=${_feishuEventCursor}`);
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.ok || sid !== state.SID) return;
+      for (const event of Array.isArray(data.events) ? data.events : []) {
+        _appendFeishuInboundEvent(event);
+      }
+      _feishuEventCursor = Math.max(_feishuEventCursor, Number(data.revision) || 0);
+    } catch (_) {
+      // Collaboration sync is optional; the next interval retries quietly.
+    } finally {
+      _feishuPollingInFlight = false;
+    }
+  }
+
+  function _syncFeishuConversationPolling() {
+    _stopFeishuConversationPolling();
+    if (!state.SID || !state.feishuConversation?.connected) {
+      _feishuEventCursor = 0;
+      return;
+    }
+    _pollFeishuConversationEvents();
+    _feishuPollingTimer = window.setInterval(_pollFeishuConversationEvents, 1600);
+  }
+
+  async function _loadFeishuConversationStatus() {
+    _feishuEventCursor = 0;
+    if (!state.SID) return null;
+    try {
+      const response = await fetch(`/api/session/${state.SID}/feishu-bot`);
+      const data = await response.json().catch(() => ({}));
+      if (response.ok && data.ok) {
+        _setFeishuConversationStatus(data);
+        return data;
+      }
+    } catch (_) { /* Optional integration must never block Web chat startup. */ }
+    _setFeishuConversationStatus();
+    return null;
+  }
+
+  async function _handleRobotCommand() {
+    if (!state.SID) return;
+    const target = appendMsg("assistant", "### 🤖 连接飞书机器人\n\n正在读取机器人可加入的群…");
+    const targetId = target?.dataset?.vueMsgId || target;
+    let chats = [];
+    try {
+      const response = await fetch("/api/feishu-bot/chats");
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.ok) throw new Error(data.error || "读取群列表失败");
+      chats = Array.isArray(data.chats) ? data.chats : [];
+    } catch (error) {
+      _setLocalReply(targetId, `### 🤖 飞书机器人\n\n${error.message || "读取群列表失败"}`);
+      return;
+    }
+    if (!chats.length) {
+      _setLocalReply(targetId, "### 🤖 飞书机器人\n\n未找到机器人所在的群。请确认机器人已加入目标群，并在应用设置中检查群组读取权限。");
+      return;
+    }
+    const options = chats.map(chat => chat.name || "未命名群");
+    if (state.feishuConversation?.connected) options.push("断开当前机器人");
+    _setLocalReply(targetId, "### 🤖 连接飞书机器人\n\n选择一个群后，当前 Web 对话的用户消息与 AI 回答都会同步到该群。机器人群内消息将在完成事件回调配置后接入同一会话。");
+    const picker = getUiIsland("chat");
+    const onSubmit = async (name) => {
+      if (name === "断开当前机器人") {
+        const response = await fetch(`/api/session/${state.SID}/feishu-bot`, {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled: false }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.ok) {
+          window.BAA.ui?.toast?.(data.error || "断开飞书机器人失败", "error");
+          return;
+        }
+        _setFeishuConversationStatus(data);
+        window.BAA.ui?.toast?.("当前对话已断开飞书机器人。", "ok");
+        return;
+      }
+      const selected = chats.find(chat => (chat.name || "未命名群") === name);
+      if (!selected) return;
+      try {
+        const response = await fetch(`/api/session/${state.SID}/feishu-bot`, {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled: true, chat_id: selected.chat_id }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.ok) throw new Error(data.error || "连接飞书机器人失败");
+        _setFeishuConversationStatus(data);
+        window.BAA.ui?.toast?.(`当前对话已连接 ${data.chat_name || selected.name}。`, "ok");
+      } catch (error) {
+        window.BAA.ui?.toast?.(error.message || "连接飞书机器人失败", "error");
+      }
+    };
+    if (!picker?.addAskUserCard?.(targetId, { question: "选择飞书机器人群", options, multi_select: false }, { onSubmit })) {
+      _setLocalReply(targetId, "当前界面无法显示机器人选择器，请刷新页面后重试。");
+    }
+  }
+
   function _handleHelpCommand({ arguments: arg }) {
     const requested = arg.replace(/^\//, "").toLowerCase();
     const commands = window.BAA.slash.COMMANDS;
@@ -562,6 +703,7 @@ import { loadSavedList } from "../legacy/sessions.js";
     commandHandlers.register("data", () => openSchemaView());
     commandHandlers.register("jobs", () => openJobHistory());
     commandHandlers.register("teams", () => window.BAA.teams?.openPanel?.());
+    commandHandlers.register("robot", _handleRobotCommand);
   }
 
   async function _runClientCommand(command, text) {
@@ -720,7 +862,7 @@ import { loadSavedList } from "../legacy/sessions.js";
     if (skillMeta) {
       userOptions.skill = { name: skillMeta.name, icon: skillMeta.icon || "🧩" };
     }
-    const payload = { message: text, teams_enabled: !!state.teamsEnabled, auto_match_skill: state.autoMatchSkill !== false };
+    const payload = { message: text, teams_enabled: !!state.teamsEnabled, auto_match_skill: state.autoMatchSkill !== false, memory_enabled: state.memoryEnabled !== false };
     if (selectedCommand) payload.command = selectedCommand;
     if (selectedSkill) payload.skill = selectedSkill;
     clearCmd();
@@ -752,6 +894,7 @@ import { loadSavedList } from "../legacy/sessions.js";
     // Inherit global settings so confirm/answer turns respect the same toggles.
     payload.teams_enabled = !!state.teamsEnabled;
     payload.auto_match_skill = state.autoMatchSkill !== false;
+    payload.memory_enabled = state.memoryEnabled !== false;
     // Clear ask_user pending state — user is answering, resume normal streaming.
     state.askUserPending = false;
     _invalidatePromptSuggestion();
@@ -1362,6 +1505,12 @@ import { loadSavedList } from "../legacy/sessions.js";
     scrollBottom();
   }
 
+  function _onFeishuSync(ev) {
+    if (!window.BAA.ui?.toast) return;
+    if (ev.status === "sent") window.BAA.ui.toast("本轮对话已同步到飞书机器人。", "ok");
+    else if (ev.status === "failed") window.BAA.ui.toast("本轮对话未能同步到飞书；Web 对话已正常完成。", "error");
+  }
+
   // Build / refresh the "copy" action bar at the bottom of an assistant message body.
   function _ensureMsgActions(bubbleEl, markdownText) {
     const body = bubbleEl.parentNode;
@@ -1837,6 +1986,7 @@ import { loadSavedList } from "../legacy/sessions.js";
     job_error:          _onJobError,
     job_canceled:       _onJobCanceled,
     canvas_event:       _onCanvasEvent,
+    feishu_sync:        _onFeishuSync,
   };
 
   function _onCanvasEvent(ev) {
@@ -1881,7 +2031,11 @@ import { loadSavedList } from "../legacy/sessions.js";
     state.editingQueuedId = "";
     _refreshQueuePositions();
     try {
-      const r = await fetch("/api/session/new", { method: "POST" });
+      const r = await fetch("/api/session/new", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ memory_enabled: state.memoryEnabled !== false }),
+      });
       const data = await r.json();
       state.SID = data.session_id;
       state.sessionName = "新会话";
@@ -1889,6 +2043,7 @@ import { loadSavedList } from "../legacy/sessions.js";
       localStorage.setItem("baa_session_id", state.SID);
     sessionStorage.setItem("baa_session_id", state.SID);
     await switchJobHistorySession(state.SID);
+    await _loadFeishuConversationStatus();
     } catch (_) {
       // Front-end resets either way; backend will rebuild on next send.
     }
@@ -1934,5 +2089,5 @@ export const chatStream = Object.freeze({
     clearPromptSuggestion: _invalidatePromptSuggestion,
     handleEvent, newChat, syncSendButton, buildChartFrame: _buildChartFrame,
     buildReasoningBlock: _buildReasoningBlock,
-    retryLast,
+    retryLast, loadFeishuConversationStatus: _loadFeishuConversationStatus,
 });

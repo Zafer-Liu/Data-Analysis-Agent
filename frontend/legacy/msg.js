@@ -143,6 +143,13 @@ import { renderMd } from "./markdown.js";
       fill.style.width = "0%";
       label.textContent = t('token.bar', { input: fmtK(totalInput), output: fmtK(totalOutput) });
     }
+
+    // Long-term context (instructions + memory) breakdown as a hover tooltip.
+    const { instructionTokens, memoryTokens } = state.tokenState;
+    const longterm = [];
+    if (instructionTokens) longterm.push(t('ctx.instructions', { v: fmtK(instructionTokens) }));
+    if (memoryTokens)      longterm.push(t('ctx.memory',       { v: fmtK(memoryTokens) }));
+    wrap.title = longterm.join(' · ');
   }
 
   export function showStatus() {

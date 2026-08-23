@@ -69,6 +69,8 @@ from .validate     import (
 from .reasoning    import ThinkTagStreamParser, split_reasoning_tags
 from .hooks.models import HookContext
 from .token_metrics import build_prompt_breakdown, finalize_prompt_breakdown
+from .instructions import load_instruction_section
+from .memory import read_memory, render_memory_section
 from .mcp_discovery import (
     build_mcp_catalog,
     mcp_catalog_version,
@@ -196,6 +198,7 @@ def _normalize_chart_call_args(
 
 
 _REQUIRED_SUCCESSFUL_SKILL_TOOLS = {
+    "ab-test-analysis": frozenset({"run_analysis"}),
     "regression": frozenset({"run_analysis"}),
 }
 
@@ -446,7 +449,13 @@ def _format_tool_detail(
 class BusinessAgent(DataToolsMixin, ExportToolsMixin):
     MAX_ITERATIONS = 120
     MAX_RUN_SECONDS = 1800
-    DELEGATED_MAX_TOOL_ROUNDS = 20
+    # Workflow nodes may opt into 200 calls. Keep the executor ceiling aligned
+    # with the graph contract: 50 rounds × 4 calls per round.
+    DELEGATED_MAX_TOOL_ROUNDS = 50
+    # Team collaboration is intentionally bounded below the Workflow-node
+    # ceiling so one member cannot monopolize a turn, while still allowing
+    # substantive investigation and review.
+    TEAM_MEMBER_MAX_TOOL_CALLS = 100
     DELEGATED_TIMEOUT_SECONDS = 300
 
     # Approximate chars-per-token ratio for fast estimation (conservative)
@@ -652,6 +661,8 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
         timeout_seconds: int = 300,
         max_tokens: int = 1600,
         max_tool_calls: int | None = None,
+        allowed_tools: frozenset[str] | set[str] | None = None,
+        allow_write_tools: bool = False,
     ) -> dict:
         def _visible_text(text: str) -> str:
             visible, _reasoning = split_reasoning_tags(str(text or ""))
@@ -663,8 +674,18 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                 content = f"{content}\n\n---\n工具使用：{', '.join(used_tools)}".strip()
             return content
 
-        output_tokens = max(400, min(4000, int(max_tokens or 1600), self._max_output_tokens))
-        delegated_tools = self._delegated_tool_schemas()
+        # Workflow node limits may use the provider's full completion window.
+        # Keep the model-specific cap, but do not silently collapse every
+        # delegated node to the legacy 4K ceiling.
+        output_tokens = max(1, min(int(max_tokens or 1600), self._max_output_tokens))
+        delegated_allowed_tools = (
+            frozenset(str(name) for name in allowed_tools)
+            if allowed_tools is not None else None
+        )
+        delegated_tools = self._delegated_tool_schemas(
+            allowed_tools=delegated_allowed_tools,
+            allow_write_tools=allow_write_tools,
+        )
         messages = [
             {
                 "role": "system",
@@ -674,8 +695,12 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                     "read relevant workspace files (including bounded Excel worksheet previews), "
                     "and search business knowledge. When workspace spreadsheets are registered "
                     "as data-source tables, prefer get_schema/query_data for quantitative work; "
-                    "use workspace_read_file for direct sheet inspection or fallback. Do not "
-                    "modify data, create teams, or ask the user questions. "
+                    "use workspace_read_file for direct sheet inspection or fallback. "
+                    + (
+                        "You may perform the explicitly approved data-cleaning write only through clean_data; never overwrite a source table. "
+                        if allow_write_tools else "Do not modify data. "
+                    )
+                    + "Do not create teams or ask the user questions. "
                     f"Role: {member.get('role', 'analyst')}. "
                     f"Instructions: {member.get('instructions', '')}\n"
                     "Return concise Markdown. Focus on the requested subtask only. "
@@ -688,6 +713,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
         used_tools: list[str] = []
         tool_events: list[dict] = []
         last_content = ""
+        empty_response_retry_used = False
         usage_summary = {
             "model": self.model,
             "provider": str(getattr(self, "_provider", "") or ""),
@@ -785,6 +811,16 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
             tool_calls = list(getattr(msg, "tool_calls", None) or [])
             if not tool_calls:
                 candidate = _with_tool_footer(last_content)
+                if not candidate and not empty_response_retry_used:
+                    empty_response_retry_used = True
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "上一条响应没有可交付正文。不要调用工具；请仅基于已提供材料，"
+                            "立即输出该节点要求的最终 Markdown 内容。"
+                        ),
+                    })
+                    continue
                 if used_tools and _delegated_result_invalid_reason(candidate, tool_events):
                     break
                 usage_summary["tool_calls"] = len(used_tools)
@@ -815,7 +851,12 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                 started = time.perf_counter()
                 created_at = time.strftime("%Y-%m-%dT%H:%M:%S")
                 try:
-                    tool_text = self._execute_delegated_tool(tool_name, tool_args)
+                    tool_text = self._execute_delegated_tool(
+                        tool_name,
+                        tool_args,
+                        allowed_tools=delegated_allowed_tools,
+                        allow_write_tools=allow_write_tools,
+                    )
                     tool_status = "ok"
                 except Exception as exc:
                     tool_text = f"Error: {exc}"
@@ -883,7 +924,12 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
         usage_summary["tool_calls"] = len(used_tools)
         return {"content": _with_tool_footer(final_content), "tool_events": tool_events, "usage": usage_summary}
 
-    def _delegated_tool_schemas(self) -> list[dict]:
+    def _delegated_tool_schemas(
+        self,
+        *,
+        allowed_tools: frozenset[str] | set[str] | None = None,
+        allow_write_tools: bool = False,
+    ) -> list[dict]:
         allowed = {
             "workspace_status",
             "workspace_glob",
@@ -893,9 +939,12 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
             "get_table_detail",
             "query_data",
             "query_knowledge",
+            "memory_read",
             "select_chart",
             "profile_data",
         }
+        if allow_write_tools:
+            allowed.add("clean_data")
         schemas = [
             schema for schema in AGENT_TOOLS
             if ((schema.get("function") or {}).get("name") or "") in allowed
@@ -906,10 +955,25 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                 if ((schema.get("function") or {}).get("name") or "")
                 != "query_knowledge"
             ]
+        if allowed_tools is not None:
+            schemas = [
+                schema for schema in schemas
+                if ((schema.get("function") or {}).get("name") or "")
+                in allowed_tools
+            ]
         return schemas
 
-    def _execute_delegated_tool(self, name: str, args: dict) -> str:
+    def _execute_delegated_tool(
+        self,
+        name: str,
+        args: dict,
+        *,
+        allowed_tools: frozenset[str] | set[str] | None = None,
+        allow_write_tools: bool = False,
+    ) -> str:
         try:
+            if allowed_tools is not None and name not in allowed_tools:
+                return f"Unauthorized delegated tool: {name}"
             if name == "workspace_status":
                 return self._tool_workspace_status()
             if name.startswith("workspace_"):
@@ -945,6 +1009,11 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                 if not self._knowledge_allowed_this_turn:
                     return "Knowledge lookup is not allowed for this request."
                 return self._tool_query_knowledge(args.get("question", ""))
+            if name == "memory_read":
+                return read_memory(
+                    args.get("name", ""), user_id=self._user_id,
+                    workspace_id=self._workspace_id,
+                )
             if name == "select_chart":
                 return self._tool_select_chart(
                     args.get("user_intent", ""),
@@ -955,6 +1024,24 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                     args.get("table_name", ""),
                     args.get("columns"),
                 ), ensure_ascii=False)
+            if name == "clean_data":
+                if not allow_write_tools:
+                    return "Unauthorized delegated write tool: clean_data"
+                return self._tool_clean_data(
+                    operation=args.get("operation", ""),
+                    table_name=args.get("table_name", ""),
+                    columns=args.get("columns"),
+                    fill_method=args.get("fill_method", "mean"),
+                    lower_pct=float(args.get("lower_pct", 1)),
+                    upper_pct=float(args.get("upper_pct", 99)),
+                    trim_column=args.get("trim_column", ""),
+                    min_val=args.get("min_val"),
+                    max_val=args.get("max_val"),
+                    # A Workflow approval authorizes a derived result only.
+                    # Do not let a model-supplied parameter replace a source
+                    # table (or choose a different persistent destination).
+                    output_table="cleaned_data",
+                )
             return f"Unsupported delegated tool: {name}"
         except Exception as exc:
             return f"Delegated tool error [{name}]: {exc}"
@@ -1154,6 +1241,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
         team_context: str = "",
         teams_enabled: bool = False,
         auto_match_skill: bool = True,
+        memory_enabled: bool = True,
         discovered_tools: frozenset[str] | set[str] | None = None,
         discovered_mcp_tools: list[str] | tuple[str, ...] | None = None,
         mcp_catalog_version_seen: str = "",
@@ -1527,6 +1615,17 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
         system = get_system_prompt(_prompt_context)
         if _activation_prompt:
             system += f"\n\n{_activation_prompt}"
+        _instruction_section = load_instruction_section(
+            workspace_id=self._workspace_id, user_id=self._user_id,
+        )
+        _memory_section = (
+            render_memory_section(
+                workspace_id=self._workspace_id, user_id=self._user_id,
+            )
+            if memory_enabled else ""
+        )
+        system += _instruction_section
+        system += _memory_section
         # Per-session temporary instruction (user-set, this conversation only).
         if temp_prompt:
             system += build_temp_prompt_section(temp_prompt)
@@ -2021,6 +2120,8 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                 activation_kind=activation.kind,
                 activation_name=activation.name,
                 workflow_stage=_stage_context.stage,
+                project_instruction_chars=len(_instruction_section),
+                memory_chars=len(_memory_section),
                 chars_per_token=self._CHARS_PER_TOKEN,
             )
             _prompt_breakdown["stage_archived_results"] = int(
@@ -2613,6 +2714,11 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                 "refs": kb_refs,
                                 "query": args.get("question", ""),
                             }
+                        elif name == "memory_read":
+                            tool_result = read_memory(
+                                args.get("name", ""), user_id=self._user_id,
+                                workspace_id=self._workspace_id,
+                            )
                         elif name == "get_schema":
                             tool_result = self._tool_get_schema()
                         elif name == "workspace_status":
@@ -2644,6 +2750,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                 target_column=args.get("target_column", ""),
                                 groupby_column=args.get("groupby_column", ""),
                                 n_deciles=int(args.get("n_deciles", 10)),
+                                analysis_options=args.get("analysis_options", {}),
                             )
                             tool_sources = self._data_refs_for_sql(
                                 args.get("sql", ""), self.data_source, None
@@ -2905,6 +3012,90 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                     args.get("confirm_command_hooks", False)
                                 ),
                             )
+                        elif name == "create_feishu_bitable":
+                            from data.feishu_bitable_service import create_bitable
+
+                            bitable = create_bitable(
+                                name=args.get("name", ""),
+                                table_name=args.get("table_name", "数据表"),
+                                fields=args.get("fields", []),
+                                records=args.get("records", []),
+                                folder_token=args.get("folder_token", ""),
+                            )
+                            tool_result = json.dumps({
+                                "ok": True,
+                                "message": "飞书多维表格已创建。请把 url 作为可点击链接交付给用户。",
+                                **bitable,
+                            }, ensure_ascii=False)
+                        elif name == "list_feishu_bitable_tables":
+                            from data.feishu_bitable_service import list_bitable_tables
+
+                            result = list_bitable_tables(bitable=args.get("bitable", ""))
+                            tool_result = json.dumps({"ok": True, **result}, ensure_ascii=False)
+                        elif name == "load_feishu_bitable":
+                            from api.state import session_manager
+                            from data.feishu_bitable_service import read_bitable_records
+                            from data.sources.feishu_bitable import FeishuBitableDataSource
+
+                            result = read_bitable_records(
+                                bitable=args.get("bitable", ""),
+                                table_id=args.get("table_id", ""),
+                                max_records=args.get("max_records") or 500,
+                            )
+                            source_name = str(args.get("source_name") or "").strip()
+                            source_name = source_name or f"飞书多维表格 {result['table_id']}"
+                            source = FeishuBitableDataSource(
+                                result["records"], source_name, result["table_id"],
+                            )
+                            session = session_manager.get(self._session_id)
+                            if session is None:
+                                raise RuntimeError("当前会话已失效，请刷新页面后重试")
+                            source_id = session.add_source(source)
+                            # This turn began before the Bitable was loaded, so
+                            # refresh the agent's source view as well.  The next
+                            # tool round can immediately use normal SQL/analysis
+                            # tools; later turns rebuild from the session source.
+                            self.data_source = source
+                            self._all_sources = [*self._all_sources, source]
+                            self._combined_schema = session.get_combined_schema()
+                            self._schema_cache = self._combined_schema
+                            self._merged_source = session.get_merged_source()
+                            _has_sources = True
+                            tool_result = json.dumps({
+                                "ok": True,
+                                "message": "飞书多维表格已作为 SQL 数据源接入当前对话；现在可直接查询、分析、制图或生成报告。",
+                                "source_id": source_id,
+                                "source_name": source_name,
+                                "schema": self._combined_schema,
+                                **{key: value for key, value in result.items() if key != "records"},
+                            }, ensure_ascii=False)
+                        elif name == "append_feishu_bitable_records":
+                            from data.feishu_bitable_service import append_bitable_records
+
+                            result = append_bitable_records(
+                                bitable=args.get("bitable", ""),
+                                table_id=args.get("table_id", ""),
+                                records=args.get("records", []),
+                            )
+                            tool_result = json.dumps({
+                                "ok": True,
+                                "message": "分析结果已追加写入飞书多维表格。请把 url 作为可点击链接交付给用户。",
+                                **result,
+                            }, ensure_ascii=False)
+                        elif name == "update_feishu_bitable_record":
+                            from data.feishu_bitable_service import update_bitable_record
+
+                            result = update_bitable_record(
+                                bitable=args.get("bitable", ""),
+                                table_id=args.get("table_id", ""),
+                                record_id=args.get("record_id", ""),
+                                fields=args.get("fields", {}),
+                            )
+                            tool_result = json.dumps({
+                                "ok": True,
+                                "message": "飞书多维表格记录已更新。请把 url 作为可点击链接交付给用户。",
+                                **result,
+                            }, ensure_ascii=False)
                         elif name == "read_tool_result":
                             tool_result = read_tool_result_artifact(
                                 args.get("artifact_id", ""),
@@ -3001,7 +3192,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                 )
                             else:
                                 tool_result = "Unknown workspace tool"
-                        elif name in {"workflow_create", "workflow_list", "workflow_start", "workflow_status"}:
+                        elif name in {"workflow_create", "workflow_create_custom", "workflow_list", "workflow_start", "workflow_status"}:
                             from agent.tools.workflow import execute_workflow_tool
                             tool_result = execute_workflow_tool(
                                 name, self._session_id, args,
@@ -3186,6 +3377,20 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                 if not team_name:
                                     raise ValueError("team_delegate requires team_name")
 
+                                # Session history can be restored after a service restart
+                                # while its old team/plan state is gone.  Validate the team
+                                # before creating or retrying a dynamic plan so we return an
+                                # actionable recovery instruction instead of leaving an orphan
+                                # plan behind.
+                                try:
+                                    team_store.get(team_name)
+                                except Exception as exc:
+                                    raise ValueError(
+                                        f"team not found: {team_name}. The restored conversation "
+                                        "references stale team state; call team_create to recreate "
+                                        "the team before calling team_delegate."
+                                    ) from exc
+
                                 from agent.teams.dynamic_plans import DynamicTeamPlanStore
                                 dynamic_plan_store = DynamicTeamPlanStore(
                                     self._session_id, workspace_id=self._workspace_id,
@@ -3319,6 +3524,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                         inbox_context=item["inbox_context"],
                                         timeout_seconds=timeout_seconds,
                                         max_tokens=task_max_tokens,
+                                        max_tool_calls=self.TEAM_MEMBER_MAX_TOOL_CALLS,
                                     )
                                     return item, delegated
 
@@ -3560,7 +3766,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                     }
                                     review_prompt = (
                                         "你是团队固定质量复核员，作为第二道屏障复核本轮团队输出。\n"
-                                        "硬规则：最多调用 6 次只读工具，其中 query_data 最多 5 次；"
+                                        f"硬规则：最多调用 {self.TEAM_MEMBER_MAX_TOOL_CALLS} 次只读工具；"
                                         "抽查关键指标即可，不要完整重跑所有分析；工具调用后必须输出最终 Markdown。\n"
                                         "检查重点：1) 数字是否有本轮成员结果/工具证据；2) SQL、样本、分母、时间窗是否一致；"
                                         "3) 成员结果是否有错误、空输出、省略号、旧值或图表失败；"
@@ -3593,7 +3799,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                             inbox_context="",
                                             timeout_seconds=timeout_seconds,
                                             max_tokens=max(result_max_tokens, 1800),
-                                            max_tool_calls=6,
+                                            max_tool_calls=self.TEAM_MEMBER_MAX_TOOL_CALLS,
                                         )
                                         review_content = str(review_delegated.get("content", ""))
                                         review_tool_events = review_delegated.get("tool_events", [])
@@ -3827,6 +4033,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                         inbox_context=inbox_context,
                                         timeout_seconds=self.DELEGATED_TIMEOUT_SECONDS,
                                         max_tokens=2000,
+                                        max_tool_calls=self.TEAM_MEMBER_MAX_TOOL_CALLS,
                                     )
                                     tool_result = str(delegated.get("content", ""))
                                     tool_events = delegated.get("tool_events", [])
@@ -3869,7 +4076,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                         reviewer_name = str(reviewer.get("name") or "质量复核员")
                                         review_prompt = (
                                             "你是团队固定质量复核员，请作为第二道屏障独立复核单成员输出。\n"
-                                            "硬规则：最多调用 4 次只读工具，其中 query_data 最多 3 次；"
+                                            f"硬规则：最多调用 {self.TEAM_MEMBER_MAX_TOOL_CALLS} 次只读工具；"
                                             "抽查关键数字即可，工具调用后必须输出最终 Markdown。\n"
                                             "检查关键数字是否有工具证据、SQL/样本/分母/时间窗是否一致、"
                                             "是否有工具错误、空输出或无字段支撑的业务归因。\n"
@@ -3905,7 +4112,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                                 inbox_context="",
                                                 timeout_seconds=self.DELEGATED_TIMEOUT_SECONDS,
                                                 max_tokens=1800,
-                                                max_tool_calls=4,
+                                                max_tool_calls=self.TEAM_MEMBER_MAX_TOOL_CALLS,
                                             )
                                             review_content = str(review_delegated.get("content", ""))
                                             review_events = review_delegated.get("tool_events", [])
@@ -4016,7 +4223,22 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                     except Exception as exc:
                         tool_result = f"工具执行错误 [{name}]: {exc}"
                         log.error("[tool] %s FAILED (%.2fs): %s", name, time.monotonic() - _tool_t0, exc)
-                        _consecutive_errors += 1
+                        # A restored conversation can retain references to a team or
+                        # dynamic-plan file that is no longer available after restart.
+                        # This is a recoverable state mismatch, not a failed analysis or
+                        # data connection.  Give the model a chance to recreate the team
+                        # instead of aborting the turn after three stale references.
+                        _recoverable_team_state = (
+                            name == "team_delegate"
+                            and (
+                                "dynamic plan not found:" in str(exc)
+                                or "team not found:" in str(exc)
+                            )
+                        )
+                        if _recoverable_team_state:
+                            _consecutive_errors = 0
+                        else:
+                            _consecutive_errors += 1
                     else:
                         _consecutive_errors = 0
                         _result_preview = str(tool_result)[:120].replace("\n", " ")

@@ -1,0 +1,14 @@
+# =============================================================================
+# 可选机器学习依赖（M1 阶段，非核心包）。
+# 核心 requirements.txt 保持零 sklearn/torch——红线：轻依赖打包哲学。
+# 启用机器学习建模时安装：
+#     pip install -r requirements-ml.txt
+# 未安装时 Sklearn_Model 分析模块会给出明确安装提示（registry 加载不受影响）。
+# =============================================================================
+
+# Standard ML modelling (M1)
+scikit-learn>=1.3.0
+
+# 深度学习建模（M2，可选，按 GPU/CUDA 版本选择对应 torch 安装方式，
+# 不建议直接写死在此清单——参考 https://pytorch.org/get-started/locally/）
+# torch>=2.0.0

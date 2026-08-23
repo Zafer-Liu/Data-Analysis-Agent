@@ -3,7 +3,7 @@ import logging
 import os
 from urllib.parse import urlsplit
 
-from flask import Flask, abort, render_template, request
+from flask import Flask, abort, jsonify, render_template, request
 from flask_cors import CORS
 from infrastructure.paths import resource_path
 
@@ -16,12 +16,12 @@ def _start_background_services() -> None:
         return
     if not resource_path("MCP").is_dir():
         log.info("[startup] bundled MCP resources are not installed; continuing without them")
-        return
-    try:
-        from MCP.flowchart_server import ensure_flowchart_server
-        ensure_flowchart_server()
-    except Exception as e:
-        log.warning("[startup] flowchart server: %s", e)
+    else:
+        try:
+            from MCP.flowchart_server import ensure_flowchart_server
+            ensure_flowchart_server()
+        except Exception as e:
+            log.warning("[startup] flowchart server: %s", e)
 
 
 def _run_startup_hooks() -> None:
@@ -82,6 +82,8 @@ def create_app() -> Flask:
     from .workflows       import bp as workflows_bp
     from .workflow_runs   import bp as workflow_runs_bp
     from .auth             import bp as auth_bp
+    from .gpu              import bp as gpu_bp
+    from .feishu_bot       import bp as feishu_bot_bp
 
     app.register_blueprint(models_bp)
     app.register_blueprint(datasource_bp)
@@ -106,6 +108,15 @@ def create_app() -> Flask:
     app.register_blueprint(workflows_bp)
     app.register_blueprint(workflow_runs_bp)
     app.register_blueprint(auth_bp)
+    app.register_blueprint(gpu_bp)
+    app.register_blueprint(feishu_bot_bp)
+    try:
+        from infrastructure.feishu_long_connection import start_long_connection
+
+        start_long_connection(app)
+    except Exception as exc:
+        # The app remains usable when the optional Feishu SDK is unavailable.
+        log.warning("[startup] Feishu long connection skipped: %s", type(exc).__name__)
     _run_startup_hooks()
 
     @app.before_request
@@ -134,6 +145,7 @@ def create_app() -> Flask:
         path = request.path
         # Exempt auth endpoints, health check, static files, and the login page
         if (path.startswith("/api/auth/") or path == "/api/health"
+                or path == "/api/feishu-bot/events"
                 or path.startswith("/static/") or path == "/login"
                 or path == "/favicon.ico"):
             return None

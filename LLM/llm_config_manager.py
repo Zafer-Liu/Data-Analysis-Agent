@@ -21,6 +21,41 @@ CONFIG_DIR = LLM_CONFIG_FILE.parent
 DEFAULT_CONTEXT_WINDOW = 1_000_000
 DEFAULT_MAX_OUTPUT_TOKENS = 384_000
 
+
+def model_token_limits(config: Any | None) -> tuple[int, int]:
+    """Return configured model limits, with generous safe defaults.
+
+    Custom OpenAI-compatible providers do not always declare their limits.
+    Treat a missing, zero, or malformed value as the product default instead
+    of falling back to legacy small-context assumptions.
+    """
+    def _positive(value: Any, fallback: int) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return fallback
+        return parsed if parsed > 0 else fallback
+
+    return (
+        _positive(getattr(config, "context_window", None), DEFAULT_CONTEXT_WINDOW),
+        _positive(getattr(config, "max_output_tokens", None), DEFAULT_MAX_OUTPUT_TOKENS),
+    )
+
+
+def auxiliary_token_limits(config: Any | None, ratio: float = 0.8) -> tuple[int, int]:
+    """Return context/output allowances for non-interactive LLM helpers.
+
+    The main chat uses 100% of the configured capability.  Background memory
+    extraction and prompt suggestions use 80%, leaving a deliberate buffer
+    while still benefiting from long-context/reasoning models.
+    """
+    context_window, max_output_tokens = model_token_limits(config)
+    safe_ratio = min(1.0, max(0.01, float(ratio)))
+    return (
+        max(1, int(context_window * safe_ratio)),
+        max(1, int(max_output_tokens * safe_ratio)),
+    )
+
 # 本地模型占位 API Key（Ollama 等本地推理服务无需鉴权，但 OpenAI SDK 要求非空）
 LOCAL_KEY_PLACEHOLDER = "no-key"
 
@@ -35,6 +70,26 @@ def _is_local_base_url(url: Optional[str]) -> bool:
         "0:0:0:0:0:0:0:1",
     )
     return any(m in u for m in local_markers)
+
+
+def _normalise_ollama_base_url(url: Optional[str]) -> str:
+    """Return Ollama's OpenAI-compatible base URL.
+
+    The application uses the OpenAI SDK, which speaks to Ollama through
+    ``/v1``. ``/api/chat`` is Ollama's native API and is a common but
+    incompatible value to put in this field, so convert it safely on save.
+    """
+    value = (url or "").strip().rstrip("/")
+    if not value:
+        return "http://localhost:11434/v1"
+    if value.endswith("/api/chat"):
+        return f"{value[:-len('/api/chat')]}/v1"
+    if value.endswith("/api"):
+        return f"{value[:-len('/api')]}/v1"
+    if value.endswith("/v1"):
+        return value
+    return f"{value}/v1"
+
 
 @dataclass
 class LLMConfig:
@@ -115,8 +170,7 @@ class LLMConfigManager:
         "ollama": {
             # Ollama 提供 OpenAI 兼容端点：http://localhost:11434/v1
             # 本地推理无需 API Key，调用时使用 LOCAL_KEY_PLACEHOLDER 占位
-            # 默认值留空，引导用户自行填写（不同用户可能用不同端口/模型）
-            "base_url": "",
+            "base_url": "http://localhost:11434/v1",
             "model": "",
             "env_var": None,  # 本地服务，无环境变量
             "is_custom": False,
@@ -221,6 +275,7 @@ class LLMConfigManager:
         enable_thinking: bool = False, thinking_budget: int = 8000,
         input_price_per_million: Optional[float] = None,
         output_price_per_million: Optional[float] = None,
+        allow_anonymous: bool = False,
     ) -> tuple[bool, str]:
         if not name or not name.strip():
             return False, "模型名称不能为空"
@@ -230,7 +285,7 @@ class LLMConfigManager:
             return False, "模型名称不能为空"
         # 本地模型（如 Ollama）无需 API Key，自动填占位符
         if not api_key or not api_key.strip():
-            if _is_local_base_url(base_url):
+            if _is_local_base_url(base_url) or allow_anonymous:
                 api_key = LOCAL_KEY_PLACEHOLDER
             else:
                 return False, "API Key 不能为空"
@@ -280,9 +335,16 @@ class LLMConfigManager:
             return False
 
         defaults = self.DEFAULT_CONFIGS[provider]
+        effective_base_url = (
+            base_url.strip() if base_url and base_url.strip()
+            else defaults.get("base_url")
+        )
+        if provider == "ollama":
+            effective_base_url = _normalise_ollama_base_url(effective_base_url)
+
         # 本地 provider（ollama）无需 API Key，自动填占位符
         if not api_key or not api_key.strip():
-            if _is_local_base_url(defaults.get("base_url")):
+            if provider == "ollama" or _is_local_base_url(effective_base_url):
                 api_key = LOCAL_KEY_PLACEHOLDER
             else:
                 log.warning("API Key 不能为空")
@@ -296,7 +358,7 @@ class LLMConfigManager:
         self.configs[provider] = LLMConfig(
             provider=provider,
             api_key=api_key.strip(),
-            base_url=(base_url.strip() if base_url else defaults.get("base_url")),
+            base_url=effective_base_url,
             model=(model.strip() if model else defaults.get("model")),
             enabled=True,
             is_custom=False,
@@ -496,10 +558,11 @@ class LLMConfigManager:
         """
         config = self.get_config(provider)
 
-        # 若没有已保存配置，但传入了临时 key，则用默认值补全其余字段
+        # 若没有已保存配置，但传入了临时值，则用默认值补全其余字段。
+        # Ollama 可以没有 key，因此不能把空 key 视作「没有临时配置」。
         if not config:
             defaults = self.DEFAULT_CONFIGS.get(provider, {})
-            if api_key:
+            if api_key or base_url or model or provider == "ollama":
                 # 用传入参数 + 默认值组成临时配置
                 effective_key   = api_key
                 effective_url   = base_url or defaults.get("base_url")
@@ -511,6 +574,9 @@ class LLMConfigManager:
             effective_key   = api_key   or config.api_key
             effective_url   = base_url  or config.base_url
             effective_model = model     or config.model
+
+        if provider == "ollama":
+            effective_url = _normalise_ollama_base_url(effective_url)
 
         if not effective_key:
             # 本地模型（如 Ollama）无需 API Key，使用占位符继续测试

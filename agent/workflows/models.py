@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Mapping
 
+from agent.workflows.features import workflow_feature_enabled
+
 
 class WorkflowErrorCode(str, Enum):
     GRAPH_INVALID = "workflow_graph_invalid"
@@ -62,6 +64,7 @@ class ApprovalStatus(str, Enum):
 
 class EdgeType(str, Enum):
     AUTO = "auto"
+    CONDITIONAL = "conditional"
     APPROVAL = "approval"
     RETRY_LOOP = "retry_loop"
 
@@ -182,7 +185,18 @@ APPROVAL_TRANSITIONS = {
 
 ALLOWED_JOIN_POLICIES = frozenset({"all_success", "all_terminal"})
 ALLOWED_REJECT_POLICIES = frozenset({"fail_run", "close_branch"})
-ALLOWED_NODE_TYPES = frozenset({"agent"})
+ALLOWED_NODE_TYPES = frozenset({"agent", "validation", "router", "sql", "export", "verifier"})
+ALLOWED_ARTIFACT_TYPES = frozenset({"dataset", "chart", "insight", "validation", "report", "sql"})
+ALLOWED_SIDE_EFFECTS = frozenset({"read_data", "write_data", "export_file", "network"})
+NODE_LIMIT_RANGES = {
+    # Modern configured models expose up to a 384K completion window. This is
+    # a ceiling, not a reservation: generation still ends once the node emits
+    # its contracted output.
+    "max_tokens": (400, 384000),
+    "max_run_seconds": (10, 900),
+    # Delegated execution is capped at 50 rounds × 4 calls per round.
+    "max_tool_calls": (0, 200),
+}
 
 
 def _coerce_status(value: Any, enum_type: type[Enum], label: str):
@@ -339,7 +353,78 @@ def validate_workflow_graph(graph: Mapping[str, Any]) -> dict[str, Any]:
         node_type = str(raw_node.get("type") or "agent")
         if node_type not in ALLOWED_NODE_TYPES:
             raise _graph_error(f"unsupported node type for {node_id}: {node_type}")
-        _required_text(raw_node, "agent_profile_id", f"agent node {node_id}")
+        if node_type in {"validation", "router", "sql", "export"} and not workflow_feature_enabled(
+            "deterministic_nodes"
+        ):
+            raise _graph_error(
+                f"deterministic node {node_id} is disabled by workflow feature flag"
+            )
+        if node_type == "verifier" and not workflow_feature_enabled("verifier_nodes"):
+            raise _graph_error(
+                f"verifier node {node_id} is disabled by workflow feature flag"
+            )
+        if node_type in {"agent", "verifier"}:
+            _required_text(raw_node, "agent_profile_id", f"agent node {node_id}")
+        elif "agent_profile_id" in raw_node:
+            raise _graph_error(
+                f"deterministic node {node_id} must not declare agent_profile_id"
+            )
+        if node_type == "validation":
+            validation = raw_node.get("validation")
+            if not isinstance(validation, Mapping):
+                raise _graph_error(f"validation node {node_id} requires validation")
+            for key in ("required", "non_empty"):
+                values = validation.get(key, [])
+                if not isinstance(values, list) or any(
+                    not isinstance(item, str) or not item.strip() for item in values
+                ):
+                    raise _graph_error(
+                        f"validation node {node_id} {key} must be a string array"
+                    )
+            for key in ("field_types", "min_items", "max_items", "equals"):
+                values = validation.get(key, {})
+                if not isinstance(values, Mapping) or any(
+                    not isinstance(name, str) or not name.strip()
+                    for name in values
+                ):
+                    raise _graph_error(
+                        f"validation node {node_id} {key} must be an object"
+                    )
+            for key in ("min_items", "max_items"):
+                if any(
+                    isinstance(value, bool) or not isinstance(value, int) or value < 0
+                    for value in dict(validation.get(key, {})).values()
+                ):
+                    raise _graph_error(
+                        f"validation node {node_id} {key} values must be non-negative integers"
+                    )
+        if node_type == "router":
+            router = raw_node.get("router")
+            if not isinstance(router, Mapping):
+                raise _graph_error(f"router node {node_id} requires router")
+            _required_text(router, "input", f"router node {node_id}")
+        if node_type == "sql":
+            _required_text(raw_node, "sql", f"sql node {node_id}")
+        if node_type == "export":
+            export = raw_node.get("export")
+            if not isinstance(export, Mapping):
+                raise _graph_error(f"export node {node_id} requires export")
+            _required_text(export, "source", f"export node {node_id}")
+            if str(export.get("format") or "markdown") not in {"markdown", "json", "text"}:
+                raise _graph_error(
+                    f"export node {node_id} format must be markdown, json, or text"
+                )
+        if node_type == "verifier":
+            verifier = raw_node.get("verifier")
+            if not isinstance(verifier, Mapping):
+                raise _graph_error(f"verifier node {node_id} requires verifier")
+            standards = verifier.get("standards")
+            if not isinstance(standards, list) or not standards or any(
+                not isinstance(item, str) or not item.strip() for item in standards
+            ):
+                raise _graph_error(
+                    f"verifier node {node_id} standards must be a non-empty string array"
+                )
         join_policy = str(raw_node.get("join_policy") or "all_success")
         if join_policy not in ALLOWED_JOIN_POLICIES:
             raise _graph_error(f"unsupported join_policy for {node_id}: {join_policy}")
@@ -352,6 +437,56 @@ def validate_workflow_graph(graph: Mapping[str, Any]) -> dict[str, Any]:
                 not isinstance(item, str) or not item.strip() for item in contract
             ):
                 raise _graph_error(f"{node_id} {contract_key} must be a string array")
+        output_validation = raw_node.get("output_validation", {})
+        if not isinstance(output_validation, Mapping):
+            raise _graph_error(f"{node_id} output_validation must be an object")
+        forbidden = output_validation.get("forbidden_substrings", [])
+        if not isinstance(forbidden, list) or any(
+            not isinstance(item, str) or not item.strip() for item in forbidden
+        ):
+            raise _graph_error(
+                f"{node_id} output_validation.forbidden_substrings must be a string array"
+            )
+        artifact_types = raw_node.get("output_artifacts", {})
+        if not isinstance(artifact_types, Mapping) or any(
+            key not in raw_node.get("output_contract", [])
+            or value not in ALLOWED_ARTIFACT_TYPES
+            for key, value in artifact_types.items()
+        ):
+            raise _graph_error(
+                f"{node_id} output_artifacts must map declared outputs to known artifact types"
+            )
+        side_effects = raw_node.get("side_effects", [])
+        if not isinstance(side_effects, list) or any(
+            not isinstance(item, str) or item not in ALLOWED_SIDE_EFFECTS
+            for item in side_effects
+        ):
+            raise _graph_error(
+                f"{node_id} side_effects must be known capability names"
+            )
+        if node_type in {"validation", "router", "sql"} and any(
+            item in {"write_data", "export_file", "network"} for item in side_effects
+        ):
+            raise _graph_error(
+                f"deterministic node {node_id} cannot declare external side effects"
+            )
+        if node_type == "export" and "export_file" not in side_effects:
+            raise _graph_error(
+                f"export node {node_id} must declare export_file side effect"
+            )
+        node_limits = raw_node.get("limits", {})
+        if not isinstance(node_limits, Mapping):
+            raise _graph_error(f"{node_id} limits must be an object")
+        for key, (minimum, maximum) in NODE_LIMIT_RANGES.items():
+            value = node_limits.get(key)
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or not minimum <= value <= maximum
+            ):
+                raise _graph_error(
+                    f"{node_id} {key} must be an integer between {minimum} and {maximum}"
+                )
         node_ids.add(node_id)
         nodes.append(raw_node)
 
@@ -383,11 +518,44 @@ def validate_workflow_graph(graph: Mapping[str, Any]) -> dict[str, Any]:
             raise _graph_error(f"self edge is not allowed: {edge_id}")
         if edge_type is EdgeType.RETRY_LOOP:
             _validate_retry_edge(raw_edge, edge_id)
+        if edge_type is EdgeType.CONDITIONAL:
+            if not workflow_feature_enabled("conditional_edges"):
+                raise _graph_error(
+                    f"conditional edge {edge_id} is disabled by workflow feature flag"
+                )
+            condition = raw_edge.get("condition")
+            if not isinstance(condition, Mapping):
+                raise _graph_error(f"conditional edge {edge_id} requires condition")
+            _required_text(condition, "field", f"conditional edge {edge_id}")
+            if "equals" not in condition or isinstance(condition["equals"], (Mapping, list)):
+                raise _graph_error(f"conditional edge {edge_id} requires scalar equals")
         edge_ids.add(edge_id)
         edges.append(raw_edge)
 
     _validate_acyclic_forward_graph(node_ids, edges)
     _validate_reachable(node_ids, entries, edges)
+
+    nodes_by_id = {str(item["node_id"]): item for item in nodes}
+    # External writes are irreversible enough that a graph must make the
+    # independent verification and human authorization explicit.  This is a
+    # schema invariant, rather than a template convention, so custom graphs
+    # cannot accidentally bypass the same safety gate.
+    high_risk_nodes = [
+        str(item["node_id"])
+        for item in nodes
+        if set(item.get("side_effects") or []) & {"write_data", "export_file", "network"}
+    ]
+    for node_id in high_risk_nodes:
+        verifier_approvals = [
+            edge for edge in edges
+            if edge.get("type") == EdgeType.APPROVAL.value
+            and str(edge.get("to_node")) == node_id
+            and str(nodes_by_id[str(edge.get("from_node"))].get("type")) == "verifier"
+        ]
+        if not verifier_approvals:
+            raise _graph_error(
+                f"high-risk side-effect node {node_id} requires an incoming approval edge from a verifier"
+            )
 
     for raw_node in nodes:
         max_attempts = raw_node.get("max_attempts")
@@ -411,11 +579,15 @@ def validate_workflow_graph(graph: Mapping[str, Any]) -> dict[str, Any]:
             raise _graph_error(
                 "run_policy.mode must be full_auto, key_approval, or exception_review"
             ) from exc
+    if high_risk_nodes and raw_mode != WorkflowRunMode.KEY_APPROVAL.value:
+        raise _graph_error(
+            "graphs with high-risk side effects require run_policy.mode=key_approval"
+        )
 
     limits = graph.get("limits", {})
     if not isinstance(limits, Mapping):
         raise _graph_error("workflow limits must be an object")
-    for key in ("max_run_minutes", "max_total_node_runs"):
+    for key in ("max_run_minutes", "max_total_node_runs", "max_total_tokens", "max_concurrent_node_runs"):
         value = limits.get(key)
         if value is not None and (
             isinstance(value, bool) or not isinstance(value, int) or value < 1

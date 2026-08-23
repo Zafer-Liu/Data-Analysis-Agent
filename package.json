@@ -1,16 +1,16 @@
 {
   "name": "data-analysis-agent-frontend",
   "private": true,
-  "version": "1.2.0",
+  "version": "1.4.0",
   "type": "module",
   "packageManager": "pnpm@11.7.0",
   "engines": {
     "node": ">=20.19.0"
   },
   "scripts": {
-    "build": "vite build && vite build --config vite.chat-app.config.js",
-    "build:chat": "vite build --config vite.chat-app.config.js",
-    "build:check": "vite build --emptyOutDir && vite build --config vite.chat-app.config.js",
+    "build": "vite build && node scripts/build-chat.mjs",
+    "build:chat": "node scripts/build-chat.mjs",
+    "build:check": "node scripts/build-chat.mjs",
     "format": "prettier --write \"frontend/core/**/*.js\" \"frontend/entries/**/*.js\" \"vite*.config.js\" \"eslint.config.js\" \"package.json\"",
     "format:check": "prettier --check \"frontend/core/**/*.js\" \"frontend/entries/**/*.js\" \"vite*.config.js\" \"eslint.config.js\" \"package.json\"",
     "lint": "eslint \"frontend/**/*.js\" \"vite*.config.js\"",

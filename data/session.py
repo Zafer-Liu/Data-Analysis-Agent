@@ -141,6 +141,23 @@ class ChatSession:
     # Persisted across turns so guard/nudge logic works in subsequent turns
     # (e.g. after ask_user user-reply starts a new turn).
     auto_loaded_skill: str = ""
+    # Optional conversation-scoped Feishu bridge.  These fields deliberately
+    # contain only a group identifier and display label; application credentials
+    # remain in the OS credential store managed by feishu_bot_store.
+    feishu_bot_enabled: bool = False
+    feishu_chat_id: str = ""
+    feishu_chat_name: str = ""
+    # Browser clients keep their own SSE stream for Web-originated turns.  A
+    # small, bounded event feed bridges completed turns that originated from a
+    # Feishu mobile/desktop client back into the currently open Web chat.
+    feishu_inbound_revision: int = 0
+    feishu_inbound_events: List[Dict[str, Any]] = field(default_factory=list)
+    _feishu_turn_lock: threading.RLock = field(
+        default_factory=threading.RLock, repr=False, compare=False,
+    )
+    _feishu_event_lock: threading.RLock = field(
+        default_factory=threading.RLock, repr=False, compare=False,
+    )
 
     # ── Multi-source API ───────────────────────────────────────────────────────
 
@@ -590,8 +607,42 @@ class ChatSession:
         self.history.append(msg)
         self.last_reasoning = reasoning
 
+    def record_feishu_inbound_event(self, role: str, content: str) -> None:
+        """Expose a completed Feishu-originated message to the linked Web UI.
+
+        This is intentionally separate from ``history``: regular Web turns are
+        already painted by their request SSE stream and must not be duplicated
+        by the browser poller.  Event content is bounded and remains only for
+        the lifetime of the active session, matching the existing bridge.
+        """
+        if role not in {"user", "assistant"}:
+            return
+        text = str(content or "").strip()
+        if not text:
+            return
+        with self._feishu_event_lock:
+            self.feishu_inbound_revision += 1
+            self.feishu_inbound_events.append({
+                "revision": self.feishu_inbound_revision,
+                "role": role,
+                "content": text[:24_000],
+            })
+            self.feishu_inbound_events = self.feishu_inbound_events[-120:]
+
+    def feishu_inbound_events_after(self, revision: int) -> tuple[int, List[Dict[str, Any]]]:
+        """Return a safe incremental snapshot for the linked browser client."""
+        cursor = max(0, int(revision or 0))
+        with self._feishu_event_lock:
+            return self.feishu_inbound_revision, [
+                dict(event) for event in self.feishu_inbound_events
+                if int(event.get("revision") or 0) > cursor
+            ]
+
     def clear_history(self):
         self.history.clear()
+        with self._feishu_event_lock:
+            self.feishu_inbound_revision = 0
+            self.feishu_inbound_events.clear()
         self.last_reasoning = ""
         self.restored_saved_at = ""
         self.chart_ids.clear()
@@ -810,6 +861,18 @@ class SessionManager:
         s = ChatSession(session_id=sid) if sid else ChatSession()
         self._store[s.session_id] = s
         return s
+
+    def find_feishu_chat(self, chat_id: str) -> Optional[ChatSession]:
+        """Return the active conversation explicitly linked to a Feishu group."""
+        target = str(chat_id or "").strip()
+        if not target:
+            return None
+        for session in list(self._store.values()):
+            session._ensure_fields()
+            if session.feishu_bot_enabled and session.feishu_chat_id == target:
+                session.last_accessed = datetime.now()
+                return session
+        return None
 
     def remove(self, sid: str):
         s = self._store.pop(sid, None)

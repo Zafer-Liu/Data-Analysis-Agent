@@ -5,8 +5,9 @@ import os
 import re
 import time
 import uuid
+from ast import literal_eval
 
-from flask import Blueprint, request, Response, jsonify
+from flask import Blueprint, g, request, Response, jsonify
 
 from .state import session_manager, config_manager, chart_store, check_session_ownership
 from agent.activation import ActivationContext, INTERNAL_ACTIONS
@@ -37,7 +38,31 @@ Do not explain, do not quote, do not use markdown, and do not mention that this 
 Keep it short, concrete, and directly actionable."""
 
 
-def _visible_history_for_prompt_suggestion(history: list, max_messages: int = 8, max_chars: int = 9000) -> list[dict]:
+def format_feishu_ask_user(event: dict) -> str:
+    """Render a Web-only choice card as a replyable Feishu text message."""
+    question = str(event.get("question") or "请告诉我下一步希望继续处理什么。 ").strip()
+    raw_options = event.get("options")
+    if isinstance(raw_options, str):
+        try:
+            raw_options = json.loads(raw_options)
+        except (TypeError, ValueError):
+            try:
+                raw_options = literal_eval(raw_options)
+            except (ValueError, SyntaxError):
+                raw_options = []
+    options = [str(item).strip() for item in (raw_options or []) if str(item).strip()]
+    if not options:
+        return f"{question}\n\n请直接回复你的选择或补充具体需求。"
+    numbered = "\n".join(f"{index}. {option}" for index, option in enumerate(options, start=1))
+    return f"{question}\n\n请直接回复序号或选项文字：\n{numbered}"
+
+
+def _visible_history_for_prompt_suggestion(
+    history: list,
+    max_messages: int = 80,
+    max_chars: int = 9000,
+    max_message_chars: int = 100_000,
+) -> list[dict]:
     visible: list[dict] = []
     total = 0
     for msg in reversed(history or []):
@@ -45,7 +70,7 @@ def _visible_history_for_prompt_suggestion(history: list, max_messages: int = 8,
         content = str(msg.get("content") or "").strip()
         if role not in {"user", "assistant"} or not content or msg.get("tool_calls"):
             continue
-        content = re.sub(r"\s+", " ", content)[:2200]
+        content = re.sub(r"\s+", " ", content)[:max_message_chars]
         total += len(content)
         visible.append({"role": role, "content": content})
         if len(visible) >= max_messages or total >= max_chars:
@@ -81,8 +106,54 @@ def _sanitize_prompt_suggestion(text: str, max_len: int = 220) -> str:
     return suggestion
 
 
-def _build_prompt_suggestion_messages(history: list, lang: str = "zh") -> list[dict]:
-    visible = _visible_history_for_prompt_suggestion(history)
+def _prompt_content_text(content) -> str:
+    """Normalise OpenAI-compatible string and multipart final content."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        for key in ("text", "content", "value"):
+            if key in content:
+                return _prompt_content_text(content[key])
+        return ""
+    if isinstance(content, list):
+        return "\n".join(
+            part for part in (_prompt_content_text(item) for item in content) if part
+        )
+    return str(getattr(content, "text", "") or "")
+
+
+def _final_prompt_suggestion_content(message) -> str:
+    """Keep final answer, discard inline/separate provider reasoning fields."""
+    content = message.get("content") if isinstance(message, dict) else getattr(message, "content", "")
+    text = _prompt_content_text(content).strip()
+    visible, _reasoning = split_reasoning_tags(text)
+    # Other reasoning models use <analysis> / <reasoning>, including an
+    # unclosed tag when output stops at the token budget.
+    visible = re.sub(
+        r"<(?:analysis|reasoning)\b[^>]*>.*?(?:</(?:analysis|reasoning)>|$)", "", visible,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    return visible.strip()
+
+
+def _prompt_suggestion_token_budget(config) -> int:
+    """80% of the selected model's configured maximum completion length."""
+    from LLM.llm_config_manager import auxiliary_token_limits
+
+    _context_window, max_output_tokens = auxiliary_token_limits(config)
+    return max_output_tokens
+
+
+def _build_prompt_suggestion_messages(
+    history: list,
+    lang: str = "zh",
+    *,
+    max_context_tokens: int | None = None,
+) -> list[dict]:
+    # The history is text, so convert the model's token allowance with the
+    # same conservative estimator used by the agent executor.
+    max_chars = 9000 if not max_context_tokens else max(9000, int(max_context_tokens * 3.5))
+    visible = _visible_history_for_prompt_suggestion(history, max_chars=max_chars)
     if len(visible) < 2:
         return []
     language_hint = (
@@ -488,7 +559,9 @@ def new_session():
     # Governance: trigger the 24h consolidation check on every new session.
     # workspace_id is not yet known here, so only user-level records are in
     # scope; workspace-level consolidation continues to fire at turn-end.
-    if _maybe_schedule_memory_consolidation is not None:
+    if _maybe_schedule_memory_consolidation is not None and bool(
+        (request.get_json(silent=True) or {}).get("memory_enabled", True)
+    ):
         try:
             _start_user_id = owner_user_id or str(
                 request.headers.get("X-BAA-User-ID") or "local-default"
@@ -647,16 +720,20 @@ def prompt_suggestion(sid: str):
         log.warning("[prompt-suggestion] session not found sid=%s", sid)
         return jsonify({"ok": False, "suggestion": ""}), 404
 
-    lang = str((request.json or {}).get("lang") or "zh").lower()
-    messages = _build_prompt_suggestion_messages(sess.history, lang=lang)
-    if not messages:
-        log.info("[prompt-suggestion] history too short sid=%s history_len=%d", sid, len(sess.history or []))
-        return jsonify({"ok": False, "suggestion": ""})
-
     provider = sess.model_provider or config_manager.get_default_provider()
     cfg = config_manager.get_config(provider) if provider else None
     if not provider or cfg is None:
         log.warning("[prompt-suggestion] no provider/config sid=%s provider=%s", sid, provider)
+        return jsonify({"ok": False, "suggestion": ""})
+
+    from LLM.llm_config_manager import auxiliary_token_limits
+    context_budget, output_budget = auxiliary_token_limits(cfg)
+    lang = str((request.json or {}).get("lang") or "zh").lower()
+    messages = _build_prompt_suggestion_messages(
+        sess.history, lang=lang, max_context_tokens=context_budget,
+    )
+    if not messages:
+        log.info("[prompt-suggestion] history too short sid=%s history_len=%d", sid, len(sess.history or []))
         return jsonify({"ok": False, "suggestion": ""})
 
     log.debug("[prompt-suggestion] calling LLM sid=%s provider=%s model=%s msg_count=%d",
@@ -664,15 +741,20 @@ def prompt_suggestion(sid: str):
     try:
         from LLM.llm_config_manager import get_llm_client
         client = get_llm_client(provider)
+        budget = _prompt_suggestion_token_budget(cfg)
         response = _call_with_retry(
             client.chat.completions.create,
             model=cfg.model,
             messages=messages,
             temperature=0.25,
-            max_tokens=80,
+            max_tokens=budget,
         )
-        raw = response.choices[0].message.content if response.choices else ""
-        log.debug("[prompt-suggestion] raw response sid=%s raw=%r", sid, raw[:300] if raw else "")
+        message = response.choices[0].message if response.choices else None
+        raw = _final_prompt_suggestion_content(message) if message is not None else ""
+        log.debug(
+            "[prompt-suggestion] response sid=%s context_budget=%d output_budget=%d chars=%d has_final=%s",
+            sid, context_budget, output_budget, len(raw), bool(raw),
+        )
         suggestion = _sanitize_prompt_suggestion(raw)
         log.debug("[prompt-suggestion] sanitized sid=%s suggestion=%r", sid, suggestion[:200] if suggestion else "")
     except Exception as exc:
@@ -704,6 +786,7 @@ def chat_stream(sid: str):
         return jsonify({"error": "消息不能为空"}), 400
 
     sess = session_manager.get_or_create(sid)
+    is_internal_feishu = bool(getattr(g, "feishu_inbound", False))
     user_id = str(
         request.headers.get("X-BAA-User-ID")
         or d.get("user_id")
@@ -714,9 +797,12 @@ def chat_stream(sid: str):
         from .auth import current_user
         from data.auth_store import check_quota
         auth_user = current_user()
-        if not auth_user:
+        if not auth_user and not is_internal_feishu:
             return jsonify({"error": "请先登录", "needs_auth": True}), 401
-        user_id = auth_user["id"]
+        user_id = (
+            str(getattr(sess, "owner_user_id", "") or "feishu-bot")
+            if is_internal_feishu else auth_user["id"]
+        )
         # Ownership check: refuse access when another user owns this session
         owner = getattr(sess, "owner_user_id", "")
         if owner and owner != user_id:
@@ -1029,6 +1115,7 @@ def chat_stream(sid: str):
         recovery_context = sess.build_recovery_context(workspace_status)
         teams_enabled = bool(d.get("teams_enabled"))
         auto_match_skill = d.get("auto_match_skill", True)
+        memory_enabled = d.get("memory_enabled", True)
         team_context = _build_team_context(sid, fixed_workspace_id) if teams_enabled else ""
 
         conversation_scope = runner.conversation_scope(conversation_job_id)
@@ -1049,6 +1136,7 @@ def chat_stream(sid: str):
                 team_context=team_context,
                 teams_enabled=teams_enabled,
                 auto_match_skill=auto_match_skill,
+                memory_enabled=memory_enabled,
                 discovered_tools=frozenset(getattr(sess, "discovered_tools", []) or []),
                 discovered_mcp_tools=list(
                     getattr(sess, "discovered_mcp_tools", []) or []
@@ -1091,6 +1179,16 @@ def chat_stream(sid: str):
                     sess.auto_loaded_skill = event.get("name", "")
                 elif etype == "error":
                     stream_error = str(event.get("message") or "Conversation failed")
+                elif etype == "ask_user" and is_internal_feishu:
+                    # The Web client renders a selectable card for this event.
+                    # Feishu has no such card in this integration, so turn it
+                    # into an ordinary replyable message instead of ending the
+                    # mobile turn with an empty bot message.
+                    event = {
+                        "type": "text",
+                        "content": format_feishu_ask_user(event),
+                    }
+                    etype = "text"
                 elif etype == "hook_event":
                     runner.append_tracked_event(conversation_job_id, {
                         "type": "hook_event",
@@ -1196,13 +1294,55 @@ def chat_stream(sid: str):
                 while queue:
                     _finish_step(tool, ok=not bool(stream_error), error=stream_error)
             completed_normally = True
+            final_answer = "".join(collected).strip()
+            if not final_answer:
+                # Never post a title-only response to Feishu (or retain an
+                # empty assistant turn) when a provider/tool produced no text.
+                # Details remain in server logs; the user gets an actionable,
+                # non-sensitive recovery message.
+                final_answer = (
+                    "本次处理未生成可发送的正文。请直接重试一次；"
+                    "若仍未收到结果，请在网页对话查看任务状态后再继续。"
+                )
+                log.warning(
+                    "[chat] empty final answer sid=%s internal_feishu=%s stream_error=%s",
+                    sid, is_internal_feishu, bool(stream_error),
+                )
             sess.add_user(message)
             sess.add_assistant(
-                "".join(collected),
+                final_answer,
                 reasoning="".join(collected_reasoning),
                 chart_ids=turn_chart_ids,
             )
-            final_answer = "".join(collected)
+            if is_internal_feishu:
+                # Web-originated turns already arrive in the browser through
+                # this request's SSE.  Only mobile/desktop Feishu turns need
+                # the incremental session bridge below.
+                sess.record_feishu_inbound_event("user", message)
+                sess.record_feishu_inbound_event("assistant", final_answer)
+            if bool(getattr(sess, "feishu_bot_enabled", False)) and getattr(sess, "feishu_chat_id", ""):
+                yield _sse({"type": "feishu_sync", "status": "sending"})
+                try:
+                    from data.feishu_bot_service import send_conversation_turn, send_text
+
+                    if is_internal_feishu:
+                        send_text(
+                            "🤖 智析 Agent\n" + final_answer,
+                            receive_id=sess.feishu_chat_id,
+                            receive_id_type="chat_id",
+                        )
+                    else:
+                        send_conversation_turn(
+                            chat_id=sess.feishu_chat_id,
+                            user_message=message,
+                            assistant_message=final_answer,
+                        )
+                    yield _sse({"type": "feishu_sync", "status": "sent"})
+                except Exception as exc:
+                    # A collaboration-side delivery failure must never turn a
+                    # completed Web analysis into a failed conversation.
+                    log.warning("[feishu] conversation sync failed sid=%s: %s", sid, exc)
+                    yield _sse({"type": "feishu_sync", "status": "failed"})
             if hook_engine and hook_context:
                 end_context = hook_context.child(
                     event_name="turn_end",
@@ -1223,7 +1363,7 @@ def chat_stream(sid: str):
                 })
                 if not sess.cancel_requested:
                     try:
-                        if _schedule_memory_extraction is not None:
+                        if memory_enabled and _schedule_memory_extraction is not None:
                             _schedule_memory_extraction(
                                 provider=sess.model_provider
                                 or config_manager.get_default_provider()
@@ -1237,7 +1377,7 @@ def chat_stream(sid: str):
                             )
                         # Governance piggybacks on turn end: the 24h lock-file
                         # gate makes this a cheap stat() on most turns.
-                        if _maybe_schedule_memory_consolidation is not None:
+                        if memory_enabled and _maybe_schedule_memory_consolidation is not None:
                             _maybe_schedule_memory_consolidation(
                                 provider=sess.model_provider
                                 or config_manager.get_default_provider()

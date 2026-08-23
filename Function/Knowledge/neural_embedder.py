@@ -1,29 +1,32 @@
 # -*- coding: utf-8 -*-
 """
-neural_embedder — BGE-small-zh neural embedding via torch (no transformers).
+neural_embedder — BGE-small-zh neural embedding via ONNX Runtime (no torch).
 
-Loads BAAI/bge-small-zh-v1.5 (4-layer BERT, 512-dim, ~91MB) directly with
-torch + tokenizers, bypassing the transformers dependency that requires
-stdlib modules (profile, pydoc, pickletools) missing in Box's portable Python.
+Loads BAAI/bge-small-zh-v1.5 (4-layer BERT, 512-dim, ~91MB ONNX) directly with
+onnxruntime + tokenizers, bypassing both torch and transformers dependencies.
 
 Provides:
   - embed(text) -> list[float]      : single text -> 512-dim normalized vector
   - embed_batch(texts) -> list      : batched encoding for efficiency
   - cosine(a, b) -> float           : cosine similarity (vectors are pre-normalized)
 
-Falls back to hash-projection embedding if torch is unavailable or model
+Falls back to hash-projection embedding if onnxruntime is unavailable or model
 files are missing, ensuring the system always works.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
 import os
 import pathlib
+import re as _re
 import urllib.request
 from typing import Sequence
 from urllib.parse import urlsplit
+
+import numpy as np
 
 from infrastructure.paths import runtime_config_path
 
@@ -100,123 +103,29 @@ _init_error = ""
 
 
 def _init_neural():
-    """Lazy-init torch model + tokenizer. Returns True on success."""
+    """Lazy-init ONNX Runtime session + tokenizer. Returns True on success."""
     global _model, _tokenizer, _use_neural, _init_attempted
     if _init_attempted:
         return _use_neural
     _init_attempted = True
 
-    if _MODEL_DIR is None or not (_MODEL_DIR / "pytorch_model.bin").exists():
-        log.info("[neural_embedder] model files not found, using hash fallback")
+    onnx_path = _MODEL_DIR / "model.onnx" if _MODEL_DIR else None
+    if onnx_path is None or not onnx_path.exists():
+        log.info("[neural_embedder] model.onnx not found, using hash fallback")
         return False
 
     try:
-        import torch
-        import torch.nn as nn
-        import torch.nn.functional as F
+        import onnxruntime as ort
         from tokenizers import Tokenizer
 
-        config = json.loads((_MODEL_DIR / "config.json").read_text(encoding="utf-8"))
-        hid = config["hidden_size"]
-        n_layers = config["num_hidden_layers"]
-        n_heads = config["num_attention_heads"]
-        vocab = config["vocab_size"]
-        max_pos = config["max_position_embeddings"]
-        intermediate = config.get("intermediate_size", 3072)
-
-        head_dim = hid // n_heads
-
-        class BertEmbeddings(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.word = nn.Embedding(vocab, hid, padding_idx=0)
-                self.pos = nn.Embedding(max_pos, hid)
-                self.tok_type = nn.Embedding(2, hid)
-                self.ln = nn.LayerNorm(hid)
-                self.register_buffer(
-                    "pos_ids", torch.arange(max_pos).unsqueeze(0)
-                )
-
-            def forward(self, ids):
-                pos = self.pos_ids[:, : ids.size(1)]
-                x = (
-                    self.word(ids)
-                    + self.pos(pos)
-                    + self.tok_type(torch.zeros_like(ids))
-                )
-                return self.ln(x)
-
-        class BertLayer(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.q = nn.Linear(hid, hid)
-                self.k = nn.Linear(hid, hid)
-                self.v = nn.Linear(hid, hid)
-                self.attn_out = nn.Linear(hid, hid)
-                self.attn_ln = nn.LayerNorm(hid)
-                self.ffn1 = nn.Linear(hid, intermediate)
-                self.ffn2 = nn.Linear(intermediate, hid)
-                self.ffn_ln = nn.LayerNorm(hid)
-
-            def forward(self, x, mask):
-                B, L, H = x.shape
-                q = self.q(x).view(B, L, n_heads, head_dim).transpose(1, 2)
-                k = self.k(x).view(B, L, n_heads, head_dim).transpose(1, 2)
-                v = self.v(x).view(B, L, n_heads, head_dim).transpose(1, 2)
-                scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(head_dim)
-                ext = (1.0 - mask.float().unsqueeze(1).unsqueeze(2)) * -10000.0
-                scores = scores + ext
-                attn = F.softmax(scores, dim=-1)
-                ctx = (
-                    torch.matmul(attn, v)
-                    .transpose(1, 2)
-                    .contiguous()
-                    .view(B, L, H)
-                )
-                x = self.attn_ln(x + self.attn_out(ctx))
-                ffn = self.ffn2(F.gelu(self.ffn1(x)))
-                return self.ffn_ln(x + ffn)
-
-        class MiniBGE(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.embeddings = BertEmbeddings()
-                self.layers = nn.ModuleList(
-                    [BertLayer() for _ in range(n_layers)]
-                )
-
-            def forward(self, ids, mask):
-                x = self.embeddings(ids)
-                for layer in self.layers:
-                    x = layer(x, mask)
-                return x
-
-        model = MiniBGE()
-        state = torch.load(
-            str(_MODEL_DIR / "pytorch_model.bin"),
-            map_location="cpu",
-            weights_only=True,
+        sess_opts = ort.SessionOptions()
+        sess_opts.inter_op_num_threads = 1
+        sess_opts.intra_op_num_threads = 2
+        sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        _model = ort.InferenceSession(
+            str(onnx_path), sess_opts,
+            providers=["CPUExecutionProvider"]
         )
-        new_state = {}
-        for k, v in state.items():
-            nk = k
-            nk = nk.replace("embeddings.word_embeddings", "embeddings.word")
-            nk = nk.replace("embeddings.position_embeddings", "embeddings.pos")
-            nk = nk.replace("embeddings.token_type_embeddings", "embeddings.tok_type")
-            nk = nk.replace("embeddings.LayerNorm", "embeddings.ln")
-            nk = nk.replace("encoder.layer.", "layers.")
-            nk = nk.replace(".attention.self.query.", ".q.")
-            nk = nk.replace(".attention.self.key.", ".k.")
-            nk = nk.replace(".attention.self.value.", ".v.")
-            nk = nk.replace(".attention.output.dense", ".attn_out")
-            nk = nk.replace(".attention.output.LayerNorm", ".attn_ln")
-            nk = nk.replace(".intermediate.dense", ".ffn1")
-            nk = nk.replace(".output.dense", ".ffn2")
-            nk = nk.replace(".output.LayerNorm", ".ffn_ln")
-            new_state[nk] = v
-        model.load_state_dict(new_state, strict=False)
-        model.eval()
-        _model = model
 
         tok = Tokenizer.from_file(str(_MODEL_DIR / "tokenizer.json"))
         tok.enable_padding(length=_MAX_LEN)
@@ -224,7 +133,7 @@ def _init_neural():
         _tokenizer = tok
 
         _use_neural = True
-        log.info("[neural_embedder] BGE-small-zh loaded (dim=%d, layers=%d)", hid, n_layers)
+        log.info("[neural_embedder] BGE-small-zh ONNX loaded (dim=%d)", _EMBED_DIM)
     except Exception as e:
         global _init_error
         _init_error = str(e)
@@ -263,6 +172,8 @@ def _try_cloud_batch(texts: Sequence[str]) -> list[list[float]] | None:
         _cloud_available = False
         log.info("[neural_embedder] cloud unavailable (%s), falling back", exc)
         return None
+
+
 def embed(text: str) -> list[float]:
     """Embed one text without a separate cloud probe request."""
     if _embed_mode in ("auto", "cloud"):
@@ -286,6 +197,8 @@ def embed(text: str) -> list[float]:
         len(vector),
     )
     return vector
+
+
 def embed_batch(texts: Sequence[str]) -> list[list[float]]:
     """Embed multiple texts in one cloud or local batch."""
     if not texts:
@@ -315,6 +228,8 @@ def embed_batch(texts: Sequence[str]) -> list[list[float]]:
         dim,
     )
     return vectors
+
+
 def get_embedding_signature() -> str:
     """Identify the active backend/model/dimension for cache invalidation."""
     info = get_embed_info()
@@ -337,6 +252,7 @@ def embed_query(text: str) -> list[float]:
     _query_embedding_cache[key] = vector
     return vector
 
+
 def cosine(a: list[float], b: list[float]) -> float:
     if not a or not b:
         return 0.0
@@ -351,6 +267,7 @@ def is_neural() -> bool:
         return False
     _init_neural()
     return _use_neural
+
 
 def get_init_error() -> str:
     """Return the last init error string (empty if none)."""
@@ -415,7 +332,7 @@ def configure_cloud(
     normalized_model = str(model or "").strip()
     if not normalized_model:
         raise ValueError("云端模型名不能为空")
-    previous = (_CLOUD_URL, _CLOUD_MODEL, _CLOUD_TOKEN, _cloud_available)
+    previous = (_CLOUD_URL, _CLOUD_MODEL, _CLOUD_TOKEN)
     try:
         _CLOUD_URL = normalized_url
         _CLOUD_MODEL = normalized_model
@@ -432,7 +349,9 @@ def configure_cloud(
             result["test"] = tested
         return result
     except Exception:
-        _CLOUD_URL, _CLOUD_MODEL, _CLOUD_TOKEN, _cloud_available = previous
+        # Roll back config fields only; keep the probe verdict so the UI
+        # never reports "cloud active" right after a failed test.
+        _CLOUD_URL, _CLOUD_MODEL, _CLOUD_TOKEN = previous
         raise
 
 
@@ -440,20 +359,35 @@ def test_cloud_connection() -> dict:
     global _cloud_available
     if not _CLOUD_TOKEN:
         raise ValueError("请先配置 Bearer Token")
-    vectors = _cloud_embed_batch(["连接测试"])
-    if not vectors or len(vectors[0]) != _CLOUD_DIM:
-        actual = len(vectors[0]) if vectors else 0
-        raise ValueError(f"云端向量维度异常：期望 {_CLOUD_DIM}，实际 {actual}")
+    try:
+        vectors = _cloud_embed_batch(["连接测试"])
+        if not vectors or len(vectors[0]) != _CLOUD_DIM:
+            actual = len(vectors[0]) if vectors else 0
+            raise ValueError(f"云端向量维度异常：期望 {_CLOUD_DIM}，实际 {actual}")
+    except Exception:
+        _cloud_available = False
+        raise
     _cloud_available = True
     return {"available": True, "dim": len(vectors[0]), "model": _CLOUD_MODEL}
 
 
-def get_embed_info() -> dict:
-    """Return current embedding status info for the UI."""
+def get_embed_info(probe: bool = False) -> dict:
+    """Return current embedding status info for the UI.
+
+    probe=True forces a fresh cloud connectivity check (short timeout); by
+    default no network request is made — the cached verdict is reported and
+    an unverified cloud shows up as its actual fallback backend.
+    """
+    if (
+        probe
+        and _embed_mode in ("auto", "cloud")
+        and bool(_CLOUD_TOKEN and _CLOUD_URL)
+    ):
+        _cloud_probe(timeout=6, force=True)
     cloud_selected = (
         _embed_mode in ("auto", "cloud")
         and bool(_CLOUD_TOKEN and _CLOUD_URL)
-        and _cloud_available is not False
+        and _cloud_available is True
     )
     cloud_ok = _cloud_available is True
     local_ok = _init_neural() if _embed_mode in ("auto", "local") and not cloud_selected else False
@@ -468,7 +402,7 @@ def get_embed_info() -> dict:
     else:
         active = "hash"
         dim = 384
-        model = "Hash projection"
+        model = "基础关键词匹配（Hash 384维）"
     return {
         "mode": _embed_mode,
         "active": active,
@@ -482,7 +416,7 @@ def get_embed_info() -> dict:
             else "configured" if bool(_CLOUD_TOKEN and _CLOUD_URL) and _cloud_available is None
             else "unavailable"
         ),
-        "local_available": bool(_MODEL_DIR and (_MODEL_DIR / "pytorch_model.bin").exists()),
+        "local_available": bool(_MODEL_DIR and (_MODEL_DIR / "model.onnx").exists()),
     }
 
 
@@ -508,7 +442,7 @@ def reset_for_newly_installed_model():
 # -- Cloud embedding implementation ------------------------------------------
 
 
-def _cloud_embed_batch(texts):
+def _cloud_embed_batch(texts, timeout: float | None = None):
     """Call Orange Pi cloud BGE-large-zh API. Returns 1024-dim vectors."""
     body = json.dumps(
         {"input": list(texts), "model": _CLOUD_MODEL}
@@ -523,21 +457,24 @@ def _cloud_embed_batch(texts):
             "User-Agent": _CLOUD_UA,
         },
     )
-    resp = urllib.request.urlopen(req, timeout=_CLOUD_TIMEOUT)
+    resp = urllib.request.urlopen(req, timeout=timeout or _CLOUD_TIMEOUT)
     data = json.loads(resp.read().decode("utf-8"))
     return [d["embedding"] for d in data["data"]]
 
 
-def _cloud_probe():
-    """Quick connectivity test for cloud endpoint."""
+def _cloud_probe(timeout: float | None = None, force: bool = False):
+    """Quick connectivity test for cloud endpoint.
+
+    force=True re-probes even when a cached verdict exists (manual check).
+    """
     global _cloud_available
-    if _cloud_available is not None:
+    if not force and _cloud_available is not None:
         return _cloud_available
     if not _CLOUD_TOKEN or not _CLOUD_URL:
         _cloud_available = False
         return False
     try:
-        result = _cloud_embed_batch(["ping"])
+        result = _cloud_embed_batch(["ping"], timeout=timeout)
         _cloud_available = len(result) > 0 and len(result[0]) == _CLOUD_DIM
         if _cloud_available:
             log.info("[neural_embedder] cloud BGE-large-zh active (dim=%d)", _CLOUD_DIM)
@@ -547,47 +484,57 @@ def _cloud_probe():
         _cloud_available = False
         return False
 
-# ── Neural implementation ────────────────────────────────────────────────────
+# ── Neural implementation (ONNX Runtime) ─────────────────────────────────────
+
+
+def _onnx_feed(ids: np.ndarray, mask: np.ndarray) -> dict:
+    """Build the input feed based on what the ONNX graph declares.
+
+    Self-converted exports take (input_ids, attention_mask) while the Xenova
+    export also requires token_type_ids; supply zeros when asked for it.
+    """
+    feed = {"input_ids": ids, "attention_mask": mask}
+    names = {i.name for i in _model.get_inputs()}
+    if "token_type_ids" in names:
+        feed["token_type_ids"] = np.zeros_like(ids)
+    return feed
 
 
 def _neural_embed(text: str) -> list[float]:
-    import torch
-    import torch.nn.functional as F
-
     enc = _tokenizer.encode(text)
-    ids = torch.tensor([enc.ids])
-    mask = torch.tensor([enc.attention_mask])
-    with torch.no_grad():
-        hidden = _model(ids, mask)
-        m = mask.float().unsqueeze(-1)
-        pooled = (hidden * m).sum(1) / m.sum(1).clamp(min=1)
-        pooled = F.normalize(pooled, p=2, dim=1)
+    ids = np.array([enc.ids], dtype=np.int64)
+    mask = np.array([enc.attention_mask], dtype=np.int64)
+
+    hidden = _model.run(None, _onnx_feed(ids, mask))[0]
+    # hidden: [1, L, 512]
+
+    m = mask.astype(np.float32)[..., np.newaxis]  # [1, L, 1]
+    pooled = (hidden * m).sum(axis=1) / np.maximum(m.sum(axis=1), 1.0)  # [1, 512]
+    # L2 normalize
+    norm = np.linalg.norm(pooled, axis=1, keepdims=True)
+    pooled = pooled / np.maximum(norm, 1e-12)
     return pooled[0].tolist()
 
 
 def _neural_embed_batch(texts: Sequence[str]) -> list[list[float]]:
-    import torch
-    import torch.nn.functional as F
-
     encs = _tokenizer.encode_batch(list(texts))
-    ids = torch.tensor([e.ids for e in encs])
-    mask = torch.tensor([e.attention_mask for e in encs])
-    with torch.no_grad():
-        hidden = _model(ids, mask)
-        m = mask.float().unsqueeze(-1)
-        pooled = (hidden * m).sum(1) / m.sum(1).clamp(min=1)
-        pooled = F.normalize(pooled, p=2, dim=1)
+    ids = np.array([e.ids for e in encs], dtype=np.int64)
+    mask = np.array([e.attention_mask for e in encs], dtype=np.int64)
+
+    hidden = _model.run(None, _onnx_feed(ids, mask))[0]
+    # hidden: [B, L, 512]
+
+    m = mask.astype(np.float32)[..., np.newaxis]  # [B, L, 1]
+    pooled = (hidden * m).sum(axis=1) / np.maximum(m.sum(axis=1), 1.0)  # [B, 512]
+    # L2 normalize
+    norm = np.linalg.norm(pooled, axis=1, keepdims=True)
+    pooled = pooled / np.maximum(norm, 1e-12)
     return pooled.tolist()
 
 
 # ── Hash fallback (same as knowledge_base._embed) ────────────────────────────
 
-import hashlib
-
 _HASH_DIM = 384
-
-_EN_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE) if False else None  # lazy
-import re as _re
 
 
 def _hash_tokens(text: str) -> list[str]:

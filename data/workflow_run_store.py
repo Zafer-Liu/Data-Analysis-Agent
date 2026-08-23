@@ -94,6 +94,16 @@ CREATE TABLE IF NOT EXISTS workflow_artifact_manifests (
 CREATE INDEX IF NOT EXISTS idx_workflow_artifact_manifests_run
     ON workflow_artifact_manifests(run_id, created_at);
 
+CREATE TABLE IF NOT EXISTS workflow_artifact_blobs (
+    artifact_id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    content_json TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_artifact_blobs_workspace
+    ON workflow_artifact_blobs(workspace_id, created_at);
+
 CREATE TABLE IF NOT EXISTS workflow_artifact_consumptions (
     id TEXT PRIMARY KEY,
     workspace_id TEXT NOT NULL,
@@ -261,16 +271,31 @@ def _artifact_item(
     source_job_id: str = "",
     source_tool: str = "workflow",
     inline_limit: int = 1000,
+    artifact_type: str = "workflow_material",
+    schema_version: str = "v1",
 ) -> dict[str, Any]:
     text = _stable_payload(value)
     encoded = text.encode("utf-8")
     digest = hashlib.sha256(encoded).hexdigest()
     source_metadata = _source_metadata(value)
+    evidence = []
+    quality: dict[str, Any] = {"status": "not_validated", "checks": []}
+    if isinstance(value, Mapping):
+        raw_evidence = value.get("evidence") or value.get("sources") or []
+        if isinstance(raw_evidence, (list, tuple)):
+            evidence.extend(str(item) for item in raw_evidence if str(item).strip())
+        raw_quality = value.get("quality")
+        if isinstance(raw_quality, Mapping):
+            quality = dict(raw_quality)
+    for key in ("source_artifact_id", "source_artifact_uri", "data_snapshot_id", "sql_hash"):
+        if source_metadata.get(key):
+            evidence.append(f"{key}:{source_metadata[key]}")
     artifact_id = f"wf_{digest[:16]}_{uuid.uuid4().hex[:8]}"
     item: dict[str, Any] = {
         "artifact_id": artifact_id,
         "logical_name": str(logical_name),
-        "type": "workflow_material",
+        "type": artifact_type,
+        "schema_version": schema_version,
         "name": str(logical_name),
         "uri": f"artifact://workflow/{run_id}/{node_run_id or 'input'}/{artifact_id}",
         "sha256": digest,
@@ -279,12 +304,19 @@ def _artifact_item(
         "source_job_id": str(source_metadata.pop("source_job_id", source_job_id or "")),
         "source_tool": str(source_metadata.pop("source_tool", source_tool or "workflow")),
         "created_at": _now(),
+        "evidence": list(dict.fromkeys(evidence))[:30],
+        "quality": quality,
     }
     item.update(source_metadata)
     if len(text) <= inline_limit:
         item["data"] = value
     else:
         item["data_preview"] = text[:inline_limit]
+        # Keep the complete immutable value in the companion blob table.  The
+        # manifest remains compact for Run Detail, while downstream nodes can
+        # consume the original Artifact rather than a lossy preview.
+        item["content_available"] = True
+        item["_artifact_blob_value"] = value
     return item
 
 
@@ -418,6 +450,24 @@ class WorkflowRunStore:
         supersedes_manifest_id: str = "",
     ) -> str:
         manifest_id = _id("mft")
+        stored_items: list[dict[str, Any]] = []
+        for raw_item in items:
+            item = dict(raw_item)
+            if "_artifact_blob_value" in item:
+                value = item.pop("_artifact_blob_value")
+                self._conn.execute(
+                    "INSERT INTO workflow_artifact_blobs "
+                    "(artifact_id, workspace_id, content_json, size, created_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (
+                        str(item["artifact_id"]),
+                        self.workspace_id,
+                        _dump(value),
+                        int(item.get("size") or 0),
+                        _now(),
+                    ),
+                )
+            stored_items.append(item)
         self._conn.execute(
             "INSERT INTO workflow_artifact_manifests "
             "(id, workspace_id, run_id, node_run_id, kind, items_json, summary, "
@@ -428,7 +478,7 @@ class WorkflowRunStore:
                 run_id,
                 node_run_id,
                 kind,
-                _dump(items),
+                _dump(stored_items),
                 str(summary or "")[:1000],
                 supersedes_manifest_id,
                 _now(),
@@ -442,10 +492,33 @@ class WorkflowRunStore:
                 "manifest_id": manifest_id,
                 "node_run_id": node_run_id,
                 "kind": kind,
-                "artifact_count": len(items),
+                "artifact_count": len(stored_items),
             },
         )
         return manifest_id
+
+    def get_artifact_content(self, artifact_id: str) -> Any | None:
+        """Resolve a complete Artifact value without exposing it in run lists."""
+        artifact_id = str(artifact_id or "").strip()
+        if not artifact_id:
+            return None
+        with self._lock:
+            blob = self._conn.execute(
+                "SELECT content_json FROM workflow_artifact_blobs "
+                "WHERE artifact_id = ? AND workspace_id = ?",
+                (artifact_id, self.workspace_id),
+            ).fetchone()
+            if blob is not None:
+                return _load(blob["content_json"], None)
+            manifests = self._conn.execute(
+                "SELECT items_json FROM workflow_artifact_manifests WHERE workspace_id = ?",
+                (self.workspace_id,),
+            ).fetchall()
+        for row in manifests:
+            for item in _load(row["items_json"], []):
+                if str(item.get("artifact_id") or "") == artifact_id and "data" in item:
+                    return item["data"]
+        return None
 
     def _event_locked(
         self,
@@ -516,7 +589,7 @@ class WorkflowRunStore:
                         run_id,
                         str(node["node_id"]),
                         NodeRunStatus.PENDING.value,
-                        str(node["agent_profile_id"]),
+                        str(node.get("agent_profile_id") or ""),
                         _dump({}),
                         now,
                         now,
@@ -548,6 +621,83 @@ class WorkflowRunStore:
                 {"run_id": run_id, "workflow_version_id": workflow_version_id},
             )
         return self.get_run(run_id)
+
+    def seed_checkpoint_nodes(
+        self,
+        run_id: str,
+        *,
+        source_run_id: str,
+        source_nodes: Mapping[str, Mapping[str, Any]],
+    ) -> bool:
+        """Reuse successful node outputs when branching from a checkpoint.
+
+        Manifests stay immutable in their source Run; the new Run records an
+        explicit audit event for every reused node and consumes those manifests
+        normally when dispatching its downstream nodes.
+        """
+        if not source_nodes:
+            return False
+        if any(
+            str(node.get("status") or "") != NodeRunStatus.SUCCEEDED.value
+            for node in source_nodes.values()
+        ):
+            return False
+        now = _now()
+        with self._transaction():
+            target = self._conn.execute(
+                "SELECT id FROM workflow_runs WHERE id = ? AND workspace_id = ?",
+                (run_id, self.workspace_id),
+            ).fetchone()
+            source = self._conn.execute(
+                "SELECT id FROM workflow_runs WHERE id = ? AND workspace_id = ?",
+                (source_run_id, self.workspace_id),
+            ).fetchone()
+            if target is None or source is None:
+                return False
+            for node_id, node in source_nodes.items():
+                cursor = self._conn.execute(
+                    "UPDATE workflow_node_runs SET status = ?, input_json = ?, output_json = ?, "
+                    "input_manifest_id = ?, output_manifest_id = ?, updated_at = ?, "
+                    "finished_at = ? WHERE run_id = ? AND node_id = ? AND iteration = 1 AND attempt = 1 "
+                    "AND status = ?",
+                    (
+                        NodeRunStatus.SUCCEEDED.value,
+                        _dump(node.get("input") or {}),
+                        _dump(node.get("output")) if node.get("output") is not None else None,
+                        str(node.get("input_manifest_id") or ""),
+                        str(node.get("output_manifest_id") or ""),
+                        now,
+                        now,
+                        run_id,
+                        str(node_id),
+                        NodeRunStatus.PENDING.value,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise WorkflowRunStoreError(
+                        f"unable to seed checkpoint node: {node_id}"
+                    )
+                self._event_locked(
+                    run_id,
+                    "workflow_checkpoint_node_reused",
+                    {
+                        "run_id": run_id,
+                        "source_run_id": source_run_id,
+                        "node_id": str(node_id),
+                        "source_node_run_id": str(node.get("id") or ""),
+                        "source_manifest_id": str(node.get("output_manifest_id") or ""),
+                    },
+                )
+            self._event_locked(
+                run_id,
+                "workflow_run_checkpoint_forked",
+                {
+                    "run_id": run_id,
+                    "source_run_id": source_run_id,
+                    "reused_node_ids": sorted(str(node_id) for node_id in source_nodes),
+                },
+            )
+        return True
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         with self._lock:
@@ -595,6 +745,7 @@ class WorkflowRunStore:
         node_run_id: str,
         *,
         max_iteration: int | None = None,
+        input_overrides: Mapping[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Create the next human-requested iteration for a terminal node run."""
         new_id = _id("nr")
@@ -630,7 +781,7 @@ class WorkflowRunStore:
                         1,
                         NodeRunStatus.PENDING.value,
                         row["agent_profile_id"],
-                        _dump({}),
+                        _dump(dict(input_overrides or {})),
                         now,
                         now,
                     ),
@@ -795,6 +946,23 @@ class WorkflowRunStore:
                 },
             )
         return True
+
+    def record_event(
+        self,
+        run_id: str,
+        event_type: str,
+        payload: Mapping[str, Any],
+    ) -> bool:
+        """Append a durable, workspace-scoped audit event for a Workflow Run."""
+        with self._transaction():
+            row = self._conn.execute(
+                "SELECT id FROM workflow_runs WHERE id = ? AND workspace_id = ?",
+                (run_id, self.workspace_id),
+            ).fetchone()
+            if row is None:
+                return False
+            self._event_locked(run_id, str(event_type), dict(payload))
+        return True
     def transition_node(
         self,
         node_run_id: str,
@@ -802,6 +970,7 @@ class WorkflowRunStore:
         *,
         output: Any = None,
         error: str = "",
+        artifact_types: Mapping[str, str] | None = None,
     ) -> bool:
         with self._transaction():
             row = self._conn.execute(
@@ -838,6 +1007,7 @@ class WorkflowRunStore:
                         value=value,
                         source_job_id=row["job_id"],
                         source_tool="workflow_node",
+                        artifact_type=(artifact_types or {}).get(str(key), "workflow_material"),
                     )
                     for key, value in sorted(values.items())
                 ]

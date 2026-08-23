@@ -68,7 +68,7 @@ class WorkflowService(AbstractContextManager["WorkflowService"]):
 
     @classmethod
     def for_session(cls, session_id: str) -> "WorkflowService":
-        return cls(workspace_manager.get(session_id))
+        return cls(workspace_manager.workflow_runtime_for_session(session_id))
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         self.close()
@@ -262,6 +262,7 @@ class WorkflowService(AbstractContextManager["WorkflowService"]):
         missing = sorted({
             str(node.get("agent_profile_id") or "")
             for node in graph.get("nodes", [])
+            if str(node.get("type") or "agent") in {"agent", "verifier"}
             if self.store.get_agent_profile(
                 str(node.get("agent_profile_id") or "")
             ) is None
