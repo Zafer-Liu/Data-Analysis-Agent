@@ -29,7 +29,7 @@ _directory_picker_lock = threading.Lock()
 PROJECT_ROOT = resource_root()
 
 # ── Current version (keep in sync with templates/agent_chat.html footer) ──
-CURRENT_VERSION = "v1.4.0"
+CURRENT_VERSION = "v1.3.0"
 
 # ── GitHub Releases API ──
 GITHUB_OWNER = "Zafer-Liu"

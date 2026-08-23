@@ -67,9 +67,9 @@
 
 # 📝 Changelog
 
-> **Current development version [`v1.4.0 LTS`](https://github.com/Zafer-Liu/Data-Analysis-Agent/releases/latest)** · August 21, 2026 · Until a release installer is published, use the source version and changelog as the reference.
+> **Current development version [`v1.3.0 LTS`](https://github.com/Zafer-Liu/Data-Analysis-Agent/releases/latest)** · August 21, 2026 · Until a release installer is published, use the source version and changelog as the reference.
 
-v1.4.0 enters the Feishu AI Skills Hackathon, adds a Feishu bot and built-in Bitable analysis, and delivers targeted feature improvements:
+v1.3.0 enters the Feishu AI Skills Hackathon, adds a Feishu bot and built-in Bitable analysis, and delivers targeted feature improvements:
 
 1. **Feishu bot and Bitable loop**: Mention the bot in a group to read a Feishu Bitable, load records into DuckDB / SQL analysis, and reply in the same group. Creating result tables or changing records always requires an explicit request.
 2. **More dependable long-term memory**: Fixes extraction failures caused by thinking-model output, JSON formatting, and scope detection; adds result notices, 24-hour consolidation, safer session restore, and a global memory switch.

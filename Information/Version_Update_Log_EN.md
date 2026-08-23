@@ -1,9 +1,9 @@
 # Version Development Log
 
-## v1.4.0 LTS
+## v1.3.0 LTS
 **August 21, 2026**
 
-v1.4.0 enters the Feishu AI Skills Hackathon, adds a Feishu bot and built-in Bitable analysis, and delivers targeted feature improvements. Existing local data sources, analysis tools, and the Web workspace remain available.
+v1.3.0 enters the Feishu AI Skills Hackathon, adds a Feishu bot and built-in Bitable analysis, and delivers targeted feature improvements. Existing local data sources, analysis tools, and the Web workspace remain available.
 
 ### Feishu bot and shared conversation
 - Adds **Settings → Bots → Feishu channel** and `/robot` conversation binding, so a group mention can drive the linked Web analysis context and receive the answer in the same group.
