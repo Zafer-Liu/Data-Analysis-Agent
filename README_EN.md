@@ -90,16 +90,6 @@ v1.3.0 enters the Feishu AI Skills Hackathon, adds a Feishu bot and built-in Bit
 
 Thank you to the following sponsors for supporting this project!
 
-## ☁️ Sponsored by Bloome
-
-<a href="https://bloome.im/app?ref=ZaferLiu&utm_medium=github&utm_source=Zafer-Liu-Data-Analysis-Agent-ivor-202607"><img src="./Information/assets/bloome.png" alt="Bloome banner" /></a>
-
-Thank you to Bloome for sponsoring this project! Bloome lets multiple AI agents (Claude, ChatGPT, DeepSeek, etc.) collaborate in a single conversation — zero setup, cloud-based, works on web and mobile, and you can share your configured agents with your team.
-
-👉 **[Try Bloome](https://bloome.im/app?ref=ZaferLiu&utm_medium=github&utm_source=Zafer-Liu-Data-Analysis-Agent-ivor-202607)**
-
----
-
 ## ☁️ Sponsored by DolOffer
 
 <p align="center"><a href="https://doloffer.com/"><img src="./Information/assets/DolOffer.png" alt="DolOffer logo" height="80" /></a></p>

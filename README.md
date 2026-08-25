@@ -90,16 +90,6 @@ v1.3.0 参加飞书 AI 绝活黑客松，接入飞书机器人，内置多维表
 
 感谢以下赞助商对本项目的支持！
 
-## ☁️ 赞助 · Sponsored by Bloome
-
-<a href="https://bloome.im/app?ref=ZaferLiu&utm_medium=github&utm_source=Zafer-Liu-Data-Analysis-Agent-ivor-202607"><img src="./Information/assets/bloome.png" alt="Bloome banner" /></a>
-
-感谢 Bloome 对本项目的赞助！Bloome 让多个 AI agent（Claude、ChatGPT、DeepSeek 等）在同一个对话里协作——零配置、云端运行，网页和手机都能用，还能把配好的 agent 分享给团队。
-
-👉 **[试试 Bloome](https://bloome.im/app?ref=ZaferLiu&utm_medium=github&utm_source=Zafer-Liu-Data-Analysis-Agent-ivor-202607)**
-
----
-
 ## ☁️ 赞助 · Sponsored by DolOffer
 
 <div align="center"><a href="https://doloffer.com/"><img src="./Information/assets/DolOffer.png" alt="DolOffer logo" height="80" /></a></div>
