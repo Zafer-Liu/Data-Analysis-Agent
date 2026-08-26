@@ -90,6 +90,16 @@ v1.3.0 参加飞书 AI 绝活黑客松，接入飞书机器人，内置多维表
 
 感谢以下赞助商对本项目的支持！
 
+## ☁️ 赞助 · Sponsored by APIMart
+
+<p align="center"><a href="https://go.apimart.ai/gh-data-analysis-agent"><img src="./Information/assets/APIMart.png" alt="APIMart banner" width="800" /></a></p>
+
+感谢 APIMart 赞助了本项目！APIMart 是专注 AI 图片/视频生成的低价 API 平台，GPT-Image-2 低至 $0.006/张，1 美元可出图 160+ 张。图片、视频一套异步 API 通吃，提交任务拿 ID、回调取结果，跑批万张不超时、换模型不改代码。按量付费、无月费，通过此注册链接注册即可开用。
+
+👉 **[注册 APIMart](https://go.apimart.ai/gh-data-analysis-agent)**
+
+---
+
 ## ☁️ 赞助 · Sponsored by DolOffer
 
 <div align="center"><a href="https://doloffer.com/"><img src="./Information/assets/DolOffer.png" alt="DolOffer logo" height="80" /></a></div>
