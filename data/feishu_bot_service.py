@@ -44,6 +44,8 @@ class FeishuBotStatus:
     receive_id: str
     receive_id_masked: str
     updated_at: str
+    inbound_status: str
+    inbound_error: str
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -58,6 +60,8 @@ class FeishuBotStatus:
             "receive_id": self.receive_id,
             "receive_id_masked": self.receive_id_masked,
             "updated_at": self.updated_at,
+            "inbound_status": self.inbound_status,
+            "inbound_error": self.inbound_error,
         }
 
 
@@ -86,10 +90,29 @@ def _masked_value(value: str) -> str:
     return f"…{suffix}" if suffix else ""
 
 
+def _inbound_runtime_state() -> tuple[str, str]:
+    """Read the optional long-connection state without coupling startup paths."""
+    try:
+        from infrastructure.feishu_long_connection import status as long_connection_status
+
+        state = long_connection_status()
+        return str(state.get("status") or "idle"), str(state.get("error") or "")
+    except Exception:
+        # The SDK is optional for outbound-only or webhook deployments.
+        return "unavailable", ""
+
+
 def get_status() -> FeishuBotStatus:
     config = load_config()
     has_secret = bool(config["app_secret_ref"])
     configured = bool(config["app_id"] and has_secret and config["receive_id"])
+    inbound_status, inbound_error = _inbound_runtime_state()
+    if config["inbound_transport"] == "webhook":
+        inbound_status, inbound_error = "webhook", ""
+    elif not config["enabled"]:
+        inbound_status, inbound_error = "disabled", ""
+    elif not configured:
+        inbound_status, inbound_error = "not_configured", ""
     return FeishuBotStatus(
         enabled=config["enabled"],
         configured=configured,
@@ -102,6 +125,8 @@ def get_status() -> FeishuBotStatus:
         receive_id=config["receive_id"],
         receive_id_masked=_masked_value(config["receive_id"]),
         updated_at=config["updated_at"],
+        inbound_status=inbound_status,
+        inbound_error=inbound_error,
     )
 
 

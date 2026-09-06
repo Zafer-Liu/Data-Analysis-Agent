@@ -101,6 +101,7 @@ docs/*
 !docs/14-local-duckdb-concurrency-import-plan.md
 !docs/10-ai-team-workflow-optimization-plan.md
 !docs/11-ai-team-workflow-wf0-decisions.md
+!docs/21-edition-boundaries.md
 test.bat
 01-notes-for-development.md
 
@@ -133,3 +134,10 @@ scripts/*
 # Untracked assets
 Information/assets/LOGO.png
 PRODUCT.md
+
+# Local package cache and runtime secrets
+.pnpm-store/
+secret_key
+*.sqlite-shm
+*.sqlite-wal
+/docs

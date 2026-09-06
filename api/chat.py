@@ -31,6 +31,20 @@ log = logging.getLogger(__name__)
 bp = Blueprint("chat", __name__)
 
 
+def _feishu_delivery_enabled(session) -> bool:
+    """Require both the session link and the application-level send switch."""
+    if not (bool(getattr(session, "feishu_bot_enabled", False)) and getattr(session, "feishu_chat_id", "")):
+        return False
+    try:
+        from data.feishu_bot_service import get_status
+
+        connection = get_status()
+        return bool(connection.enabled and connection.configured)
+    except Exception:
+        log.warning("[feishu] skip delivery because connection status is unavailable")
+        return False
+
+
 _PROMPT_SUGGESTION_DIRECTIVE = """You are a prompt suggestion engine.
 Predict the single next message this user is most likely to type after reading the assistant's latest answer.
 Return only the message text that should be prefilled in the chat input.
@@ -1320,7 +1334,7 @@ def chat_stream(sid: str):
                 # the incremental session bridge below.
                 sess.record_feishu_inbound_event("user", message)
                 sess.record_feishu_inbound_event("assistant", final_answer)
-            if bool(getattr(sess, "feishu_bot_enabled", False)) and getattr(sess, "feishu_chat_id", ""):
+            if _feishu_delivery_enabled(sess):
                 yield _sse({"type": "feishu_sync", "status": "sending"})
                 try:
                     from data.feishu_bot_service import send_conversation_turn, send_text

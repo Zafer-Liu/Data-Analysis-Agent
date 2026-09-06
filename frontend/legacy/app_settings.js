@@ -229,7 +229,9 @@ import { chatStream } from "../features/chat-stream.js";
       uiState.feishuBot = data.connection || uiState.feishuBot;
       uiState.feishuBotAppSecretDraft = "";
       uiState.feishuBotVerificationTokenDraft = "";
-      uiState.feishuBotStatus = uiState.feishuBot.configured
+      uiState.feishuBotStatus = uiState.feishuBot.inbound_status === "restart_required"
+        ? "配置已保存；出站发送已更新。请重启应用，使新的飞书长连接凭据生效。"
+        : uiState.feishuBot.configured
         ? "配置已保存。App Secret 已交由系统凭据库保护。"
         : "应用凭据已保存。请从下方群列表选择目标群，再保存一次。";
       uiState.feishuBotStatusType = "ok";
@@ -1743,8 +1745,20 @@ import { chatStream } from "../features/chat-stream.js";
     const bot = uiState.feishuBot || {};
     const configured = !!bot.configured;
     const credentialsReady = !!bot.app_id && !!bot.app_secret_configured;
+    const inboundStatus = String(bot.inbound_status || "idle");
+    const inboundLabel = {
+      connected: "入站长连接已建立",
+      starting: "正在建立入站长连接",
+      paused: "入站长连接已暂停；重启后会关闭旧连接",
+      restart_required: "入站配置已更新；请重启应用后生效",
+      webhook: "Webhook 入站已启用",
+      disabled: "入站与发送均已暂停",
+      not_configured: "等待补全应用凭据与目标群",
+      unavailable: "长连接运行状态暂不可用",
+      error: `入站连接失败${bot.inbound_error ? `：${bot.inbound_error}` : ""}`,
+    }[inboundStatus] || "等待建立入站连接";
     const statusLabel = configured
-      ? (bot.enabled ? "已连接，发送已启用" : "已连接，发送已暂停")
+      ? (bot.enabled ? "已配置，发送已启用" : "已配置，发送已暂停")
       : (credentialsReady ? "应用凭据已保存，待选择目标群" : "尚未配置");
     return Vue.h("section", { class: "app-settings-panel feishu-bot-panel" }, [
       _renderPanelHead("飞书渠道", "使用 App ID 与 App Secret 连接飞书应用机器人，将分析结论安全同步到协作群。", [
@@ -1764,6 +1778,7 @@ import { chatStream } from "../features/chat-stream.js";
           Vue.h("span", null, configured
             ? `应用 ${bot.app_id_masked || "已配置"} · 目标 ${bot.receive_id_masked || "已配置"}`
             : "保存应用凭据与目标群 chat_id 后，可通过应用机器人发送消息。"),
+          Vue.h("span", null, inboundLabel),
         ]),
         Vue.h("button", {
           class: "btn-sm btn-sm-ghost", type: "button",

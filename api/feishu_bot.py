@@ -81,13 +81,12 @@ def put_feishu_bot():
         )
     except (CredentialStoreError, ValueError) as exc:
         return jsonify({"ok": False, "error": f"无法保存飞书机器人配置：{exc}"}), 503
-    if inbound_transport == "long_connection":
-        try:
-            from infrastructure.feishu_long_connection import start_long_connection
+    try:
+        from infrastructure.feishu_long_connection import start_long_connection
 
-            start_long_connection(current_app._get_current_object())
-        except Exception:
-            log.exception("[feishu] long connection startup request failed")
+        start_long_connection(current_app._get_current_object())
+    except Exception:
+        log.exception("[feishu] long connection startup request failed")
     return jsonify({"ok": True, "connection": get_status().to_dict()})
 
 
@@ -256,8 +255,24 @@ def _run_feishu_turn(app, sid: str, message: str) -> None:
         log.exception("[feishu] inbound turn failed sid=%s", sid)
 
 
-def dispatch_inbound_event(app, event: dict, event_id: str = "") -> bool:
-    """Enqueue a verified event from either Webhook or long connection."""
+def dispatch_inbound_event(
+    app,
+    event: dict,
+    event_id: str = "",
+    *,
+    source: str = "long_connection",
+) -> bool:
+    """Enqueue a verified event only for the active inbound transport."""
+    connection = get_status()
+    if not (connection.enabled and connection.configured):
+        return False
+    if source not in {"webhook", "long_connection"} or connection.inbound_transport != source:
+        return False
+    # A live SDK client cannot be safely replaced in-process. Once its
+    # credentials differ from the saved configuration, keep it inert until a
+    # restart creates a single listener with the new credentials.
+    if source == "long_connection" and getattr(connection, "inbound_status", "connected") != "connected":
+        return False
     if not _remember_event(event_id):
         return False
     parsed = _event_prompt(event)
@@ -296,5 +311,6 @@ def receive_feishu_event():
     event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
     accepted = dispatch_inbound_event(
         current_app._get_current_object(), event, str(header.get("event_id") or ""),
+        source="webhook",
     )
     return jsonify({"ok": True, "accepted": accepted})
