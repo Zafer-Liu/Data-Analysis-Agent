@@ -135,9 +135,11 @@ scripts/*
 Information/assets/LOGO.png
 PRODUCT.md
 
-# Local package cache and runtime secrets
+# Local package cache, runtime secrets, and business-canvas state
 .pnpm-store/
 secret_key
+business_canvas/*.sqlite
+business_canvas/*.sqlite-journal
 *.sqlite-shm
 *.sqlite-wal
 /docs
