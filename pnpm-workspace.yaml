@@ -1,2 +1,4 @@
 allowBuilds:
   esbuild: true
+overrides:
+  js-yaml: "~4.3.2"
