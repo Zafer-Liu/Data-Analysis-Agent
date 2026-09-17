@@ -113,7 +113,7 @@ jobs:
         with:
           name: windows-x64-package
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 7
           path: |
             build/w/installer/BusinessAnalyticsAgent-Windows-x64.exe
             build/w/reports/*.json
@@ -192,7 +192,7 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 7
           path: |
             build/macos-package/dmg/BusinessAnalyticsAgent-macOS-*.dmg
             build/macos-package/reports/*.json
