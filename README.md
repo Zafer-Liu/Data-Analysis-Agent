@@ -105,7 +105,7 @@ v1.3.0 参加飞书 AI 绝活黑客松，接入飞书机器人，内置多维表
 
 ## ☁️ 赞助 · Sponsored by Fluxion AI
 
-<p align="center"><a href="https://fluxionai.space/register?source=github&campaign=daanagent&promo=Data-Analysis-Agent"><img src="./Information/assets/banner.png" alt="Fluxion AI banner" height="80" /></a></p>
+<p align="center"><a href="https://fluxionai.space/register?source=github&campaign=daanagent&promo=Data-Analysis-Agent"><img src="./Information/assets/FluxionAI.png" alt="Fluxion AI banner" height="80" /></a></p>
 
 感谢 Fluxion AI 赞助了本项目！Fluxion AI —— 一个入口，接入并管理全球主流 AI 模型。面向个人开发者、技术团队与企业，通过统一 API 接入并管理全球主流 AI 模型；多线路动态调度提升可用性，模型表现、响应时间与费用透明可查。根据不同模型与线路，API 调用成本较官方或基准价格可降低 40%—98%。立即访问并注册，即可获得 $3 API 额度。
 
