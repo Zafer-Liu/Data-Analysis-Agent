@@ -93,23 +93,13 @@ v1.3.0 参加飞书 AI 绝活黑客松，接入飞书机器人，内置多维表
 
 感谢以下赞助商对本项目的支持！
 
-## ☁️ 赞助 · Sponsored by APIMart
+## ☁️ 赞助 · Sponsored by Sidrune AI
 
-<p align="center"><a href="https://go.apimart.ai/gh-data-analysis-agent"><img src="./Information/assets/APIMart.png" alt="APIMart banner" width="240" height="80" /></a></p>
+<p align="center"><a href="https://sidrune.ai/register?source=github&campaign=daanagent&promo=daanagent"><img src="./Information/assets/SidruneAI.png" alt="Sidrune AI banner" height="80" /></a></p>
 
-感谢 APIMart 赞助了本项目！APIMart 是专注 AI 图片/视频生成的低价 API 平台，GPT-Image-2 低至 $0.006/张，1 美元可出图 160+ 张。图片、视频一套异步 API 通吃，提交任务拿 ID、回调取结果，跑批万张不超时、换模型不改代码。按量付费、无月费，通过此注册链接注册即可开用。
+感谢 Sidrune AI 赞助了本项目！Sidrune AI —— 一个入口，接入并管理全球主流 AI 模型。面向个人开发者、技术团队与企业，通过统一 API 接入并管理全球主流 AI 模型；多线路动态调度提升可用性，模型表现、响应时间与费用透明可查。根据不同模型与线路，API 调用成本较官方或基准价格可降低 40%—98%。立即访问并注册，即可获得 $3 API 额度。
 
-👉 **[注册 APIMart](https://go.apimart.ai/gh-data-analysis-agent)**
-
----
-
-## ☁️ 赞助 · Sponsored by Fluxion AI
-
-<p align="center"><a href="https://fluxionai.space/register?source=github&campaign=daanagent&promo=Data-Analysis-Agent"><img src="./Information/assets/FluxionAI.png" alt="Fluxion AI banner" height="80" /></a></p>
-
-感谢 Fluxion AI 赞助了本项目！Fluxion AI —— 一个入口，接入并管理全球主流 AI 模型。面向个人开发者、技术团队与企业，通过统一 API 接入并管理全球主流 AI 模型；多线路动态调度提升可用性，模型表现、响应时间与费用透明可查。根据不同模型与线路，API 调用成本较官方或基准价格可降低 40%—98%。立即访问并注册，即可获得 $3 API 额度。
-
-👉 **[注册 Fluxion AI](https://fluxionai.space/register?source=github&campaign=daanagent&promo=Data-Analysis-Agent)**
+👉 **[注册 Sidrune AI](https://sidrune.ai/register?source=github&campaign=daanagent&promo=daanagent)**
 
 ---
 
