@@ -56,6 +56,8 @@
       // ── Welcome ──────────────────────────────────────────────────
       'welcome.title': '开始您的数据分析',
       'welcome.desc': '连接数据库或上传 Excel，用自然语言提问，AI 会自动查询、分析并生成图表。<br>输入 <strong>/</strong> 可快速选择专属命令。',
+      'welcome.questions': '从一个问题开始',
+      'welcome.commands': '或使用分析命令',
       // ── Input ────────────────────────────────────────────────────
       'input.placeholder': '今天帮你做些什么？  @ 引用对话文件，/ 调用命令',
       'input.kbd_hint': '<kbd>Enter</kbd> 发送 · <kbd>Shift</kbd>+<kbd>Enter</kbd> 换行 · <kbd>/</kbd> 命令',
@@ -450,6 +452,8 @@
       // ── Welcome ──────────────────────────────────────────────────
       'welcome.title': 'Start Your Data Analysis',
       'welcome.desc': 'Connect a database or upload Excel, ask in natural language, and AI will query, analyze, and generate charts.<br>Type <strong>/</strong> to browse commands.',
+      'welcome.questions': 'Start with a question',
+      'welcome.commands': 'Or use an analysis command',
       // ── Input ────────────────────────────────────────────────────
       'input.placeholder': 'What can I help with?  @ reference files, / for commands',
       'input.kbd_hint': '<kbd>Enter</kbd> Send · <kbd>Shift</kbd>+<kbd>Enter</kbd> Newline · <kbd>/</kbd> Commands',

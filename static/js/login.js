@@ -139,12 +139,19 @@ document.getElementById('reg-password').addEventListener('keydown', function(e) 
 
 /* ---- agreement modal ---- */
 
-document.getElementById('agree-link').addEventListener('click', function() {
+document.getElementById('agree-link').addEventListener('click', function(e) {
+  e.preventDefault();
   document.getElementById('agreement-overlay').classList.add('show');
+  document.getElementById('agree-close-btn').focus();
 });
-document.getElementById('agree-close-btn').addEventListener('click', function() {
+function closeAgreement() {
   document.getElementById('agreement-overlay').classList.remove('show');
-});
+  document.getElementById('agree-link').focus();
+}
+document.getElementById('agree-close-btn').addEventListener('click', closeAgreement);
 document.getElementById('agreement-overlay').addEventListener('click', function(e) {
-  if (e.target === this) this.classList.remove('show');
+  if (e.target === this) closeAgreement();
+});
+document.getElementById('agreement-overlay').addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') closeAgreement();
 });

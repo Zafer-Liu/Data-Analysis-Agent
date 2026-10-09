@@ -1,5 +1,6 @@
 """Flask application factory."""
 import logging
+import mimetypes
 import os
 from urllib.parse import urlsplit
 
@@ -37,6 +38,11 @@ def _run_startup_hooks() -> None:
 
 def create_app() -> Flask:
     _start_background_services()
+
+    # Windows registry MIME associations can map .js to text/plain, which
+    # makes browsers reject both classic scripts and ES modules.
+    mimetypes.add_type("text/javascript", ".js", strict=True)
+    mimetypes.add_type("text/javascript", ".mjs", strict=True)
 
     app = Flask(
         __name__,

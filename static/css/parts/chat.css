@@ -1004,52 +1004,15 @@ details.tool-audit {
 /* welcome */
 .welcome {
   flex: 1; display: flex; flex-direction: column; align-items: center;
-  justify-content: center; gap: 16px;
-  text-align: center; padding: 40px;
-  position: relative; overflow: hidden;
+  justify-content: center; gap: 14px;
+  text-align: center; padding: 32px 20px;
+  position: relative;
 }
-/* Ambient glow blobs */
-.welcome::before,
-.welcome::after {
-  content: "";
-  position: absolute;
-  border-radius: 50%;
-  pointer-events: none;
-  animation: welcomeGlow 8s ease-in-out infinite alternate;
-}
-.welcome::before {
-  width: 400px; height: 400px;
-  background: radial-gradient(circle, rgba(59, 130, 246, .10) 0%, transparent 70%);
-  top: -80px; left: 50%;
-  transform: translateX(-50%);
-}
-.welcome::after {
-  width: 300px; height: 300px;
-  background: radial-gradient(circle, rgba(99, 102, 241, .08) 0%, transparent 70%);
-  bottom: 40px; right: 10%;
-  animation-delay: -4s;
-}
-@keyframes welcomeGlow {
-  from { transform: translateX(-50%) scale(1); }
-  to   { transform: translateX(-50%) scale(1.15); }
-}
-.welcome::after { animation-name: welcomeGlow2; }
-@keyframes welcomeGlow2 {
-  from { transform: scale(1) rotate(0deg); }
-  to   { transform: scale(1.2) rotate(10deg); }
-}
-
 .welcome-brand-logo {
   width: 72px;
   height: 72px;
   display: block;
   object-fit: contain;
-  filter: drop-shadow(0 4px 12px rgba(59, 130, 246, .25));
-  animation: welcomeLogoFloat 4s ease-in-out infinite;
-}
-@keyframes welcomeLogoFloat {
-  0%, 100% { transform: translateY(0); }
-  50%       { transform: translateY(-8px); }
 }
 
 .big-icon {
@@ -1084,31 +1047,86 @@ details.tool-audit {
 }
 .welcome p strong { color: var(--color-primary); }
 
+/* Uiverse card-edge light by 05akalan57, adapted for prompt buttons.
+   https://github.com/uiverse-io/galaxy/blob/main/Cards/05akalan57_thin-sloth-31.html (MIT) */
+.welcome-prompts {
+  display: grid;
+  gap: 22px;
+  width: min(100%, 700px);
+  margin-top: 10px;
+  text-align: left;
+}
+.welcome-prompt-group h3 {
+  margin: 0 0 10px 2px;
+  color: var(--color-text-mute);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  letter-spacing: .04em;
+}
 .hint-chips {
-  display: flex; flex-wrap: wrap; gap: 8px;
-  justify-content: center; margin-top: 6px;
-  max-width: 600px;
-  position: relative; z-index: 1;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
 }
 .hint-chip {
-  background: var(--color-surface);
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  align-items: center;
+  min-height: 52px;
+  width: 100%;
+  padding: 11px 16px;
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-pill);
-  padding: 7px 14px;
-  font-size: var(--fs-md);
-  color: var(--color-text-soft);
-  cursor: pointer;
-  transition: all .2s cubic-bezier(.2, .8, .2, 1);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
   box-shadow: var(--shadow-xs);
+  color: var(--color-text-soft);
+  font: inherit;
+  font-size: var(--fs-lg);
+  line-height: 1.45;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  transition: border-color var(--t-base), box-shadow var(--t-base), transform var(--t-base);
+}
+.hint-chip::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  width: 160px;
+  height: 100px;
+  top: -80px;
+  left: -70px;
+  background: var(--color-primary);
+  filter: blur(45px);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--t-base), transform var(--t-base);
 }
 .hint-chip:hover {
-  border-color: var(--color-primary);
-  color: var(--color-primary);
-  background: var(--color-primary-soft);
-  box-shadow: 0 2px 8px rgba(59, 130, 246, .2);
+  border-color: var(--color-primary-tint);
+  box-shadow: var(--shadow-md);
   transform: translateY(-2px);
 }
-.hint-chip:active { transform: translateY(0) scale(.97); }
+.hint-chip:hover::before, .hint-chip:focus-visible::before {
+  opacity: .22;
+  transform: translate(32px, 12px);
+}
+.hint-chip:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+.hint-chip:active { transform: translateY(0); box-shadow: var(--shadow-xs); }
+.hint-chips-commands .hint-chip {
+  min-height: 44px;
+  background: var(--color-surface-2);
+  font-size: var(--fs-md);
+}
+@media (max-width: 600px) {
+  .welcome { padding: 20px 6px; }
+  .hint-chips { grid-template-columns: 1fr; }
+  .welcome-prompts { gap: 16px; }
+}
 
 /* ── Reasoning chain ─────────────────────────────────────────── */
 .reasoning-block { background: var(--color-accent-soft); border: 1px solid var(--color-accent-tint);

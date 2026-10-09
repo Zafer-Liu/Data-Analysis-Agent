@@ -3,105 +3,141 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#f4f6fa">
   <title>智析Agent — 登录</title>
   <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}">
-  <style>
-    *{margin:0;padding:0;box-sizing:border-box}
-    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh;display:flex;align-items:center;justify-content:center}
-    .login-card{background:#1e293b;border:1px solid #334155;border-radius:16px;padding:40px;width:380px;max-width:90vw;box-shadow:0 20px 60px rgba(0,0,0,.4)}
-    .login-logo{font-size:28px;font-weight:700;text-align:center;margin-bottom:8px;background:linear-gradient(135deg,#60a5fa,#818cf8);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
-    .login-subtitle{text-align:center;font-size:13px;color:#94a3b8;margin-bottom:28px}
-    .login-subtitle a{color:#818cf8;text-decoration:none;font-weight:700}
-    .form-group{margin-bottom:16px}
-    .form-label{display:block;font-size:13px;color:#cbd5e1;margin-bottom:6px}
-    .form-input{width:100%;padding:10px 14px;background:#0f172a;border:1px solid #475569;border-radius:8px;color:#e2e8f0;font-size:14px;outline:none;transition:border .15s}
-    .form-input:focus{border-color:#6366f1}
-    .code-row{display:flex;gap:8px}
-    .code-row .form-input{flex:1}
-    .code-btn{flex-shrink:0;padding:10px 16px;background:#334155;border:1px solid #475569;border-radius:8px;color:#94a3b8;font-size:13px;cursor:pointer;white-space:nowrap;transition:background .15s,opacity .15s}
-    .code-btn:hover:not(:disabled){background:#3e4e66;color:#e2e8f0}
-    .code-btn:disabled{opacity:.5;cursor:not-allowed}
-    .btn{width:100%;padding:11px;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;transition:background .15s,opacity .15s}
-    .btn-primary{background:#6366f1;color:#fff}
-    .btn-primary:hover{background:#4f46e5}
-    .btn:disabled{opacity:.5;cursor:not-allowed}
-    .form-error{color:#f87171;font-size:13px;text-align:center;min-height:20px;margin-bottom:8px}
-    .tab-row{display:flex;gap:0;margin-bottom:24px;border:1px solid #334155;border-radius:8px;overflow:hidden}
-    .tab-btn{flex:1;padding:10px;background:transparent;border:none;color:#94a3b8;font-size:14px;cursor:pointer;transition:background .15s}
-    .tab-btn.active{background:#334155;color:#e2e8f0}
-    .spinner{display:inline-block;width:14px;height:14px;border:2px solid #6366f1;border-top-color:transparent;border-radius:50%;animation:spin .6s linear infinite}
-    @keyframes spin{to{transform:rotate(360deg)}}
-    .agree-row{display:flex;align-items:flex-start;gap:8px;margin-top:16px;font-size:12px;color:#94a3b8}
-    .agree-row input{margin-top:2px;accent-color:#6366f1}
-    .agree-row a{color:#818cf8;text-decoration:none;cursor:pointer}
-    .agree-row a:hover{text-decoration:underline}
-    .agreement-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:100;padding:20px}
-    .agreement-overlay.show{display:flex}
-    .agreement-box{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:32px;max-width:520px;max-height:70vh;overflow-y:auto;font-size:13px;line-height:1.7;color:#cbd5e1}
-    .agreement-box h3{color:#e2e8f0;font-size:16px;margin-bottom:16px}
-    .agreement-box h4{color:#818cf8;font-size:14px;margin:16px 0 6px}
-    .agreement-box p{margin-bottom:8px}
-    .agreement-box .close-btn{margin-top:20px;width:100%;padding:9px;background:#6366f1;border:none;border-radius:8px;color:#fff;font-size:14px;cursor:pointer}
-    .agreement-box .close-btn:hover{background:#4f46e5}
-  </style>
+  <script src="{{ url_for('static', filename='js/theme_bootstrap.js', v='fe0') }}"></script>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/parts/tokens.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/login.css', v='20261009-1') }}">
 </head>
 <body>
-  <div class="login-card">
-    <img src="/static/Images/icon-sm.png" alt="智析 Agent" width="56" height="56" style="border-radius:14px;display:block;margin:0 auto 12px" loading="eager">
-    <div class="login-logo">智析Agent</div>
-    <div class="login-subtitle">v1.3.0 LTS · <a href="https://www.zaferliu.me" target="_blank" rel="noopener noreferrer">@Zafer_Liu</a></div>
+  <main class="auth-shell">
+    <section class="auth-story" aria-labelledby="story-title">
+      <a class="brand" href="https://sage-agent.online" target="_blank" rel="noopener noreferrer" aria-label="智析Agent 官网" data-i18n-aria-label="brand.website">
+        <img src="/static/Images/icon-sm.png" alt="" width="48" height="48" loading="eager">
+        <span class="brand-copy">
+          <strong data-i18n="brand.name">智析Agent</strong>
+          <small data-i18n="brand.tagline">INTELLIGENT ANALYSIS</small>
+        </span>
+      </a>
 
-    <div class="tab-row">
-      <button class="tab-btn active" id="tab-login" data-tab="login">登录</button>
-      <button class="tab-btn" id="tab-register" data-tab="register">注册</button>
-    </div>
+      <div class="story-copy">
+        <p class="story-eyebrow">DATA ANALYSIS WORKSPACE</p>
+        <h1 id="story-title" aria-label="让复杂数据，变成清晰判断。" data-i18n-aria-label="story.title_full"><span class="story-title-line" data-i18n="story.title_line_1">让复杂数据，</span><br><span class="story-title-accent" data-i18n="story.title_line_2">变成清晰判断。</span></h1>
+        <p class="story-summary" data-i18n="story.summary">从原始数据到可执行结论，在同一个工作区完成分析、验证与表达。</p>
+      </div>
 
-    <div id="form-login">
-      <div class="form-group">
-        <label class="form-label">邮箱</label>
-        <input class="form-input" id="login-email" type="email" autocomplete="email" placeholder="输入邮箱">
+      <div class="analysis-trace" aria-hidden="true">
+        <svg viewBox="0 0 660 252" preserveAspectRatio="none">
+          <defs>
+            <linearGradient id="trace-gradient" x1="0" y1="0" x2="1" y2="0">
+              <stop offset="0" stop-color="#5867e8" stop-opacity=".18"/>
+              <stop offset=".54" stop-color="#7582ff"/>
+              <stop offset="1" stop-color="#50c8ec"/>
+            </linearGradient>
+          </defs>
+          <g class="trace-grid">
+            <path d="M0 42H660M0 105H660M0 168H660M0 231H660"/>
+            <path d="M76 0V252M221 0V252M366 0V252M511 0V252"/>
+          </g>
+          <path class="trace-area" d="M18 210C94 203 111 157 176 162S275 204 334 135 436 102 492 78 573 96 642 28V252H18Z"/>
+          <path class="trace-line" pathLength="1" d="M18 210C94 203 111 157 176 162S275 204 334 135 436 102 492 78 573 96 642 28"/>
+          <g class="trace-points">
+            <circle cx="176" cy="162" r="5"/>
+            <circle cx="334" cy="135" r="5"/>
+            <circle cx="492" cy="78" r="5"/>
+            <circle cx="642" cy="28" r="6"/>
+          </g>
+        </svg>
+        <div class="trace-label trace-label--one"><span>01</span><span class="trace-label-copy" data-i18n="trace.import">导入</span></div>
+        <div class="trace-label trace-label--two"><span>02</span><span class="trace-label-copy" data-i18n="trace.analyze">分析</span></div>
+        <div class="trace-label trace-label--three"><span>03</span><span class="trace-label-copy" data-i18n="trace.decide">决策</span></div>
       </div>
-      <div class="form-group">
-        <label class="form-label">密码</label>
-        <input class="form-input" id="login-password" type="password" autocomplete="current-password" placeholder="输入密码">
-      </div>
-      <div class="form-error" id="login-error"></div>
-      <button class="btn btn-primary" id="login-btn">登录</button>
-    </div>
 
-    <div id="form-register" style="display:none">
-      <div class="form-group">
-        <label class="form-label">邮箱</label>
-        <input class="form-input" id="reg-email" type="email" autocomplete="email" placeholder="输入邮箱">
+      <div class="story-footer">
+        <span>v1.3.0 LTS</span>
+        <a href="https://www.zaferliu.me" target="_blank" rel="noopener noreferrer">@Zafer_Liu</a>
       </div>
-      <div class="form-group">
-        <label class="form-label">验证码</label>
-        <div class="code-row">
-          <input class="form-input" id="reg-code" type="text" maxlength="6" placeholder="6 位验证码" inputmode="numeric">
-          <button class="code-btn" id="send-code-btn">发送验证码</button>
+    </section>
+
+    <section class="auth-panel" aria-label="账户登录与注册" data-i18n-aria-label="auth.region">
+      <div class="auth-toolbar">
+        <div class="mobile-brand" aria-hidden="true">
+          <img src="/static/Images/icon-sm.png" alt="" width="40" height="40">
+          <div><strong data-i18n="brand.name">智析Agent</strong><span data-i18n="brand.mobile_subtitle">智能数据分析工作台</span></div>
         </div>
       </div>
-      <div class="form-group">
-        <label class="form-label">密码</label>
-        <input class="form-input" id="reg-password" type="password" autocomplete="new-password" placeholder="4 个字符以上">
+
+      <div class="auth-heading">
+        <p class="auth-kicker">WELCOME</p>
+        <h2 data-i18n="auth.heading">进入你的分析工作台</h2>
+        <p data-i18n="auth.description">登录或创建账户，继续处理你的数据任务。</p>
       </div>
-      <div class="form-error" id="reg-error"></div>
-      <button class="btn btn-primary" id="reg-btn">注册</button>
-    </div>
 
-    <label class="agree-row">
-      <input type="checkbox" id="agree-check">
-      <span>我已阅读并同意<a id="agree-link">《智析Agent用户协议》</a></span>
-    </label>
-  </div>
+      <div class="tab-row" id="auth-tabs" role="tablist" aria-label="账户操作" data-i18n-aria-label="auth.tabs">
+        <button class="tab-btn active" id="tab-login" type="button" role="tab" aria-selected="true" aria-controls="form-login" data-tab="login" data-i18n="tab.login">登录</button>
+        <button class="tab-btn" id="tab-register" type="button" role="tab" aria-selected="false" aria-controls="form-register" data-tab="register" data-i18n="tab.register">注册</button>
+      </div>
 
-  <div class="agreement-overlay" id="agreement-overlay">
+      <div id="form-login" role="tabpanel" aria-labelledby="tab-login">
+        <div class="form-group">
+          <label class="form-label" for="login-email" data-i18n="field.email">邮箱</label>
+          <div class="input-shell">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.75 6.75A2.25 2.25 0 0 1 6 4.5h12a2.25 2.25 0 0 1 2.25 2.25v10.5A2.25 2.25 0 0 1 18 19.5H6a2.25 2.25 0 0 1-2.25-2.25V6.75Z"/><path d="m4.5 7.5 6.06 4.34a2.5 2.5 0 0 0 2.88 0L19.5 7.5"/></svg>
+            <input class="form-input" id="login-email" type="email" autocomplete="email" placeholder="name@example.com">
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="login-password" data-i18n="field.password">密码</label>
+          <div class="input-shell">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+            <input class="form-input" id="login-password" type="password" autocomplete="current-password" placeholder="输入登录密码" data-i18n-placeholder="placeholder.password">
+          </div>
+        </div>
+        <div class="form-error" id="login-error" aria-live="polite"></div>
+        <button class="btn btn-primary" id="login-btn" type="button"><span data-i18n="action.login">登录</span><span aria-hidden="true">→</span></button>
+      </div>
+
+      <div id="form-register" role="tabpanel" aria-labelledby="tab-register" style="display:none">
+        <div class="form-group">
+          <label class="form-label" for="reg-email" data-i18n="field.email">邮箱</label>
+          <div class="input-shell">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.75 6.75A2.25 2.25 0 0 1 6 4.5h12a2.25 2.25 0 0 1 2.25 2.25v10.5A2.25 2.25 0 0 1 18 19.5H6a2.25 2.25 0 0 1-2.25-2.25V6.75Z"/><path d="m4.5 7.5 6.06 4.34a2.5 2.5 0 0 0 2.88 0L19.5 7.5"/></svg>
+            <input class="form-input" id="reg-email" type="email" autocomplete="email" placeholder="name@example.com">
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="reg-code" data-i18n="field.code">验证码</label>
+          <div class="code-row">
+            <input class="form-input form-input--plain" id="reg-code" type="text" maxlength="6" autocomplete="one-time-code" placeholder="6 位验证码" inputmode="numeric" data-i18n-placeholder="placeholder.code">
+            <button class="code-btn" id="send-code-btn" type="button" data-i18n="action.send_code">发送验证码</button>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="reg-password" data-i18n="field.password">密码</label>
+          <div class="input-shell">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+            <input class="form-input" id="reg-password" type="password" autocomplete="new-password" placeholder="4 个字符以上">
+          </div>
+        </div>
+        <div class="form-error" id="reg-error" aria-live="polite"></div>
+        <button class="btn btn-primary" id="reg-btn" type="button"><span data-i18n="action.register">创建账户</span><span aria-hidden="true">→</span></button>
+      </div>
+
+      <label class="agree-row" id="agreement-row">
+        <input type="checkbox" id="agree-check">
+        <span><span data-i18n="agreement.prefix">我已阅读并同意</span><a id="agree-link" href="#agreement-overlay" data-i18n="agreement.link">《智析Agent用户协议》</a></span>
+      </label>
+    </section>
+  </main>
+
+  <div class="agreement-overlay" id="agreement-overlay" role="dialog" aria-modal="true" aria-label="智析Agent用户协议" data-i18n-aria-label="agreement.dialog">
     <div class="agreement-box">
       {{ agreement_html|safe }}
-      <button class="close-btn" id="agree-close-btn">我已阅读</button>
+      <button class="close-btn" id="agree-close-btn" type="button" data-i18n="agreement.close">我已阅读</button>
     </div>
   </div>
 
-  <script src="/static/js/login.js"></script>
+  <script src="{{ url_for('static', filename='js/login.js', v='20261009-1') }}"></script>
 </body>
 </html>

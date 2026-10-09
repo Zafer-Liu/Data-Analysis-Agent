@@ -520,3 +520,50 @@ html, body, .db-canvas, .grid-stack-item-content, .widget-header,
     transition-duration: .01ms !important;
   }
 }
+
+/* Shared card language with the chat welcome prompts. The light stays behind
+   dashboard data instead of covering chart iframes.
+   https://github.com/uiverse-io/galaxy/blob/main/Cards/05akalan57_thin-sloth-31.html (MIT) */
+:root { --db-nav-h: 56px; }
+.db-nav { background: var(--color-sidebar-bg); border-bottom-color: var(--color-sidebar-divider); box-shadow: var(--shadow-sm); }
+[data-theme="dark"] .db-nav { background: var(--color-sidebar-bg); }
+.db-page { background: var(--color-bg); }
+[data-theme="dark"] .db-page { background: var(--color-bg); }
+.db-title-bar { padding-top: 24px; }
+.db-title-main { letter-spacing: -.025em; }
+.db-title-divider { background: var(--color-border-soft); }
+.kpi-strip { gap: 12px; padding-top: 18px; }
+.kpi-card { isolation: isolate; border: 1px solid var(--color-border); border-radius: var(--radius-md); box-shadow: var(--shadow-xs); }
+.kpi-card:nth-child(n) { border-left: 1px solid var(--color-border); }
+.kpi-card::before { width: 150px; height: 100px; top: -80px; right: auto; left: -65px; border-radius: 50%; background: var(--color-primary); filter: blur(45px); opacity: 0; z-index: -1; pointer-events: none; transition: opacity var(--t-base), transform var(--t-base); }
+.kpi-card:hover { border-color: var(--color-primary-tint); box-shadow: var(--shadow-md); transform: translateY(-2px); }
+.kpi-card:hover::before { opacity: .2; transform: translate(30px, 12px); }
+[data-theme="dark"] .kpi-card, [data-theme="dark"] .kpi-card:hover { box-shadow: var(--shadow-sm); }
+.kpi-label { text-transform: none; letter-spacing: .02em; }
+.kpi-value { font-variant-numeric: tabular-nums; }
+.kpi-trend.up { color: var(--color-success-text); }
+.kpi-trend.down { color: var(--color-danger-text); }
+.grid-stack-item-content { border-color: var(--color-border); border-radius: var(--radius-md); box-shadow: var(--shadow-xs); }
+.grid-stack-item-content:hover, .grid-stack-item-content:focus-within { border-color: var(--color-primary-tint); box-shadow: var(--shadow-md); }
+.widget-header { background: var(--color-surface-2); }
+[data-theme="dark"] .widget-header { background: var(--color-surface-2); }
+.widget-btn { opacity: .65; border-radius: var(--radius-sm); }
+.grid-stack-item-content:hover .widget-btn, .grid-stack-item-content:focus-within .widget-btn { opacity: 1; }
+.btn-nav, .btn-back-nav, .nav-refresh-sel { border-radius: var(--radius-sm); }
+.btn-nav.attached-r { border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
+.btn-nav:not(:disabled):active { transform: translateY(1px); }
+.db-empty { width: min(540px, calc(100% - 28px)); min-height: 270px; margin: 38px auto; padding: 30px; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-lg); box-shadow: var(--shadow-xs); }
+.db-empty-icon { animation: none; }
+.db-empty-title { color: var(--color-text); background: none; -webkit-text-fill-color: currentColor; }
+.modal-backdrop { position: fixed; inset: 0; z-index: 8000; display: flex; align-items: center; justify-content: center; padding: 20px; background: rgba(10,15,28,.55); backdrop-filter: blur(4px); }
+.modal-box { width: min(440px, 100%); padding: 24px; color: var(--color-text); background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-lg); box-shadow: var(--shadow-lg); }
+.modal-title { font-size: 18px; font-weight: 650; }
+.modal-desc { margin: 10px 0 18px; color: var(--color-text-mute); font-size: 13px; line-height: 1.6; }
+.modal-input { width: 100%; height: 42px; padding: 0 12px; color: var(--color-text); background: var(--color-surface-2); border: 1px solid var(--color-border); border-radius: var(--radius-sm); }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+.btn-modal { min-height: 36px; padding: 0 14px; color: var(--color-text-soft); background: var(--color-surface-2); border: 1px solid var(--color-border); border-radius: var(--radius-sm); cursor: pointer; }
+.btn-modal.primary { color: #fff; background: var(--color-primary); border-color: var(--color-primary); }
+.btn-modal:hover { border-color: var(--color-primary-tint); }
+.btn-modal.primary:hover { background: var(--color-primary-hover); }
+.btn-nav:focus-visible, .btn-back-nav:focus-visible, .nav-refresh-sel:focus-visible, .widget-btn:focus-visible, .modal-input:focus-visible, .btn-modal:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+@media (max-width: 640px) { :root { --db-nav-h: 88px; } .kpi-card:hover, .grid-stack-item-content:hover { transform: none; } .widget-btn { opacity: 1; } }

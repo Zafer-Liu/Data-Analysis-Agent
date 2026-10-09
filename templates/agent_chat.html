@@ -6,7 +6,7 @@
 <title>智析Agent</title>
 <link rel="icon" href="{{ url_for('static', filename='Images/icon.png') }}">
 <script src="{{ url_for('static', filename='js/theme_bootstrap.js', v='fe0') }}"></script>
-<link rel="stylesheet" href="{{ url_for('static', filename='css/agent_chat.css', v='v1.3.0') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/agent_chat.css', v='20261009-ui-1') }}">
 {% if desktop_lifecycle_enabled %}
 <script defer src="{{ url_for('static', filename='js/modules/desktop_lifecycle.js', v='desktop-lease-1') }}"></script>
 {% endif %}
@@ -595,17 +595,27 @@
         <h2 data-i18n="welcome.title">开始您的数据分析</h2>
         <p data-i18n-html="welcome.desc">连接数据库或上传 Excel，用自然语言提问，AI 会自动查询、分析并生成图表。<br>
            输入 <strong>/</strong> 可快速选择专属命令。</p>
-        <div class="hint-chips">
-          <div class="hint-chip" data-action="fillHint" data-i18n="hint.sales_category">各品类的销售额是多少？</div>
-          <div class="hint-chip" data-action="fillHint" data-i18n="hint.sales_trend">近12个月的销售趋势如何？</div>
-          <div class="hint-chip" data-action="fillHint" data-i18n="hint.top_customers">哪些客户贡献了最多收入？</div>
-          <div class="hint-chip" data-action="fillHint" data-i18n="hint.region_chart">生成各地区业绩对比柱状图</div>
-          <div class="hint-chip" data-action="fillHint" data-i18n="hint.decile">/decile 对销售额做十分位分析</div>
-          <div class="hint-chip" data-action="fillHint" data-i18n="hint.tree">/tree 用 C4.5 决策树预测客户流失</div>
-          <div class="hint-chip" data-action="fillHint" data-i18n="hint.kmeans">/kmeans 对客户做聚类分析，K=3</div>
-          <div class="hint-chip" data-action="fillHint" data-i18n="hint.data">/data 查看数据概况和分布</div>
-          <div class="hint-chip" data-action="fillHint" data-i18n="hint.ppt">/ppt 生成销售业绩分析演示文稿</div>
-          <div class="hint-chip" data-action="fillHint" data-i18n="hint.dashboard">/dashboard 生成可交互销售分析看板</div>
+        <div class="welcome-prompts">
+          <section class="welcome-prompt-group" aria-labelledby="welcome-questions-label">
+            <h3 id="welcome-questions-label" data-i18n="welcome.questions">从一个问题开始</h3>
+            <div class="hint-chips">
+              <button type="button" class="hint-chip" data-action="fillHint" data-i18n="hint.sales_category">各品类的销售额是多少？</button>
+              <button type="button" class="hint-chip" data-action="fillHint" data-i18n="hint.sales_trend">近12个月的销售趋势如何？</button>
+              <button type="button" class="hint-chip" data-action="fillHint" data-i18n="hint.top_customers">哪些客户贡献了最多收入？</button>
+              <button type="button" class="hint-chip" data-action="fillHint" data-i18n="hint.region_chart">生成各地区业绩对比柱状图</button>
+            </div>
+          </section>
+          <section class="welcome-prompt-group" aria-labelledby="welcome-commands-label">
+            <h3 id="welcome-commands-label" data-i18n="welcome.commands">或使用分析命令</h3>
+            <div class="hint-chips hint-chips-commands">
+              <button type="button" class="hint-chip" data-action="fillHint" data-i18n="hint.decile">/decile 对销售额做十分位分析</button>
+              <button type="button" class="hint-chip" data-action="fillHint" data-i18n="hint.tree">/tree 用 C4.5 决策树预测客户流失</button>
+              <button type="button" class="hint-chip" data-action="fillHint" data-i18n="hint.kmeans">/kmeans 对客户做聚类分析，K=3</button>
+              <button type="button" class="hint-chip" data-action="fillHint" data-i18n="hint.data">/data 查看数据概况和分布</button>
+              <button type="button" class="hint-chip" data-action="fillHint" data-i18n="hint.ppt">/ppt 生成销售业绩分析演示文稿</button>
+              <button type="button" class="hint-chip" data-action="fillHint" data-i18n="hint.dashboard">/dashboard 生成可交互销售分析看板</button>
+            </div>
+          </section>
         </div>
       </div>
       <div id="chat-vue-root" class="chat-vue-root"></div>
@@ -1267,6 +1277,6 @@
 <script src="{{ url_for('static', filename='vendor/vue.global.prod.js') }}"></script>
 
 <!-- ── ES module entry; non-critical UI islands load from dist/chunks on demand ── -->
-<script type="module" src="{{ url_for('static', filename='dist/chat-app.js', v='v1.3.0') }}"></script>
+<script type="module" src="{{ url_for('static', filename='dist/chat-app.js', v='20261009-ui-1') }}"></script>
 </body>
 </html>
