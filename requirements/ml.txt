@@ -7,7 +7,7 @@
 # =============================================================================
 
 # Standard ML modelling (M1)
-scikit-learn>=1.3.0
+scikit-learn>=1.9.1
 
 # 深度学习建模（M2，可选，按 GPU/CUDA 版本选择对应 torch 安装方式，
 # 不建议直接写死在此清单——参考 https://pytorch.org/get-started/locally/）
