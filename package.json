@@ -19,10 +19,10 @@
     "quality": "npm run format:check && npm run lint && npm run build:check && npm run test:frontend && python scripts/generate_tool_inventory.py --check && npm run test:charts && python -m unittest discover -s tests -v"
   },
   "devDependencies": {
-    "@eslint/js": "^9.39.4",
-    "eslint": "^9.39.4",
-    "globals": "^16.5.0",
+    "@eslint/js": "^9.39.5",
+    "eslint": "^10.13.0",
+    "globals": "^17.13.0",
     "prettier": "^3.9.3",
-    "vite": "^7.0.0"
+    "vite": "^8.3.5"
   }
 }
