@@ -1,0 +1,11 @@
+{
+  "name": "readme-demo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "npx --yes hyperframes@0.8.192 preview",
+    "check": "npx --yes hyperframes@0.8.192 check",
+    "render": "npx --yes hyperframes@0.8.192 render --format gif --fps 12 --gif-loop 0 --output .hyperframes/demo.gif && node export.mjs",
+    "still": "ffmpeg -hide_banner -loglevel error -y -i ../assets/analysis-demo.gif -ss 8.5 -frames:v 1 -update 1 ../assets/analysis-demo.png"
+  }
+}

@@ -1,0 +1,829 @@
+<p align="center"><a href="./README.md">English</a> · <strong>简体中文</strong></p>
+
+<h1 align="center">智析 Agent</h1>
+
+<p align="center"><strong>让数据开口说话。把时间留给思考。</strong></p>
+
+<p align="center">上传表格或连接数据库，用自然语言完成业务分析。</p>
+
+<div align="center">
+
+<a href="https://trendshift.io/repositories/29216?utm_source=trendshift-badge&utm_medium=badge&utm_campaign=badge-trendshift-29216" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/29216/daily?language=JavaScript" alt="Zafer-Liu%2FData-Analysis-Agent | Trendshift" width="250" height="55"/></a>
+
+[![官方网站](https://img.shields.io/badge/%F0%9F%8C%90%20%E5%AE%98%E6%96%B9%E7%BD%91%E7%AB%99-sage--agent.online-2F74FF.svg)](https://sage-agent.online/)
+
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)
+![Flask](https://img.shields.io/badge/Backend-Flask-black.svg)
+![Plotly](https://img.shields.io/badge/Visualization-Plotly-3F4F75.svg)
+![LLM](https://img.shields.io/badge/LLM-OpenAI%20Compatible-green.svg)
+![Charts](https://img.shields.io/badge/Charts-41_Types-orange.svg)
+![License](https://img.shields.io/badge/License-CC%20BY--NC%204.0-blue.svg)
+
+</div>
+
+<p align="center">
+  <a href="#demo">动态演示</a> ·
+  <a href="#quick-start">快速开始</a> ·
+  <a href="#capabilities">核心能力</a> ·
+  <a href="#install">安装说明</a> ·
+  <a href="https://sage-agent.online/">官网</a> ·
+  <a href="https://github.com/Zafer-Liu/Data-Analysis-Agent/releases/latest">Releases</a>
+</p>
+
+<p align="center">
+  <a href="https://discord.gg/EEG4Sw7tde">Discord</a> ·
+  <a href="https://t.me/+cdRNfS68u9BlYjJl">Telegram</a> · QQ: <code>991636855</code>
+</p>
+
+<a id="demo"></a>
+
+## 动态演示
+
+<p align="center">
+  <img src="./Information/assets/analysis-demo.gif" alt="分析流程动画：连接销售数据、自然语言提问、生成 SQL、展示图表和洞察" width="100%" />
+</p>
+
+*流程示意动画，使用虚构销售数据；并非实时录屏。*
+
+[查看静态预览](./Information/assets/analysis-demo.png)
+
+---
+
+<a id="features"></a>
+
+## 为什么选择智析 Agent？
+
+| 核心能力 | 你可以做什么 |
+| --- | --- |
+| **用自然语言提问** | 将业务问题转化为 SQL、图表和分析结论。 |
+| **接入业务数据** | 上传 Excel / CSV 文件，或连接 SQL 数据库。 |
+| **跟踪分析过程** | 通过 SSE 实时查看结构识别、查询执行与分析结果。 |
+| **可视化与导出** | 使用 41 种图表，导出 Excel、Word 或 PowerPoint 成果。 |
+| **自由选择模型** | 接入 OpenAI 兼容 API，或发现兼容的本地模型服务。 |
+| **扩展分析流程** | 添加业务知识、分析 Skills、MCP 工具或飞书多维表格集成。 |
+
+---
+
+<a id="quick-start"></a>
+
+## 快速开始
+
+需要 **Python 3.10+**。在独立虚拟环境中运行：
+
+```bash
+git clone https://github.com/Zafer-Liu/Data-Analysis-Agent.git
+cd Data-Analysis-Agent
+python -m venv .venv
+```
+
+激活虚拟环境：
+
+```powershell
+# Windows PowerShell
+.\.venv\Scripts\Activate.ps1
+```
+
+```bash
+# macOS / Linux
+source .venv/bin/activate
+```
+
+```bash
+python -m pip install -r requirements.txt
+python app.py
+```
+
+打开 [localhost:5001](http://localhost:5001)，配置模型 API Key，上传 Excel / CSV 或连接数据库，然后提问：
+
+```text
+按月份汇总销售额，并生成趋势图。
+```
+
+直接运行源码无需云登录。其他安装方式见[安装说明](#install)，模型设置见 [LLM 配置](#llm-config)。
+
+---
+
+<details>
+<summary>完整目录</summary>
+
+- [核心能力](#capabilities)
+- [安装说明](#install)
+- [斜杠命令](#commands)
+- [使用示例](#examples)
+- [LLM 配置](#llm-config)
+- [Agent Manager](#agent-manager)
+- [更新日志](#changelog)
+- [赞助商](#sponsors)
+- [FAQ](#faq)
+- [贡献指南](#contributing)
+- [License](#license)
+- [项目目标](#goal)
+
+</details>
+
+---
+
+<a id="capabilities"></a>
+
+## 🧠 核心能力
+
+### 1️⃣ 自然语言数据分析
+
+无需编写 SQL，只需输入自然语言：
+
+```text
+今年每个月的订单量趋势
+```
+
+系统即可自动完成：
+
+- SQL 生成
+- 数据查询
+- 图表推荐
+- 分析总结
+
+![Data Query](./Information/assets/Data_query.png)
+
+### 2️⃣ 多数据源支持
+
+支持上传和连接多种数据源：
+
+- **文件**：Excel / CSV
+- **数据库**：SQLite、MySQL、PostgreSQL、SQL Server
+- **未来计划**：DuckDB、Spark
+
+![Data Preview](./Information/assets/Data_preview.png)
+
+### 3️⃣ 智能图表系统
+
+系统会根据查询结果，从以下 **6 大类 41 种图表**中自动推荐最合适的一种：
+
+| 分类 | 图表类型 |
+|---|---|
+| **对比类** | Marimekko_ABS、Marimekko_PCT、Bar_Chart、Grouped_Bar_Chart、Stacked_Bar_Chart、Diverging_Bar_Chart、Dot_Plot、Waffle、Bullet_Chart、Sankey_Chart、Heatmap、Waterfall |
+| **时间趋势类** | Line_Chart、Circular_Line_Chart、Slope_Chart、Sparkline、Bump_Chart、Cycle_Chart、Area_Chart、Stacked_Area_Chart、Horizon_Chart、Connected_Scatter |
+| **分布类** | Histogram_Pareto_chart、Pyramid_Chart、Error_Bar_Chart、Box-and-Whisker_Plot、Violin_Chart、Ridgeline_Plot、Beeswarm_Plot、stem_leaf |
+| **地理类** | Flow_Map、Dot_Density_Map、Choropleth_Map |
+| **关系类** | Scatter_Plot、Bubble_Plot、Radar_Charts、Chord_Diagram、Arc_Chart、Network_Diagram、Parallel_Coordinates_Plot |
+| **占比类** | Treemap、Sunburst_Diagram、Nightingale_Chart、Pie_Chart |
+
+![Auto Generated](./Information/assets/Auto_generated_image.png)
+
+### 4️⃣ SSE 流式分析体验
+
+分析过程实时可见：
+
+```text
+[1/4] 正在读取数据结构...
+[2/4] 正在生成 SQL...
+[3/4] 正在执行查询...
+[4/4] 正在生成图表与洞察...
+```
+
+相比传统 BI 工具，更透明、更具交互感。
+
+### 5️⃣ 多模型兼容
+
+支持以下模型服务：
+
+- DeepSeek
+- OpenAI
+- AtlasCloud
+- 任意 OpenAI SDK Compatible API
+
+并支持自定义 `base_url`、`model`、`api_key`。默认配置如下：
+
+| Provider | Default Model |
+|---|---|
+| DeepSeek | `deepseek-v4-flash` |
+| OpenAI | `gpt-4o-mini` |
+| AtlasCloud | `deepseek-v4-pro` |
+
+### 6️⃣ 数据分析
+
+目前支持的数据分析功能包括：
+
+- 异常值处理（截尾、缩尾处理）
+- 十分位分组分析
+- K-Means 聚类分析
+- 决策树建模
+- ……
+
+### 7️⃣ 报告生成
+
+支持导出：
+
+- 整理后的 Excel 表格
+- docx 格式报告
+- 内置风格 PPT
+
+### 8️⃣ MCP 拓展
+
+支持连接本地或远程 MCP，拓展 Agent 技能。
+
+![MCP](./Information/assets/MCP1.png)
+
+- 教程：[MCP_tutorial](./Information/MCP_tutorial.md)
+
+### 9️⃣ 知识库输入
+
+支持上传业务知识，让 Agent 更加了解你的数据。
+
+![repository](./Information/assets/repository2.png)
+
+- 教程：[repository_tutorial](./Information/repository_tutorial.md)
+
+---
+
+<a id="install"></a>
+
+## ⚙️ 安装说明
+
+### 🖥️ 方式 1：Windows 安装包（最简单，推荐）
+
+从 [GitHub Releases](https://github.com/Zafer-Liu/Data-Analysis-Agent/releases/latest) 下载最新版本：
+
+| 平台 | 文件 |
+|------|------|
+| Windows | 最新 Windows `.exe` 安装包 |
+
+> **前置要求：Python 3.10+、Windows 10 / 11 64 位。**
+
+双击安装包并按提示安装。安装完成后，从桌面或开始菜单启动 **Business Analytics Agent**。
+
+---
+
+### 方式 2：下载压缩包（推荐新手，跨平台）
+
+> **前置要求：Python 3.10+**
+> 还没装？[点此下载](https://www.python.org/downloads/)（Windows 安装时请勾选 **"Add Python to PATH"**）
+
+**第一步：下载并解压**
+
+![Download installation package](./Information/assets/package.png)
+
+**第二步：双击启动**
+
+<table>
+<tr>
+<td><b>Windows</b></td>
+<td>双击 <code>start.bat</code></td>
+</tr>
+<tr>
+<td><b>macOS</b></td>
+<td>
+
+① 打开终端（Command + 空格 → 输入 Terminal → 回车）
+② 在终端中运行（把路径替换为实际解压位置）：
+```bash
+chmod +x ~/Downloads/Data-Analysis-Agent/start.command
+xattr -d com.apple.quarantine ~/Downloads/Data-Analysis-Agent/start.command
+```
+③ 双击 `start.command` 即可
+
+</td>
+</tr>
+</table>
+
+> **首次启动**会自动创建虚拟环境并安装依赖，约需 3–5 分钟，请耐心等待。**之后启动无需等待**。
+
+**第三步：启动后浏览器自动打开** `http://localhost:5001`
+
+![Download installation package2](./Information/assets/package2.png)
+
+**第四步：配置 API Key**
+
+![Configure the API3](./Information/assets/Deepseek3.png)
+
+**第五步：后续更新**
+
+![Update](./Information/assets/Update.png)
+
+---
+
+### 方式 3：一键在线安装
+
+**Windows（在 PowerShell 中运行）：**
+
+```powershell
+iwr -useb https://raw.githubusercontent.com/Zafer-Liu/Data-Analysis-Agent/main/install.ps1 | iex
+```
+
+安装完成后双击桌面的 `data-analysis-agent.bat` 启动，或：
+```powershell
+cd $env:USERPROFILE\.data-analysis-agent\Data-Analysis-Agent
+.\.venv\Scripts\activate
+python app.py
+```
+
+**macOS / Linux（在终端中运行）：**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Zafer-Liu/Data-Analysis-Agent/main/install.sh | sh
+```
+
+安装完成后运行：
+```bash
+data-analysis-agent
+```
+
+如提示 `command not found`，将以下内容添加到 `~/.zshrc` 或 `~/.bashrc`，然后重启终端：
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+---
+
+### 方式 4：通过 GitHub Clone
+
+```bash
+git clone https://github.com/Zafer-Liu/Data-Analysis-Agent.git
+cd Data-Analysis-Agent
+pip install -r requirements.txt
+python app.py
+```
+
+浏览器打开 `http://localhost:5001`，然后配置 API Key（同方式 1）。
+
+---
+
+<a id="commands"></a>
+
+## 🛠 斜杠命令
+
+| Command | Status | Description |
+|---|---|---|
+| `/chart` | ✅ | 强制优先生成图表 |
+| `/sql` | ✅ | 直接执行 SQL |
+| `/analyze` | ✅ | 深度统计分析 |
+| `/tree` | ✅ | 决策树分析 |
+| `/kmeans` | ✅ | K-Means 聚类分析 |
+| `/data` | ✅ | 数据探查与预览 |
+| `/inset` | ✅ | 缺失值插补处理 |
+| `/winsorize` | ✅ | 缩尾处理（极值替换） |
+| `/trimming` | ✅ | 截尾处理（极值剔除） |
+| `/export` | ✅ | 导出数据文件 |
+| `/report` | ✅ | 导出 Word/PDF 报告 |
+| `/ppt` | ✅ | 导出 PPT 演示文稿 |
+| `/status` | ✅ | 查看任务状态 |
+
+---
+
+<a id="examples"></a>
+
+## 📈 使用示例
+
+### 示例 1：趋势分析
+
+用户输入：
+
+```text
+最近 12 个月销售趋势
+```
+
+系统输出：
+
+- SQL 查询
+- 趋势折线图
+- 销售增长分析
+
+---
+
+### 示例 2：区域分析
+
+用户输入：
+
+```text
+哪个地区利润最高？
+```
+
+系统输出：
+
+- 地区利润排行
+- 柱状图
+- 区域经营洞察
+
+---
+
+### 示例 3：图表优先模式
+
+用户输入：
+
+```text
+/chart 用户增长情况
+```
+
+系统会优先生成可视化图表。
+
+---
+
+<a id="llm-config"></a>
+
+## 🤖 LLM 配置说明
+
+在侧边栏 ⚙ 中填写：
+
+```text
+API Key
+Base URL
+Model
+```
+
+即可切换模型。
+
+---
+
+<a id="agent-manager"></a>
+
+## 🧩 推荐管理方式：智管-Agent Manager
+
+智能商业分析 Agent 可以独立运行，也可以搭配 **智管-Agent Manager** 使用，获得更方便的桌面端管理体验。
+
+<details>
+<summary><strong>了解智管-Agent Manager 如何管理本项目</strong></summary>
+
+<br>
+
+**智管-Agent Manager** 是一个本地 AI Agent 的统一管理中心，适合管理多个本地 Agent 项目。
+将智能商业分析 Agent 添加到智管后，你可以：
+
+* 一键启动 / 停止智能商业分析 Agent
+* 实时查看运行日志与端口状态
+* 在桌面应用内直接打开 Web 分析界面
+* 使用 Manager Agent 通过自然语言启动或打开本项目
+* 开会演示时一键生成临时公网分享链接
+
+```text
+示例：
+帮我启动智能商业分析 Agent，并打开它的界面
+```
+
+这对于需要频繁演示、调试或同时运行多个 Agent 的用户尤其有用。
+
+👉 项目地址：[智管-Agent Manager](https://github.com/Zafer-Liu/Agent_Manager)
+
+</details>
+
+---
+
+<a id="changelog"></a>
+
+## 📝 更新日志
+
+> **当前源码版本 `v1.4.0`** · 2026 年 10 月 16 日 · 安装包发布情况请查看 [Releases](https://github.com/Zafer-Liu/Data-Analysis-Agent/releases/latest)。
+
+本次将私有版现有功能同步至公版：包括只读运营后台、桌面云账号与模型网关、邀请与额度流水、浏览器和网页表格采集、网页版本地数据保存、PyTorch GRU/LSTM、图表主题与 PNG 导出、SQL 内存副本及数字溯源、画布保存重试、Skills 标签和 SSE 稳定性改进。
+
+直接运行 `python app.py` 仍无需云登录；云端与桌面功能需要对应服务配置。参见 [完整同步清单](./docs/feature-sync-1.4.md) 和 [托管配置说明](./docs/hosted-configuration.md)。
+
+### 本地模型与服务（源码新增）
+
+在设置 → 本地服务中，统一管理多个 HTTP / Docker 连接。自定义 HTTP 支持健康检查与手动 JSON 请求；OpenAI 兼容服务可发现模型并加入 LLM 列表；TimesFM 作为预测适配器，支持 `run_analysis`、回测、结果表及图表导出。连接、配置与能力边界见 [本地服务说明](deploy/local-services/README.md)。默认不下载模型、不安装模型依赖、不拉取镜像。
+
+TimesFM 的已有模型目录、主动下载、Docker 模板与三商品示例见 [TimesFM 接入说明](deploy/timesfm/README.md)。应用主环境保持轻量；TimesFM 权重限非商业、非生产研究。
+
+### v1.3.0 更新记录
+
+v1.3.0 参加飞书 AI 绝活黑客松，接入飞书机器人，内置多维表格分析功能，同时优化部分功能。
+
+1. **飞书机器人与多维表格闭环**：群内 @ 机器人可读取飞书多维表格，将记录接入 DuckDB / SQL 分析，并把结论回传群聊；成员明确提出后，才会创建结果表、追加或更新记录。手机与 Web 使用同一分析上下文。
+2. **更可靠的长期记忆**：修复思考模型输出、JSON 格式和作用域判断造成的记忆提取失败；支持记忆提取结果提示、24 小时自动整理、会话恢复保护，以及在“通用”设置中一键关闭长期记忆。
+3. **更可信的知识库检索状态**：本地 Embedding 模型下载与兼容性得到修复；云端检索改为显式真实检测，不再把未验证或不可用的云端服务显示为可用。“Hash”模式在界面中更名为“基础”。
+4. **更清晰的设置与阅读体验**：统一设置页头部、卡片和间距；LLM 模型提供商行修复双层内缩、悬停、留白和长内容裁切问题；宽屏聊天内容区可随窗口合理扩展。
+5. **兼容性与交付稳定性**：完善 SQL Server 连接说明与错误边界，补充工作流运行的可观测性说明。GPU 算力暂标注为“规划中”，待端到端验收后开放；现有代码与配置不会删除。
+
+### 📖 详细更新日志
+
+- [Version Update Log（中文）](./Information/Version_Update_Log.md)
+- [Version Update Log (English)](./Information/Version_Update_Log_EN.md)
+
+---
+
+<a id="sponsors"></a>
+
+## 🙏 赞助商
+
+感谢以下赞助商对本项目的支持！
+
+### ☁️ 赞助 · Sponsored by Sidrune AI
+
+<p align="center"><a href="https://sidrune.ai/register?source=github&campaign=daanagent&promo=daanagent"><img src="./Information/assets/SidruneAI.png" alt="Sidrune AI banner" height="80" /></a></p>
+
+感谢 Sidrune AI 赞助了本项目！Sidrune AI —— 一个入口，接入并管理全球主流 AI 模型。面向个人开发者、技术团队与企业，通过统一 API 接入并管理全球主流 AI 模型；多线路动态调度提升可用性，模型表现、响应时间与费用透明可查。根据不同模型与线路，API 调用成本较官方或基准价格可降低 40%—98%。立即访问并注册，即可获得 $3 API 额度。
+
+👉 **[注册 Sidrune AI](https://sidrune.ai/register?source=github&campaign=daanagent&promo=daanagent)**
+
+---
+
+### ☁️ 赞助 · Sponsored by DolOffer
+
+<div align="center"><a href="https://doloffer.com/"><img src="./Information/assets/DolOffer.png" alt="DolOffer logo" height="80" /></a></div>
+
+感谢 DolOffer 对本项目的支持！DolOffer 是一个专注于数字产品推荐与优惠分享的平台，帮助用户快速发现值得关注的工具、服务和限时福利。平台提供 YouTube Premium、Claude、ChatGPT Plus、Spotify、Apple Music 等多种热门订阅服务，价格低至官方价的 3 折甚至更低，正版稳定，售后无忧。现在通过我们的专属链接注册，并在充值时输入优惠码 **AI8888**，即可额外享受 9 折优惠。
+
+👉 **[了解更多](https://github.com/Doloffer-g/guide)**
+
+---
+
+<a id="faq"></a>
+
+## ❓ FAQ
+
+<details>
+<summary><b>📦 安装与启动</b></summary>
+
+<br>
+
+<details>
+<summary><b>安装依赖时网络超时？</b></summary>
+
+脚本会自动切换清华源重试。
+
+若仍失败，请手动执行：
+
+```bash
+pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
+</details>
+
+<details>
+<summary><b>pip install 报错 / 安装依赖失败？</b></summary>
+
+脚本会自动切换国内镜像（清华源）重试。
+
+若仍失败，请手动指定镜像：
+
+```bash
+pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
+同时请确保磁盘至少保留 **2 GB** 可用空间。
+
+</details>
+
+<details>
+<summary><b>Python 版本不对（需要 3.10+）？</b></summary>
+
+查看当前版本：
+
+```bash
+python --version
+```
+
+如果版本低于 3.10，请前往：
+
+https://www.python.org/downloads/
+
+下载并安装最新版本。
+
+</details>
+
+<details>
+<summary><b>start.bat 双击没反应或一闪而过？</b></summary>
+
+Python 未正确加入系统 PATH。
+
+重新安装 Python 时勾选 **"Add Python to PATH"**，然后重启电脑再试。
+
+</details>
+
+<details>
+<summary><b>macOS 运行 start.command 被系统阻止？</b></summary>
+
+在终端执行以下命令解除限制：
+
+```bash
+xattr -d com.apple.quarantine /你的路径/start.command
+```
+
+如果提示：
+
+> "无法打开，因为无法验证开发者"
+
+可以：
+
+1. 右键点击 `start.command`
+2. 选择"打开"
+3. 再次点击"打开"
+
+</details>
+
+---
+
+<details>
+<summary><b>🔑 API 配置</b></summary>
+
+<br>
+
+<details>
+<summary><b>提示未配置 LLM？</b></summary>
+
+在侧栏 ⚙ 中填写 API Key 并保存。
+
+</details>
+
+<details>
+<summary><b>如何获取 API Key？</b></summary>
+
+这里以 DeepSeek 为例：
+
+![Configure the API1](./Information/assets/Deepseek1.png)
+
+![Configure the API2](./Information/assets/Deepseek2.png)
+
+![Configure the API3](./Information/assets/Deepseek3.png)
+
+</details>
+
+</details>
+
+---
+
+<details>
+<summary><b>为什么 MySQL 能连接，但 SQL Server 无法连接？</b></summary>
+
+SQL Server 连接除本程序安装的 `pyodbc` Python 包外，还依赖 Windows 中的
+[Microsoft ODBC Driver 17 或 18 for SQL Server](https://learn.microsoft.com/sql/connect/odbc/download-odbc-driver-for-sql-server)。
+`pyodbc` 仅负责让 Python 调用 ODBC；实际的 SQL Server 认证、加密和网络通信由 Microsoft ODBC Driver 完成。
+
+安装驱动并重启程序后，使用与已安装驱动版本一致的连接串。例如安装 ODBC Driver 18：
+
+```text
+mssql+pyodbc://用户名:密码@服务器:1433/数据库名?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes
+```
+
+如果仍不能连接，请依次确认：SQL Server 已启用 TCP/IP；地址和端口正确（通常为 `1433`）；
+服务器防火墙已放行该端口；以及用户名、密码和数据库访问权限有效。命名实例建议改填实际 TCP 端口，
+例如 `服务器:1433`，避免实例发现被网络策略阻断。
+
+</details>
+
+---
+
+<details>
+<summary><b>🗄️ 数据库连接</b></summary>
+
+<br>
+
+<details>
+<summary><b>如何连接 SQL 数据库？</b></summary>
+
+请使用以下格式连接：
+
+```text
+mysql+pymysql://用户名:密码@主机:端口/数据库名
+```
+
+SQL Server（Windows）请使用 ODBC 连接串；首次使用还需安装
+[Microsoft ODBC Driver 17 或 18 for SQL Server](https://learn.microsoft.com/sql/connect/odbc/download-odbc-driver-for-sql-server)：
+
+```text
+mssql+pyodbc://用户名:密码@服务器:1433/数据库名?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes
+```
+
+若使用命名实例，请优先在 SQL Server 配置管理器中启用 TCP/IP，并填写实际 TCP 端口，
+例如 `服务器:1433`，以避免实例发现被网络或防火墙阻断。
+
+示例：
+
+❌ 错误写法：
+
+```text
+mysql://user:pass@host:3306/dbname
+```
+
+✅ 正确写法：
+
+```text
+mysql+pymysql://user:pass@host:3306/dbname
+```
+
+</details>
+
+</details>
+
+---
+
+<details>
+<summary><b>📊 图表与文件</b></summary>
+
+<br>
+
+<details>
+<summary><b>图表链接重启后失效？</b></summary>
+
+生成的图表保存在本地目录：
+
+```text
+outputs/charts
+```
+
+可直接使用浏览器打开对应的 HTML 文件。
+
+</details>
+
+</details>
+
+---
+
+<a id="contributing"></a>
+
+## 🤝 贡献指南
+
+我们欢迎任何形式的贡献！无论是修复 Bug、改进文档还是添加新功能。
+
+### 贡献流程
+
+1. **Fork 本仓库**
+2. **创建特性分支**
+   ```bash
+   git checkout -b feature/your-feature-name
+   ```
+3. **提交你的更改**
+   ```bash
+   git add .
+   git commit -m "feat: 添加某某功能"
+   ```
+   建议使用 [Conventional Commits](https://www.conventionalcommits.org/) 规范提交信息。
+4. **推送到远程**
+   ```bash
+   git push origin feature/your-feature-name
+   ```
+5. **开启 Pull Request**
+   - 描述你的改动内容
+   - 如果是功能新增，请附上截图或录屏
+   - 关联相关的 Issue（如有）
+
+### 代码规范
+
+- Python 代码遵循 [PEP 8](https://pep8.org/)
+- 提交前运行 `flake8` 检查代码风格
+- 新增功能请添加对应的测试
+- 保持 Commit 信息清晰、简洁
+
+### 报告 Bug
+
+请使用 [GitHub Issues](https://github.com/Zafer-Liu/Data-Analysis-Agent/issues) 报告 Bug，并包含：
+
+- 📋 复现步骤
+- 🎯 预期行为
+- ⚠️ 实际行为
+- 📸 截图（如适用）
+- 💻 环境信息（操作系统、Python 版本）
+
+---
+
+### 🚀 寻找一起改变世界的 Contributor
+
+一个好的开源项目，从来不是一个人的独角戏。
+我们正在打造一个**能真正应对复杂业务场景**的数据工具——它需要在海量数据中极速穿梭，在多表逻辑间游刃有余，在可视化看板上洞察先机。
+
+### 急需你一起来攻克这些难题：
+
+- **多 Sheets 场景下的表间逻辑判断优化** — 如何智能梳理几十张表之间的依赖与计算？
+- **可视化看板的交互与性能优化** — 让数据故事讲得更流畅、更直观、更震撼。
+- **特殊业务场景下的模型能力提升** — 那些通用工具搞不定的边缘业务。
+- **远程服务器调用** — 搭建远程 GPU 调用框架。
+
+### 为什么值得你加入？
+
+- 你将直面**真实、有深度、非玩具级**的技术挑战
+- 你的代码会直接影响**一线业务用户**的工作效率
+- 自由贡献，灵活协作——提 PR 或直接沟通，完全由你
+- 优秀 Contributor 将有机会成为项目 Committer
+
+### 如何加入？
+
+- 直接 **Pull Request**，我们会在 24 小时内 review
+- 或联系邮箱：`rusboldtshanti34@gmail.com`（请备注"Contributor + 擅长方向"）
+- 加入官方交流群：QQ 群 `991636855` 或 [Telegram 群](https://t.me/+cdRNfS68u9BlYjJl) 或 [Discord](https://discord.gg/EEG4Sw7tde)
+
+---
+
+<a id="license"></a>
+
+## 📄 License
+
+本软件采用 **CC BY-NC 4.0** 授权，并已申请中国计算机软件著作权（受理号 2026R11S0817877，软件名称：自然语言交互式经营数据分析软件 V1.0）。
+完整条款见 [LICENSE](./LICENSE) 文件。
+
+> 禁止未授权商业使用；商用请联系作者另行签署商业授权书。
+
+---
+
+<a id="goal"></a>
+
+## ⭐ 项目目标
+
+把过程交给"智析"，把时间留给思考。
+
+---
+
+<div align="center">
+
+⭐️ 如果这个项目对你有帮助，请给它一个星标！
+
+Made with ❤️ by [Zafer-Liu](https://github.com/Zafer-Liu)
+
+</div>

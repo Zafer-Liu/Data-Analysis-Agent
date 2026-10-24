@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=1200, height=720" />
+<title>Data Analysis Agent — illustrated workflow</title>
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+<style>
+* { box-sizing: border-box; }
+body { margin:0; background:#111827; color:#f4f6fc; font-family:system-ui,sans-serif; }
+#root { width:100%; height:100%; position:relative; overflow:hidden; padding:32px 36px; background:#111827; isolation:isolate; }
+.backdrop { position:absolute; inset:0; z-index:-1; background:#111827; }
+.heading { display:flex; justify-content:space-between; align-items:center; height:48px; }
+.brand { display:flex; gap:12px; align-items:center; font-size:23px; font-weight:700; }
+.mark { display:grid; place-items:center; width:36px; height:36px; border-radius:10px; background:#adbcff; color:#172242; font-size:22px; }
+.eyebrow { font-size:13px; color:#b8c4da; letter-spacing:2px; }
+.window { margin-top:18px; height:548px; background:#1b2436; border:1px solid #3c4860; border-radius:16px; overflow:hidden; }
+.toolbar { display:flex; align-items:center; justify-content:space-between; height:48px; padding:0 22px; border-bottom:1px solid #3c4860; }
+.dots { display:flex; gap:6px; } .dots i { width:7px; height:7px; border-radius:50%; background:#8290a8; }
+.workspace-title { font-size:14px; color:#d8e1f0; } .local { font-size:12px; color:#b1decf; }
+.workspace { display:grid; grid-template-columns:230px 1fr; height:498px; }
+.sidebar { padding:25px 20px; background:#172032; border-right:1px solid #3c4860; }
+.label { color:#b8c4da; font-size:11px; letter-spacing:1.6px; font-weight:700; }
+.source { margin-top:17px; padding:14px 12px; border:1px solid #6376b0; border-radius:9px; background:#263453; }
+.filename { font-size:16px; font-weight:600; } .file-meta { margin-top:5px; font-size:12px; color:#c1cde2; }
+.connected { margin:15px 0 27px; color:#98e0c5; font-size:12px; } .schema { margin-top:14px; }
+.field { display:flex; justify-content:space-between; padding:10px 0; border-bottom:1px solid #303c52; font-size:13px; }
+.field span:last-child { color:#b8c4da; font-size:11px; }
+.schema-note { margin-top:20px; font-size:12px; line-height:1.6; color:#b8c4da; }
+.main { padding:24px 28px; }
+.question { padding:13px 18px; border-radius:10px 10px 2px 10px; background:#334b86; font-size:19px; font-weight:500; }
+.question-text { white-space:nowrap; }
+.agent-row { display:flex; align-items:center; gap:8px; margin:17px 0 12px; font-size:13px; color:#b8c4da; }
+.agent-row b { color:#f4f6fc; }
+.sql { padding:12px 16px; background:#101a2b; border-radius:9px; border:1px solid #3c4860; }
+.sql-label { color:#98e0c5; font-size:11px; letter-spacing:1.3px; margin-bottom:8px; }
+pre { margin:0; font-family:monospace; font-size:13px; line-height:1.5; color:#e1e8f8; }
+.kw { color:#b8b6ff; }
+.result { margin-top:14px; background:#f6f8fc; color:#17243c; padding:15px 18px 12px; border-radius:9px; }
+.chart-title { display:flex; justify-content:space-between; align-items:baseline; font-size:15px; font-weight:700; }
+.chart-title span { font-size:11px; font-weight:500; color:#55617a; }
+.bars { display:flex; justify-content:space-around; gap:18px; align-items:flex-end; height:102px; border-bottom:1px solid #c6cfdf; margin-top:18px; }
+.bar-col { display:flex; flex-direction:column; justify-content:flex-end; align-items:center; width:60px; height:100%; }
+.value { font-size:11px; font-weight:700; margin-bottom:5px; }
+.bar { background:#6275cd; width:44px; height:calc(var(--h) * var(--hf-grow, 1)); border-radius:4px 4px 0 0; }
+.bar-col:last-child .bar { background:#237d68; }
+.months { display:flex; justify-content:space-around; gap:18px; margin-top:7px; font-size:11px; color:#55617a; }
+.months span { width:60px; text-align:center; }
+.insight { margin-top:12px; padding:10px 13px; border:1px solid #4d8c79; background:#203e38; border-radius:7px; font-size:13px; color:#c5f4df; }
+.steps { margin-top:20px; display:flex; align-items:center; gap:14px; }
+.step { display:flex; gap:8px; align-items:center; color:#d1daeb; font-size:13px; }
+.num { width:22px; height:22px; display:grid; place-items:center; border-radius:50%; background:#36425c; font-size:11px; font-weight:700; }
+.line { height:1px; background:#53617c; flex:1; } .sample { margin-left:auto; color:#aebbd1; font-size:11px; }
+</style>
+</head>
+<body>
+<div data-hf-id="hf-rnja" id="root" data-composition-id="main" data-start="0" data-duration="10" data-width="1200" data-height="720" data-fps="12">
+  <div class="backdrop" aria-hidden="true"></div>
+  <header data-hf-id="hf-7fky" class="heading"><div data-hf-id="hf-qoje" class="brand"><span data-hf-id="hf-1g77" class="mark">↗</span> Data Analysis Agent</div><div data-hf-id="hf-2ww0" class="eyebrow">FROM QUESTION TO INSIGHT</div></header>
+  <div data-hf-id="hf-pifn" id="demo-workspace" class="window">
+    <div data-hf-id="hf-6uyx" class="toolbar"><div data-hf-id="hf-zx1w" class="dots"><i data-hf-id="hf-wt6k"></i><i data-hf-id="hf-zeb8"></i><i data-hf-id="hf-y7e5"></i></div><div data-hf-id="hf-b5b3" class="workspace-title">Business analysis workspace</div><div data-hf-id="hf-utec" class="local">● Local workspace</div></div>
+    <div data-hf-id="hf-e8vj" class="workspace">
+      <aside data-hf-id="hf-842t" class="sidebar">
+        <div data-hf-id="hf-k627" class="label">YOUR DATA</div>
+        <div data-hf-id="hf-ee31" id="data-source" class="source"><div data-hf-id="hf-wprj" class="filename">▤ sales.csv</div><div data-hf-id="hf-mr0b" class="file-meta">CSV · 3 columns</div></div>
+        <div data-hf-id="hf-7yab" id="connected" class="connected">✓ Data source connected</div>
+        <div data-hf-id="hf-y733" class="label">DISCOVERED SCHEMA</div>
+        <div data-hf-id="hf-339i" id="schema" class="schema">
+          <div data-hf-id="hf-0ztw" class="field"><span data-hf-id="hf-4tnh">date</span><span data-hf-id="hf-m42l">DATE</span></div>
+          <div data-hf-id="hf-bxgc" class="field"><span data-hf-id="hf-wg9l">region</span><span data-hf-id="hf-8wuq">TEXT</span></div>
+          <div data-hf-id="hf-aqj9" class="field"><span data-hf-id="hf-zlhr">revenue</span><span data-hf-id="hf-kgwc">NUMBER</span></div>
+        </div>
+        <p data-hf-id="hf-opt9" class="schema-note">Your question sets the direction. The agent handles the query.</p>
+      </aside>
+      <main data-hf-id="hf-g3rz" class="main">
+        <div data-hf-id="hf-rtii" id="question" class="question"><div data-hf-id="hf-rhwo" id="question-text" class="question-text">Show monthly sales and plot the trend.</div></div>
+        <div data-hf-id="hf-5hvq" id="agent-row" class="agent-row"><b data-hf-id="hf-fh3c">✦ Agent</b><span data-hf-id="hf-gluy">Read schema → query → visualize</span></div>
+        <div data-hf-id="hf-5q6e" id="sql" class="sql">
+          <div data-hf-id="hf-lp0q" class="sql-label">GENERATED SQL · DUCKDB</div>
+          <pre data-hf-id="hf-j4nq"><span data-hf-id="hf-ugpe" class="sql-line"><span data-hf-id="hf-r24r" class="kw">SELECT</span> strftime(date, '%Y-%m') <span data-hf-id="hf-tn4n" class="kw">AS</span> month,</span>
+<span data-hf-id="hf-chd0" class="sql-line">       sum(revenue) <span data-hf-id="hf-ufyv" class="kw">AS</span> revenue <span data-hf-id="hf-3753" class="kw">FROM</span> sales</span>
+<span data-hf-id="hf-ul6z" class="sql-line"><span data-hf-id="hf-s20f" class="kw">GROUP BY</span> month <span data-hf-id="hf-5h0i" class="kw">ORDER BY</span> month;</span></pre>
+        </div>
+        <div data-hf-id="hf-0y1u" id="result" class="result">
+          <div data-hf-id="hf-fqay" class="chart-title">Monthly revenue <span data-hf-id="hf-29y1">USD · thousands</span></div>
+          <!-- Adapted from the HyperFrames animated-bar-chart component. -->
+          <div data-hf-id="hf-umx2" class="bars">
+            <div data-hf-id="hf-coo6" class="bar-col"><div data-hf-id="hf-iofr" class="value">40</div><div data-hf-id="hf-syet" class="bar" style="--h:44px"></div></div>
+            <div data-hf-id="hf-pkru" class="bar-col"><div data-hf-id="hf-luvz" class="value">48</div><div data-hf-id="hf-kyhx" class="bar" style="--h:53px"></div></div>
+            <div data-hf-id="hf-pz2v" class="bar-col"><div data-hf-id="hf-ia4q" class="value">43</div><div data-hf-id="hf-axny" class="bar" style="--h:47px"></div></div>
+            <div data-hf-id="hf-qddw" class="bar-col"><div data-hf-id="hf-l386" class="value">58</div><div data-hf-id="hf-ldun" class="bar" style="--h:64px"></div></div>
+            <div data-hf-id="hf-qrox" class="bar-col"><div data-hf-id="hf-iqc9" class="value">64</div><div data-hf-id="hf-w07c" class="bar" style="--h:70px"></div></div>
+            <div data-hf-id="hf-r5zy" class="bar-col"><div data-hf-id="hf-fkua" class="value">72</div><div data-hf-id="hf-4nxd" class="bar" style="--h:79px"></div></div>
+          </div>
+          <div data-hf-id="hf-e53x" class="months"><span data-hf-id="hf-e12y">Jan</span><span data-hf-id="hf-u492">Feb</span><span data-hf-id="hf-sx6f">Mar</span><span data-hf-id="hf-irhi">Apr</span><span data-hf-id="hf-vpbm">May</span><span data-hf-id="hf-khom">Jun</span></div>
+        </div>
+        <div data-hf-id="hf-njkh" id="insight" class="insight">↗ Revenue grew <strong data-hf-id="hf-ph85">80%</strong> from January to June.</div>
+      </main>
+    </div>
+  </div>
+  <footer data-hf-id="hf-2r0z" class="steps">
+    <div data-hf-id="hf-bqsk" class="step"><span data-hf-id="hf-jcus" id="step-1" class="num">1</span> Connect data</div><div data-hf-id="hf-np12" class="line"></div>
+    <div data-hf-id="hf-5lv0" class="step"><span data-hf-id="hf-g6mc" id="step-2" class="num">2</span> Ask a question</div><div data-hf-id="hf-sogq" class="line"></div>
+    <div data-hf-id="hf-gc6d" class="step"><span data-hf-id="hf-d0dw" id="step-3" class="num">3</span> Generate SQL</div><div data-hf-id="hf-t2rr" class="line"></div>
+    <div data-hf-id="hf-kht7" class="step"><span data-hf-id="hf-fbj0" id="step-4" class="num">4</span> Get insights</div><div data-hf-id="hf-12gi" class="sample">ILLUSTRATED DEMO</div>
+  </footer>
+</div>
+<script>
+const tl = gsap.timeline({ paused:true });
+const reveal = (selector, at, duration=0.3) => tl.fromTo(selector, { opacity:0 }, { opacity:1, duration }, at);
+const step = (n, at) => tl.to(`#step-${n}`, { backgroundColor:'#98e0c5', color:'#142b28', duration:0.2 }, at);
+reveal('#data-source',0.2); reveal('#connected',0.7); reveal('#schema',0.9); step(1,0.7);
+reveal('#question',1.4);
+tl.fromTo('#question-text', { clipPath:'inset(0 100% 0 0)' }, { clipPath:'inset(0 0% 0 0)', duration:1.2, ease:'none' },1.5);
+step(2,2.6); reveal('#agent-row',2.8); reveal('#sql',3.1);
+tl.fromTo('.sql-line', { opacity:0 }, { opacity:1, duration:0.25, stagger:0.4 },3.3); step(3,4.5);
+reveal('#result',4.9);
+tl.fromTo('.bar', { '--hf-grow':0 }, { '--hf-grow':1, duration:0.65, stagger:0.16, ease:'power2.out' },5.2);
+tl.fromTo('.value', { opacity:0 }, { opacity:1, duration:0.2, stagger:0.16 },5.7);
+reveal('#insight',7.1); step(4,7.1);
+window.__timelines['main'] = tl;
+tl.seek(0);
+</script>
+</body>
+</html>

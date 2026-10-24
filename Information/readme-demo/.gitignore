@@ -1,0 +1,6 @@
+.hyperframes/
+.thumbnails/
+node_modules/
+*.mp4
+*.webm
+palette.png
