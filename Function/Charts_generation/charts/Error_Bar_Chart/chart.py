@@ -41,9 +41,9 @@ _DESC = "展示分组数据的中位数及其四分位数范围。误差条自�
 
 def _auto_col(df: pd.DataFrame, *hints: str) -> Optional[str]:
     """根据提示自动查找匹配的列名。"""
-    strs = [c for c in df.columns if df[c].dtype == object]
+    strs = [c for c in df.columns if (df[c].dtype == object or pd.api.types.is_string_dtype(df[c]))]
     nums = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-    col_lower = {c.lower(): c for c in df.columns}
+    col_lower = {str(c).lower(): c for c in df.columns}
     
     # 1. 精确匹配 hints
     for h in hints:
@@ -133,8 +133,10 @@ def generate(
         else:
             return ChartResult(warnings=["请提供 df 或 excel_path"])
 
-    x_col = mapping.get("x") or x
-    y_col = mapping.get("y") or y
+    x_col = mapping.get("x")
+    x_col = x_col if x_col is not None else x
+    y_col = mapping.get("y")
+    y_col = y_col if y_col is not None else y
     title = options.get("title", title)
     orientation = options.get("orientation", orientation)
 
@@ -152,7 +154,7 @@ def generate(
         _x = mapping["x"]
     else:
         # x 优先选字符串列
-        str_cols = [c for c in df.columns if df[c].dtype == object]
+        str_cols = [c for c in df.columns if (df[c].dtype == object or pd.api.types.is_string_dtype(df[c]))]
         _x = str_cols[0] if str_cols else None
 
     if mapping.get("y") in df.columns:
@@ -240,10 +242,24 @@ def generate(
             **kwargs
         ))
 
-    # 轴范围与刻度（示例风格：$0K,$20K...）
-    max_q75 = grouped_stats["q75"].max()
-    axis_max = float(np.ceil(max_q75 / 20000.0) * 20000 + 10000)  # 留一点右侧余量
-    tickvals = np.arange(0, axis_max + 1, 20000)
+    # 轴范围与刻度：数据驱动，不再硬编码 $20K 美元刻度。
+    # 原实现固定按 20000 取整并标 $XXK，对百分比/计数/非美元数据产生荒谬坐标轴。
+    max_q75 = float(grouped_stats["q75"].max())
+    if not (max_q75 > 0):  # 全 0/NaN 退化为占位范围
+        max_q75 = 1.0
+    # 计算“美观”刻度步长（1/2/5 × 10^n），约 5 个主刻度
+    def _nice_step(value):
+        if value <= 0:
+            return 1.0
+        raw = value / 5.0
+        mag = 10 ** np.floor(np.log10(raw))
+        norm = raw / mag
+        step = mag * (1 if norm < 1.5 else (2 if norm < 3 else (5 if norm < 7 else 10)))
+        return float(step)
+
+    step = _nice_step(max_q75)
+    axis_max = float(np.ceil(max_q75 / step) * step + step)  # 留一格右侧余量
+    tickvals = np.arange(0, axis_max + step / 2, step)
 
     fig.update_layout(
         title=title,
@@ -261,7 +277,6 @@ def generate(
         fig.update_xaxes(
             range=[0, axis_max],
             tickvals=tickvals,
-            ticktext=[f"${int(v/1000)}K" for v in tickvals],
             gridcolor="#d9d9d9",
             zeroline=False
         )
@@ -273,7 +288,6 @@ def generate(
         fig.update_yaxes(
             range=[0, axis_max],
             tickvals=tickvals,
-            ticktext=[f"${int(v/1000)}K" for v in tickvals],
             gridcolor="#d9d9d9",
             zeroline=False
         )

@@ -22,7 +22,7 @@ from typing import Any
 
 import duckdb
 
-from infrastructure.paths import data_path
+from infrastructure.paths import content_data_path
 
 
 @dataclass(frozen=True)
@@ -223,7 +223,7 @@ def _collect_json_reference_index(
     references: dict[str, list[dict[str, str]]] = {name: [] for name in table_names}
     diagnostics: list[dict[str, str]] = []
 
-    saved_dir = data_path("outputs", "Session")
+    saved_dir = content_data_path("outputs", "Session")
     for path in _iter_json_files(saved_dir) or []:
         data = _load_json(path)
         if not data or not _workspace_relevant_saved_session(data, workspace_id):
@@ -236,7 +236,7 @@ def _collect_json_reference_index(
                     "path": str(path),
                 })
 
-    dashboard_dir = data_path("outputs", "Dashboard")
+    dashboard_dir = content_data_path("outputs", "Dashboard")
     for path in _iter_json_files(dashboard_dir) or []:
         data = _load_json(path)
         if not data or str(data.get("workspace_id") or "") != workspace_id:
@@ -249,7 +249,7 @@ def _collect_json_reference_index(
                     "path": str(path),
                 })
 
-    jobs_db = data_path("outputs", "jobs", "jobs.db")
+    jobs_db = content_data_path("outputs", "jobs", "jobs.db")
     if jobs_db.is_file():
         conn = None
         try:

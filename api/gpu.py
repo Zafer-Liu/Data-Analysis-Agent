@@ -3,13 +3,20 @@ import logging
 import json
 import urllib.request
 
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, abort, request, jsonify
+from infrastructure.paths import is_cloud_managed_runtime
 
 from infrastructure import credential_store, gpu_connections, gpu_detect, ssh_tunnel_manager
 
 log = logging.getLogger(__name__)
 
 bp = Blueprint("gpu", __name__)
+
+
+@bp.before_request
+def _disable_shared_gpu_config_in_cloud():
+    if is_cloud_managed_runtime():
+        abort(404)
 
 
 def _models_at(base_url: str) -> list[str]:

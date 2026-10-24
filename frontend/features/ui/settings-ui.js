@@ -19,13 +19,13 @@ export function mountSettingsUi() {
 
   const { h, render, Fragment, reactive } = Vue;
 
-  const COMMON_ICON = "/static/Images/icon.png";
-  const BUILTIN_META = {
-    deepseek:   { label: "DeepSeek",         icon: COMMON_ICON },
-    openai:     { label: "OpenAI / ChatGPT", icon: COMMON_ICON },
-    atlascloud: { label: "AtlasCloud",       icon: COMMON_ICON },
-    ollama:     { label: "Ollama (本地)",     icon: COMMON_ICON, local: true },
-  };
+ const COMMON_ICON = "/static/Images/icon.png";
+ const BUILTIN_META = {
+    deepseek:   { label: "DeepSeek",         color: "#4D6BFE" },
+    openai:     { label: "OpenAI / ChatGPT", color: "#10A37F" },
+    atlascloud: { label: "AtlasCloud",       color: "#6366F1" },
+    ollama:     { label: "Ollama (本地)",     local: true, color: "#7C3AED" },
+ };
   // 内置提供商排序：Ollama 作为本地模型放在最后，与普通在线提供商区分开。
   const BUILTIN_ORDER = ["deepseek", "openai", "atlascloud", "ollama"];
 
@@ -112,24 +112,28 @@ export function mountSettingsUi() {
   }
 
   // ── provider 卡片 ──────────────────────────────────────────────
-  function _renderProviderCard(p) {
-    const isBusy = !!p.busy;
-    const isExpanded = !!p.expanded;
-    const header = h("div", {
-      class: "provider-head",
-      onClick: () => {
-        p.expanded = !isExpanded;
-        _renderProviders();
-      },
-    }, [
-      h("img", { class: "provider-icon", src: p.icon, alt: p.label }),
-      h("span", { class: "provider-name" }, p.label),
-      h("span", {
-        class: `provider-status ${p.hasKey ? "set" : "unset"}`,
-      }, p.hasKey ? t('settings.configured') : t('settings.not_configured')),
+ function _renderProviderCard(p) {
+   const isBusy = !!p.busy;
+   const isExpanded = !!p.expanded;
+    const meta = BUILTIN_META[p.key] || {};
+    const avatarColor = meta.color || "var(--color-primary)";
+    const firstLetter = (p.label || p.key || "?").charAt(0);
+   const header = h("div", {
+     class: "provider-head",
+     onClick: () => {
+       p.expanded = !isExpanded;
+       _renderProviders();
+     },
+   }, [
+      h("div", { class: "provider-avatar", style: `--avatar-color: ${avatarColor}` },
+        meta.icon ? h("img", { src: meta.icon, alt: p.label, class: "provider-logo" }) : firstLetter),
+     h("span", { class: "provider-name" }, p.label),
+     h("span", {
+       class: `provider-status ${p.hasKey ? "set" : "unset"}`,
+     }, p.hasKey ? t('settings.configured') : t('settings.not_configured')),
       h("span", { class: `provider-toggle ${isExpanded ? "open" : ""}` },
-        isExpanded ? "\u25BE" : "\u25B8"),  /* ▾ / ▸ */
-    ]);
+        h("svg", { viewBox: "0 0 24 24" }, [h("polyline", { points: "6 9 12 15 18 9" })])),
+   ]);
 
     if (!isExpanded) {
       return h("div", { class: "provider-card collapsed", key: p.key }, [
@@ -140,98 +144,76 @@ export function mountSettingsUi() {
 
     return h("div", { class: "provider-card", key: p.key }, [
       header,
-      h("div", { class: "provider-fields" }, [
-        (() => {
-          const isLocal = !!(BUILTIN_META[p.key] && BUILTIN_META[p.key].local)
-                        || _isLocalUrl(p.fields.baseUrl);
-          return _pfRow(t('settings.api_key'),
-            h("input", {
-              type: isLocal ? "text" : "password",
-              autocomplete: "off",
-              "data-lpignore": "true",  /* 阻止 LastPass 等密码管理器自动填充 */
-              placeholder: isLocal
-                ? (t('settings.api_key_local_ph') || "本地模型（如 Ollama）无需 API Key，可留空")
-                : t('settings.api_key_ph'),
-              value: p.fields.apiKey,
-              onInput: e => { p.fields.apiKey = e.target.value; },
-            })
-          );
-        })(),
-        _pfRow(t('settings.base_url'),
-          h("input", {
-            type: "text",
-            autocomplete: "off",
-            placeholder: p.defaults.base_url,
-            value: p.fields.baseUrl,
-            onInput: e => { p.fields.baseUrl = e.target.value; },
-          })
-        ),
-        _pfRow(t('settings.model'),
-          h("input", {
-            type: "text",
-            autocomplete: "off",
-            placeholder: p.defaults.model,
-            value: p.fields.model,
-            onInput: e => { p.fields.model = e.target.value; },
-          })
-        ),
-        _pfRow(t('settings.ctx_window'),
-          h("input", {
-            type: "number",
-            autocomplete: "off",
-            placeholder: t('settings.ctx_ph'),
-            value: p.fields.ctx,
-            onInput: e => { p.fields.ctx = e.target.value; },
-          })
-        ),
-        _pfRow(t('settings.max_output'),
-          h("input", {
-            type: "number",
-            autocomplete: "off",
-            placeholder: t('settings.out_ph'),
-            value: p.fields.output,
-            onInput: e => { p.fields.output = e.target.value; },
-          })
-        ),
-        _pfRow("输入价格（可选）",
-          h("input", {
-            type: "number", min: "0", step: "any", inputmode: "decimal",
-            placeholder: "输入价格", value: p.fields.inputPrice,
-            onInput: e => { p.fields.inputPrice = e.target.value; },
-          })
-        ),
-        _pfRow("输出价格（可选）",
-          h("input", {
-            type: "number", min: "0", step: "any", inputmode: "decimal",
-            placeholder: "输出价格", value: p.fields.outputPrice,
-            onInput: e => { p.fields.outputPrice = e.target.value; },
-          })
-        ),
-        h("div", { class: "pf-row pf-row-left" }, [
-          h("label", {
-            style: "display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:#475569;width:auto;flex-shrink:0",
-          }, [
-            h("input", {
-              type: "checkbox",
-              checked: p.fields.think,
-              onChange: e => {
-                p.fields.think = e.target.checked;
-                _renderProviders();
-              },
-            }),
-            t('settings.thinking_label'),
-          ]),
-        ]),
-        p.fields.think ? h("div", { class: "pf-row", style: "align-items:center" }, [
-          h("label", null, t('settings.budget') || "思考预算（tokens）"),
-          h("input", {
-            type: "number", min: "1000", max: "100000", step: "1000",
-            value: p.fields.budget,
-            onInput: e => { p.fields.budget = e.target.value; },
-          }),
-        ]) : null,
-      ]),
-      h("div", { class: "provider-actions" }, [
+     h("div", { class: "provider-fields" }, [
+       _pfGroup("连接配置", [
+         (() => {
+           const isLocal = !!(BUILTIN_META[p.key] && BUILTIN_META[p.key].local)
+                         || _isLocalUrl(p.fields.baseUrl);
+           return _pfField(t('settings.api_key'),
+             h("input", {
+               type: isLocal ? "text" : "password",
+               autocomplete: "off",
+               "data-lpignore": "true",
+               placeholder: isLocal
+                 ? (t('settings.api_key_local_ph') || "本地模型（如 Ollama）无需 API Key，可留空")
+                 : t('settings.api_key_ph'),
+               value: p.fields.apiKey,
+               onInput: e => { p.fields.apiKey = e.target.value; },
+             })
+           );
+         })(),
+         _pfField(t('settings.base_url'),
+           h("input", {
+             type: "text",
+             autocomplete: "off",
+             placeholder: p.defaults.base_url,
+             value: p.fields.baseUrl,
+             onInput: e => { p.fields.baseUrl = e.target.value; },
+           })
+         ),
+         _pfField(t('settings.model'),
+           h("input", {
+             type: "text",
+             autocomplete: "off",
+             placeholder: p.defaults.model,
+             value: p.fields.model,
+             onInput: e => { p.fields.model = e.target.value; },
+           })
+         ),
+       ]),
+       _pfGroup("模型参数", [
+         h("div", { class: "pf-grid-2" }, [
+           _pfField(t('settings.ctx_window'),
+             h("input", { type: "number", autocomplete: "off", placeholder: t('settings.ctx_ph'), value: p.fields.ctx, onInput: e => { p.fields.ctx = e.target.value; } })
+           ),
+           _pfField(t('settings.max_output'),
+             h("input", { type: "number", autocomplete: "off", placeholder: t('settings.out_ph'), value: p.fields.output, onInput: e => { p.fields.output = e.target.value; } })
+           ),
+         ]),
+         h("label", { class: "pf-check-row" }, [
+           h("input", {
+             type: "checkbox",
+             checked: p.fields.think,
+             onChange: e => { p.fields.think = e.target.checked; _renderProviders(); },
+           }),
+           t('settings.thinking_label'),
+         ]),
+         p.fields.think ? _pfField(t('settings.budget') || "思考预算（tokens）",
+           h("input", { type: "number", min: "1000", max: "100000", step: "1000", value: p.fields.budget, onInput: e => { p.fields.budget = e.target.value; } })
+         ) : null,
+       ]),
+       _pfGroup("价格（可选）", [
+         h("div", { class: "pf-grid-2" }, [
+           _pfField("输入价格",
+             h("input", { type: "number", min: "0", step: "any", inputmode: "decimal", placeholder: "（可选）", value: p.fields.inputPrice, onInput: e => { p.fields.inputPrice = e.target.value; } })
+           ),
+           _pfField("输出价格",
+             h("input", { type: "number", min: "0", step: "any", inputmode: "decimal", placeholder: "（可选）", value: p.fields.outputPrice, onInput: e => { p.fields.outputPrice = e.target.value; } })
+           ),
+         ]),
+       ]),
+     ]),
+     h("div", { class: "provider-actions" }, [
         h("button", {
           class: "btn-sm btn-sm-danger",
           disabled: isBusy,
@@ -257,6 +239,17 @@ export function mountSettingsUi() {
     if (hintEl) kids.push(h("div", { class: "pf-hint" }, hintEl));
     return h("div", { class: "pf-row" }, kids);
   }
+
+ function _pfField(labelText, inputEl) {
+   return h("div", { class: "pf-field" }, [h("label", null, labelText), inputEl]);
+ }
+
+   function _pfGroup(labelText, children) {
+     return h("div", { class: "pf-group" }, [
+       h("div", { class: "pf-group-label" }, labelText),
+       ...children,
+     ]);
+   }
 
   // 本地模型 API Key 提示语（label 为 t('settings.local_no_key') 或 fallback）
   function _localKeyHint() {

@@ -2,6 +2,7 @@
 name: ppt
 description: 规划数据分析演示文稿（presentation 幻灯片）
 icon: 🎯
+tags: [mode-business, reporting, export]
 allowedTools: [get_schema, query_data, propose_ppt_outline]
 ---
 # PPT 规划

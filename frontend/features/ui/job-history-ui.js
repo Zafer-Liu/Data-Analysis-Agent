@@ -199,7 +199,7 @@ export function mountJobHistoryUi() {
         title: job.workspace?.path || job.workspaceId,
       }, `📁 ${text("job.workspace", "工作目录")}：${job.workspace?.name || job.workspaceId.slice(0, 8)}`) : null,
       h("div", { class: "job-progress", role: "progressbar", "aria-valuenow": String(progress) }, [
-        h("span", { class: "job-progress-fill", style: { width: `${progress}%` } }),
+        h("span", { class: "job-progress-fill", style: { transform: `scaleX(${progress / 100})` } }),
       ]),
       h("div", { class: "job-card-meta" }, [
         h("span", { class: "job-progress-value" },

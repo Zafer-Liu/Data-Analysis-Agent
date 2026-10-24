@@ -161,30 +161,30 @@ def decide_knowledge_candidate(
     if normalized == "accept":
         from Function.Knowledge.knowledge_base import KnowledgeBase
 
-        kb = KnowledgeBase(workspace_id="", user_id=str(user_id or "local-default"))
         payload = candidate.get("payload") or {}
-        if candidate["candidate_type"] == "metric_sql":
-            record = kb.add_metric(
-                name=str(payload.get("name") or candidate["title"]),
-                definition=str(payload.get("definition") or ""),
-                sql_template=str(payload.get("sql_template") or ""),
-                notes=str(payload.get("notes") or ""),
-                category_id=category_id,
-            )
-            published_ref = {"kind": "metric", "id": record.get("id")}
-        elif candidate["candidate_type"] == "report_template":
-            record = kb.add_note(
-                topic=str(payload.get("topic") or candidate["title"]),
-                content=str(payload.get("content") or ""),
-                tags=str(payload.get("tags") or "workflow"),
-                category_id=category_id,
-            )
-            published_ref = {"kind": "note", "id": record.get("id")}
-        else:
-            raise WorkflowContractError(
-                WorkflowErrorCode.GRAPH_INVALID,
-                f"unsupported knowledge candidate type: {candidate['candidate_type']}",
-            )
+        with KnowledgeBase(workspace_id="", user_id=str(user_id or "local-default")) as kb:
+            if candidate["candidate_type"] == "metric_sql":
+                record = kb.add_metric(
+                    name=str(payload.get("name") or candidate["title"]),
+                    definition=str(payload.get("definition") or ""),
+                    sql_template=str(payload.get("sql_template") or ""),
+                    notes=str(payload.get("notes") or ""),
+                    category_id=category_id,
+                )
+                published_ref = {"kind": "metric", "id": record.get("id")}
+            elif candidate["candidate_type"] == "report_template":
+                record = kb.add_note(
+                    topic=str(payload.get("topic") or candidate["title"]),
+                    content=str(payload.get("content") or ""),
+                    tags=str(payload.get("tags") or "workflow"),
+                    category_id=category_id,
+                )
+                published_ref = {"kind": "note", "id": record.get("id")}
+            else:
+                raise WorkflowContractError(
+                    WorkflowErrorCode.GRAPH_INVALID,
+                    f"unsupported knowledge candidate type: {candidate['candidate_type']}",
+                )
     decided = runtime.run_store.decide_knowledge_candidate(
         candidate_id,
         decision=normalized,

@@ -174,10 +174,14 @@ def generate(
     df.columns = [str(c).strip() for c in df.columns]
 
     # 获取列名
-    x_col = mapping.get("x") or x
-    y_col = mapping.get("y") or y
-    order_col = mapping.get("order") or order
-    size_col = mapping.get("size") or size
+    x_col = mapping.get("x")
+    x_col = x_col if x_col is not None else x
+    y_col = mapping.get("y")
+    y_col = y_col if y_col is not None else y
+    order_col = mapping.get("order")
+    order_col = order_col if order_col is not None else order
+    size_col = mapping.get("size")
+    size_col = size_col if size_col is not None else size
     title = options.get("title", title)
     color_scheme_name = options.get("color_scheme", "mckinsey")
 

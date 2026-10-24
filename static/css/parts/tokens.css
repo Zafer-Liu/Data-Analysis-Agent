@@ -23,13 +23,13 @@
   --color-sidebar-hover:  #2a2e4d;
   --color-sidebar-fg:     #e2e8f0;
   --color-sidebar-fg-mute:#94a3b8;
-  --color-sidebar-fg-dim: #64748b;
-  --color-sidebar-fg-faint:#475569;
+  --color-sidebar-fg-dim: #7e8ca3;
+  --color-sidebar-fg-faint:#7e8ca3;
 
   /* Text */
   --color-text:           #1e293b;
   --color-text-soft:      #475569;
-  --color-text-mute:      #64748b;
+  --color-text-mute:      #5b6b82;
   --color-text-dim:       #94a3b8;
   --color-text-on-primary:#ffffff;
 
@@ -95,6 +95,16 @@
   --fs-2xl: 18px;
   --fs-3xl: 22px;
 
+  /* Typography — one sans voice; mono reserved for code, SQL, data */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI",
+    "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, "SFMono-Regular", "Cascadia Mono",
+    Consolas, "Liberation Mono", monospace;
+
+  /* Display steps (headings, hero, modal titles) — sits above the UI scale */
+  --fs-display: 30px;
+  --fs-title: 24px;
+
   /* Easing */
   --ease-out: cubic-bezier(.2, .8, .2, 1);
   --t-fast: .12s var(--ease-out);
@@ -131,14 +141,14 @@
   --color-sidebar-hover:  #2a2f4d;
   --color-sidebar-fg:     #e2e8f0;
   --color-sidebar-fg-mute:#94a3b8;
-  --color-sidebar-fg-dim: #64748b;
-  --color-sidebar-fg-faint:#4b536b;
+  --color-sidebar-fg-dim: #7e8ca3;
+  --color-sidebar-fg-faint:#7e8ca3;
 
   /* Text */
   --color-text:           #e6e8f0;
   --color-text-soft:      #c2c8d6;
   --color-text-mute:      #97a0b3;
-  --color-text-dim:       #6b7388;
+  --color-text-dim:       #7e8ca3;
 
   /* Status — softened bg, brightened fg */
   --color-success-soft:   #14301f;
@@ -213,11 +223,41 @@ html, body, .sidebar, .main, .chat-header, .input-area,
 
 /* ── Reset & base ─────────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-html, body { height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
-  "PingFang SC", "Microsoft YaHei", sans-serif;
+html, body { height: 100%; font-family: var(--font-sans);
   background: var(--color-bg); color: var(--color-text);
   -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
 
+/* Numeric data stays aligned in columns */
+.preview-table td, .preview-table th, .kb-metric,
+table td, table th { font-variant-numeric: tabular-nums; }
+
 /* Focus ring for keyboard users */
 :focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; border-radius: var(--radius-sm); }
+
+/* ── Browser surfaces the design owns ─────────────────────────── */
+::selection { background: var(--color-primary); color: #fff; }
+[data-theme="dark"] ::selection { background: var(--color-primary-tint); color: #fff; }
+input, textarea, [contenteditable="true"] { caret-color: var(--color-primary); }
+
+/* Global slim scrollbar, painted from the palette */
+* { scrollbar-width: thin; scrollbar-color: var(--color-border) transparent; }
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: var(--radius-pill);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover { background: var(--color-text-dim); background-clip: padding-box; }
+
+/* Respect the OS preference — motion conveys state, never decorates */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
 

@@ -10,15 +10,16 @@ from flask import Blueprint, request, jsonify
 
 from .state import session_manager, config_manager, require_session_ownership
 from data.connector import ExcelDataSource, CSVDataSource
+from data.session import DISCOVERED_TOOL_TTL_TURNS, MAX_ACTIVE_DISCOVERED_TOOLS
 from agent.reasoning import split_reasoning_tags
 from infrastructure.artifact_lifecycle import register_session_file, soft_delete_session_group
-from infrastructure.paths import data_path
+from infrastructure.paths import content_data_path
 
 log = logging.getLogger(__name__)
 
 bp = Blueprint("saved_sessions", __name__)
 
-SAVE_DIR = data_path("outputs", "Session")
+SAVE_DIR = content_data_path("outputs", "Session")
 
 SAVE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -154,7 +155,12 @@ def _recovery_state(sess) -> dict:
             item for item in sess.list_sources() if item.get("active")
         ],
         "turn_activations": list(getattr(sess, "turn_activations", []))[-100:],
-        "discovered_tools": list(getattr(sess, "discovered_tools", []))[-100:],
+        "discovered_tools": list(getattr(sess, "discovered_tools", []))[
+            -MAX_ACTIVE_DISCOVERED_TOOLS:
+        ],
+        "discovered_tool_turns": list(
+            getattr(sess, "discovered_tool_turns", [])
+        )[-DISCOVERED_TOOL_TTL_TURNS:],
         "discovered_mcp_tools": list(
             getattr(sess, "discovered_mcp_tools", [])
         )[-10:],
@@ -177,6 +183,11 @@ def _recovery_state(sess) -> dict:
 
 def sync_autosave_after_rewind(sess) -> None:
     """Replace stale future autosave content after conversation time travel."""
+    if _is_cloud():
+        # Managed Web conversations are persisted by the browser (IndexedDB),
+        # never into the Railway volume. The next frontend autosave refreshes
+        # the browser-local snapshot.
+        return
     save_dir = _scoped_save_dir()
     path = save_dir / f"autosave_{sess.session_id}.json"
     if not sess.history:
@@ -262,7 +273,171 @@ def _session_file(filename: str) -> Path:
 
 @bp.get("/api/saved-sessions")
 def list_sessions():
+    if _is_cloud():
+        return jsonify([])
     return jsonify(_list_files())
+
+
+def _browser_snapshot_payload(sess, sid: str, name: str = "", *, autosave: bool = False) -> dict:
+    saved_at = datetime.now().isoformat(timespec="seconds")
+    data_source = _ds_info(sess)
+    if _is_cloud() and data_source:
+        # Do not persist an internal transient server path into IndexedDB.
+        data_source = {
+            "display_name": data_source.get("display_name", ""),
+            "ds_type": data_source.get("ds_type", ""),
+        }
+    return {
+        "name": name.strip() or (f"自动保存_{saved_at.replace('T', ' ')}" if autosave else datetime.now().strftime("对话_%Y%m%d_%H%M%S")),
+        "saved_at": saved_at,
+        "autosave": autosave,
+        "session_id": sid,
+        "model_provider": sess.model_provider,
+        "history": sess.history,
+        "total_input_tokens": sess.total_input_tokens,
+        "total_output_tokens": sess.total_output_tokens,
+        "data_source": data_source,
+        "workspace": None if _is_cloud() else _workspace_info(sid),
+        "recovery_state": _recovery_state(sess),
+    }
+
+
+def _restore_discovered_tool_state(sess, recovery: dict) -> None:
+    """Restore the three-turn discovery window with legacy-list fallback."""
+    legacy = [
+        str(item) for item in recovery.get("discovered_tools", [])
+        if str(item or "").strip()
+    ][-MAX_ACTIVE_DISCOVERED_TOOLS:]
+    raw_turns = recovery.get("discovered_tool_turns", [])
+    turns = [
+        [str(name) for name in turn if str(name or "").strip()]
+        for turn in raw_turns[-DISCOVERED_TOOL_TTL_TURNS:]
+        if isinstance(turn, list)
+    ]
+    sess.discovered_tool_turns = turns or ([legacy] if legacy else [])
+    active: list[str] = []
+    for turn in sess.discovered_tool_turns:
+        for name in turn:
+            if name in active:
+                active.remove(name)
+            active.append(name)
+    sess.discovered_tools = active[-MAX_ACTIVE_DISCOVERED_TOOLS:]
+
+
+@bp.post("/api/session/<sid>/snapshot")
+@require_session_ownership
+def snapshot_session(sid: str):
+    """Return a no-store snapshot for browser-local persistence."""
+    sess = session_manager.get(sid)
+    if not sess:
+        return jsonify({"error": "会话不存在"}), 404
+    if not sess.history:
+        return jsonify({"error": "对话为空，无需保存"}), 400
+    body = request.get_json(silent=True) or {}
+    payload = _browser_snapshot_payload(
+        sess, sid, str(body.get("name") or ""), autosave=bool(body.get("autosave")),
+    )
+    response = jsonify({"ok": True, "payload": payload})
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@bp.post("/api/session/<sid>/restore-local")
+@require_session_ownership
+def restore_local_session(sid: str):
+    """Restore a browser-owned conversation into server memory only."""
+    if request.content_length and request.content_length > 20 * 1024 * 1024:
+        return jsonify({"error": "本地对话快照过大，无法恢复"}), 413
+    body = request.get_json(silent=True) or {}
+    payload = body.get("payload")
+    if not isinstance(payload, dict) or not isinstance(payload.get("history"), list):
+        return jsonify({"error": "本地对话快照格式无效"}), 400
+    if len(payload["history"]) > 5000:
+        return jsonify({"error": "本地对话消息数量超过恢复上限"}), 400
+    if any(not isinstance(message, dict) for message in payload["history"]):
+        return jsonify({"error": "本地对话消息格式无效"}), 400
+    recovery = payload.get("recovery_state") or {}
+    if not isinstance(recovery, dict):
+        return jsonify({"error": "本地对话恢复状态格式无效"}), 400
+
+    def _safe_token_count(value) -> int:
+        try:
+            return min(2_000_000_000, max(0, int(value or 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    sess = session_manager.get_or_create(sid)
+    if _is_cloud():
+        from .auth import current_user
+        auth_user = current_user()
+        if not auth_user:
+            return jsonify({"error": "请先登录"}), 401
+        sess.owner_user_id = auth_user["id"]
+
+    sess.close_sources()
+    try:
+        from data.workspace import workspace_manager
+        workspace_manager.unmount(sid)
+    except Exception:
+        log.debug("[session] local restore workspace unmount skipped sid=%s", sid)
+
+    sess.history = _normalize_reasoning_history(payload.get("history", []))
+    sess.history, dropped_msgs = _repair_message_chain(sess.history)
+    sess.total_input_tokens = _safe_token_count(payload.get("total_input_tokens"))
+    sess.total_output_tokens = _safe_token_count(payload.get("total_output_tokens"))
+    sess.last_prompt_tokens = 0
+    sess.chart_ids = _collect_chart_ids(sess.history)
+    sess.last_reasoning = next(
+        (m.get("reasoning", "") for m in reversed(sess.history)
+         if isinstance(m, dict) and m.get("role") == "assistant" and m.get("reasoning")),
+        "",
+    )
+    sess.usage_breakdowns = [
+        item for item in recovery.get("usage_breakdowns", []) if isinstance(item, dict)
+    ][-100:]
+    sess.total_cached_input_tokens = _safe_token_count(recovery.get("total_cached_input_tokens"))
+    sess.total_cache_write_tokens = _safe_token_count(recovery.get("total_cache_write_tokens"))
+    sess.recent_sql = [str(item)[:4000] for item in recovery.get("recent_sql", [])][-5:]
+    sess.recent_artifacts = []
+    sess.turn_activations = []
+    _restore_discovered_tool_state(sess, recovery)
+    sess.discovered_mcp_tools = [
+        str(item) for item in recovery.get("discovered_mcp_tools", [])
+        if str(item).startswith("mcp__")
+    ][-10:]
+    sess.mcp_tool_last_used = {}
+    sess.mcp_catalog_version = ""
+    sess.compaction_state = {
+        "consecutive_failures": 0,
+        "last_failure_type": "",
+        "circuit_open": False,
+        "last_attempt_at": 0.0,
+        "last_success_at": 0.0,
+    }
+    if not body.get("keep_provider"):
+        sess.model_provider = str(payload.get("model_provider") or "")
+
+    log.info(
+        "[session] restored browser-local snapshot sid=%s msg_count=%d repaired=%d",
+        sid, _visible_msg_count(sess.history), dropped_msgs,
+    )
+    response = jsonify({
+        "ok": True,
+        "name": str(payload.get("name") or ""),
+        "history": sess.history,
+        "model_provider": sess.model_provider,
+        "saved_provider": str(payload.get("model_provider") or ""),
+        "total_input": sess.total_input_tokens,
+        "total_output": sess.total_output_tokens,
+        "ds_connected": False,
+        "ds_name": str((payload.get("data_source") or {}).get("display_name") or ""),
+        "ds_lost": bool(payload.get("data_source")),
+        "workspace_restored": False,
+        "workspace_lost": False,
+        "workspace_identity_mismatch": False,
+    })
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @bp.post("/api/session/<sid>/autosave")
@@ -274,6 +449,8 @@ def autosave_session(sid: str):
     and uses a fixed filename so old autosaves are replaced rather than
     accumulated.
     """
+    if _is_cloud():
+        return jsonify({"ok": False, "reason": "browser_local_required", "local_only": True})
     sess = session_manager.get(sid)
     if not sess or not sess.history:
         return jsonify({"ok": False, "reason": "empty"})
@@ -322,6 +499,8 @@ def autosave_session(sid: str):
 @require_session_ownership
 def get_autosave(sid: str):
     """Check whether an autosave exists for this session."""
+    if _is_cloud():
+        return jsonify({"exists": False, "local_only": True})
     save_dir = _scoped_save_dir()
     path = save_dir / f"autosave_{sid}.json"
     if not path.exists():
@@ -341,6 +520,8 @@ def get_autosave(sid: str):
 @bp.post("/api/session/<sid>/save")
 @require_session_ownership
 def save_session(sid: str):
+    if _is_cloud():
+        return jsonify({"error": "网页版对话仅保存在当前浏览器，请刷新页面后重试", "local_only": True}), 409
     sess = session_manager.get(sid)
     if not sess:
         log.warning("[session] save  sid=%s  error=session not found", sid)
@@ -380,6 +561,8 @@ def save_session(sid: str):
 @bp.post("/api/session/<sid>/load")
 @require_session_ownership
 def load_session(sid: str):
+    if _is_cloud():
+        return jsonify({"error": "网页版对话应从当前浏览器恢复", "local_only": True}), 409
     filename = (request.json or {}).get("filename", "").strip()
     if not filename:
         return jsonify({"error": "未指定文件名"}), 400
@@ -452,10 +635,7 @@ def load_session(sid: str):
         dict(item) for item in recovery.get("turn_activations", [])[-100:]
         if isinstance(item, dict)
     ]
-    sess.discovered_tools = [
-        str(item) for item in recovery.get("discovered_tools", [])[-100:]
-        if str(item or "").strip()
-    ]
+    _restore_discovered_tool_state(sess, recovery)
     sess.discovered_mcp_tools = [
         str(item) for item in recovery.get("discovered_mcp_tools", [])
         if str(item).startswith("mcp__")
@@ -546,6 +726,8 @@ def load_session(sid: str):
 @bp.patch("/api/saved-sessions/<filename>")
 def rename_session(filename: str):
     """Rename a saved conversation by updating its display name in metadata."""
+    if _is_cloud():
+        return jsonify({"error": "网页版对话应在当前浏览器中重命名", "local_only": True}), 409
     path = _session_file(filename)
     if not path.exists() or path.suffix != ".json":
         return jsonify({"error": "文件不存在"}), 404
@@ -568,6 +750,8 @@ def rename_session(filename: str):
 
 @bp.delete("/api/saved-sessions/<filename>")
 def delete_session(filename: str):
+    if _is_cloud():
+        return jsonify({"error": "网页版对话应从当前浏览器删除", "local_only": True}), 409
     path = _session_file(filename)
     if not path.exists() or path.suffix != ".json":
         return jsonify({"error": "文件不存在"}), 404

@@ -2,10 +2,10 @@
 """
 Chart selector — registry-backed chart recommendation.
 
-All chart metadata is embedded directly from registry.py so this module
-works without any runtime path dependency.  The scoring engine uses the
-full desc / data_format / constraints text from each ChartMetadata entry,
-plus a keyword boost table derived from the actual registry content.
+Chart metadata lives in the _CHARTS snapshot embedded below; every chart_id must
+match a charts/<chart_id>/chart.py module directory under Function/Charts_generation.
+The scoring engine uses the full desc / data_format / constraints text from each
+entry, plus a keyword boost table derived from the actual chart modules.
 
 Public API
 ----------
@@ -21,9 +21,13 @@ from typing import List, Dict, Any, Optional
 
 
 # ── Embedded registry snapshot ────────────────────────────────────────────────
-# Mirrors charts/registry.py exactly.  Update both files when adding charts.
-# Fields kept: chart_id, name, category, min_fields, required_roles,
-#              optional_roles, data_format, constraints, desc, supports_time
+# Every chart_id must match a charts/<chart_id>/chart.py module directory exactly
+# (that directory name is what chart_generate imports at render time).
+# tests/test_registry_sync.py fails when modules and this snapshot drift apart, or
+# when documented chart counts go stale — update the entry in the same change
+# that adds/removes a chart module.
+# Fields: chart_id, name, category, required_roles, optional_roles,
+#         data_format, constraints, desc
 
 _CHARTS: List[Dict[str, Any]] = [
     # ── 对比类 COMPARING ─────────────────────────────────────────────────────
@@ -43,7 +47,7 @@ _CHARTS: List[Dict[str, Any]] = [
     ),
     dict(
         chart_id="Bar_Chart", name="柱状图", category="对比类 COMPARING",
-        required_roles=["x", "y"], optional_roles=["series", "color"],
+        required_roles=["x", "y"], optional_roles=["color"],
         desc="通过矩形高度编码数值，最常用的比较图表",
         data_format="x列(类别) + y列(数值)",
         constraints="数值列≥0，y轴从零开始",
@@ -124,7 +128,7 @@ _CHARTS: List[Dict[str, Any]] = [
     ),
     dict(
         chart_id="Circular_Line_Chart", name="圆形折线图", category="时间趋势类 TIME",
-        required_roles=["x", "y"], optional_roles=["series"],
+        required_roles=["x", "y"], optional_roles=[],
         desc="在极坐标系中展示周期性数据的变化趋势，通过将时间轴映射到圆周，使周期首尾相连，强调数据的循环特性。适合季节性、日周期等场景。",
         data_format="宽格式：第一列为周期标签（如月份、周次），其余列为数值列（可有多列，每列一条折线）",
         constraints="适合周期性时间序列（≥3个周期，建议12-52个）；线条建议2-5条；数据需完整；不适合精确数值比较",
@@ -276,8 +280,8 @@ _CHARTS: List[Dict[str, Any]] = [
     ),
     dict(
         chart_id="Bubble_Plot", name="气泡图", category="关系类 RELATIONSHIP",
-        required_roles=["x", "y"], optional_roles=["size", "color", "x_mid", "y_mid"],
-        desc="气泡图通过气泡的横纵坐标（x/y）、大小（size）、颜色（color）四个维度联动展示数据，适合多维度关系分析、分组聚类和象限战略定位。可通过 x_mid/y_mid 参数叠加象限分界线，用于矩阵式战略分析",
+        required_roles=["x", "y"], optional_roles=["size", "color"],
+        desc="气泡图通过气泡的横纵坐标（x/y）、大小（size）、颜色（color）四个维度联动展示数据，适合多维度关系分析、分组聚类和象限战略定位。可通过 options 里传 x_mid/y_mid 数值叠加象限分界线（注意：是坐标值参数，放在 options 而非 field_mapping），用于矩阵式战略分析",
         data_format="x列(数值) + y列(数值) + [size列(数值)] + [color列(类别)]",
         constraints=(
             "x/y 必须为连续数值，不可为类别列；若未指定 size，默认 40px 中等尺寸；"

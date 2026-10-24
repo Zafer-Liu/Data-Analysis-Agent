@@ -12,10 +12,10 @@ from data.feishu_bot_service import FeishuBotError, _configured_credentials, _te
 
 _OPEN_API = "https://open.feishu.cn/open-apis"
 _TIMEOUT = (3.05, 15)
-_MAX_FIELDS = 50
-_MAX_RECORDS = 500
-_WRITE_BATCH_SIZE = 100
-_MAX_READ_RECORDS = 500
+_MAX_FIELDS = 200
+_MAX_RECORDS = 100000
+_WRITE_BATCH_SIZE = 500
+_MAX_READ_RECORDS = 100000
 _PAGE_SIZE = 100
 
 
@@ -282,11 +282,16 @@ def append_bitable_records(*, bitable: object, table_id: object, records: Iterab
         raise FeishuBitableError("请提供 table_id")
     normalized = _write_records(records)
     access_token = _credentials_and_token()
-    data = _request(
-        "POST", f"/bitable/v1/apps/{app_token}/tables/{resolved_table_id}/records/batch_create", access_token,
-        operation="写入飞书多维表格记录", json={"records": normalized},
-    )
-    created = data.get("records") if isinstance(data.get("records"), list) else []
+    created: list[dict] = []
+    # Feishu caps each batch_create call at 1000 records; submit in safe batches.
+    for start in range(0, len(normalized), _WRITE_BATCH_SIZE):
+        data = _request(
+            "POST", f"/bitable/v1/apps/{app_token}/tables/{resolved_table_id}/records/batch_create", access_token,
+            operation="写入飞书多维表格记录",
+            json={"records": normalized[start:start + _WRITE_BATCH_SIZE]},
+        )
+        batch = data.get("records") if isinstance(data.get("records"), list) else []
+        created.extend(item for item in batch if isinstance(item, dict))
     return {
         "app_token": app_token, "table_id": resolved_table_id,
         "url": _bitable_url(app_token, resolved_table_id),

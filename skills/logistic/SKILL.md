@@ -2,6 +2,7 @@
 name: logistic
 description: 执行二分类或多分类逻辑回归分析（logistic regression 分类）
 icon: 📈
+tags: [mode-business, mode-ml, mode-empirical, modeling, inference]
 allowedTools: [get_schema, query_data, run_analysis, generate_chart]
 ---
 # 逻辑回归

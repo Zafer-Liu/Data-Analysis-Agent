@@ -33,19 +33,19 @@ _DESC = "用圆形扇区表示占比，支持多层级嵌套展示。适合展�
 
 def _auto_col(df: pd.DataFrame, *hints: str) -> Optional[str]:
     """根据提示自动查找匹配的列名。"""
-    strs = [c for c in df.columns if df[c].dtype == object or df[c].dtype == 'str']
+    strs = [c for c in df.columns if (df[c].dtype == object or pd.api.types.is_string_dtype(df[c]))]
     nums = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-    col_lower = {c.lower(): c for c in df.columns}
+    col_lower = {str(c).lower(): c for c in df.columns}
 
     # 1. 精确匹配
     for h in hints:
-        h_lower = h.lower()
+        h_lower = str(h).lower()
         if h_lower in col_lower:
             return col_lower[h_lower]
 
     # 2. 类型匹配
     if hints:
-        hint = hints[0].lower()
+        hint = str(hints[0]).lower()
         if any(kw in hint for kw in ["source", "target", "label", "name", "group", "category", "phase", "row", "col", "path", "text", "word", "location", "geo"]):
             if strs:
                 return strs[0]
@@ -69,9 +69,9 @@ def _auto_col(df: pd.DataFrame, *hints: str) -> Optional[str]:
 
     # 3. 模糊匹配
     for h in hints:
-        h_lower = h.lower()
+        h_lower = str(h).lower()
         for col in df.columns:
-            col_lower_name = col.lower()
+            col_lower_name = str(col).lower()
             if h_lower in col_lower_name or col_lower_name in h_lower:
                 return col
 
@@ -177,13 +177,7 @@ from typing import List, Tuple
 
 
 def _is_text_col(s: pd.Series) -> bool:
-    return s.dtype == object or str(s.dtype) == "string" or str(s.dtype) == "str"
-
-
-def _pick_value_col(df: pd.DataFrame, mapping: Dict[str, str]) -> Optional[str]:
-    if mapping.get("values") in df.columns:
-        return mapping["values"]
-    return _auto_col(df, "values", "value", "销售额", "销量", "amount", "num", "count")
+    return s.dtype == object or pd.api.types.is_string_dtype(s)
 
 
 def _pick_text_cols(df: pd.DataFrame, value_col: str) -> List[str]:
@@ -385,58 +379,129 @@ def generate(
     color_scheme = get_color_scheme(color_scheme_name)
     marker_colors = color_scheme.get("colors", ["#003D7A", "#0084D1", "#00A4EF"])
 
-    # 完全忽略 mapping
-    warnings.append("已忽略 mapping，按列顺序自动识别层级")
+    # 调度器 _auto_detect_mapping 对 sunburst 设 labels/parents/values
+    # （扁平层级格式：每行一个节点）。模块此前完全忽略 mapping，只支持
+    # 多文本列作为层级的宽格式。这里补齐对 mapping 的支持：
+    #   - 若 labels + parents 列都在 df 中 → 走扁平层级路径
+    #   - 否则 → 走多层级列推断路径（原逻辑），但尊重 mapping.values
+    map_labels = mapping.get("labels")
+    map_labels = map_labels if map_labels is not None else mapping.get("label")
+    map_parents = mapping.get("parents")
+    map_parents = map_parents if map_parents is not None else mapping.get("parent")
+    map_values = mapping.get("values")
+    map_values = map_values if map_values is not None else mapping.get("value")
 
-    values_col = _pick_value_col(df)
-    if values_col is None:
-        return ChartResult(warnings=["找不到数值列（最后一列或最后一个数值列）"])
+    flat_hierarchy = (
+        isinstance(map_labels, str) and map_labels in df.columns
+        and isinstance(map_parents, str) and map_parents in df.columns
+    )
 
-    work_df = df.copy()
-    work_df[values_col] = pd.to_numeric(work_df[values_col], errors="coerce")
-    invalid_n = int(work_df[values_col].isna().sum())
-    if invalid_n > 0:
-        warnings.append(f"警告：{values_col} 列有 {invalid_n} 行无法转为数值，已忽略")
-    work_df = work_df[work_df[values_col].notna() & (work_df[values_col] > 0)].copy()
+    if flat_hierarchy:
+        # ── 扁平层级格式：labels + parents + values 每行一个节点 ──
+        lbl_col, par_col = map_labels, map_parents
+        val_col = map_values if (isinstance(map_values, str) and map_values in df.columns) else None
+        if val_col is None:
+            # 回退：取最后一个数值列
+            num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+            val_col = num_cols[-1] if num_cols else None
+        if val_col is None:
+            return ChartResult(warnings=["找不到数值列 (values)"])
 
-    if work_df.empty:
-        return ChartResult(warnings=[f"错误：{values_col} 列无有效数据（需为正数）"])
+        work_df = df.copy()
+        work_df[lbl_col] = work_df[lbl_col].astype(str).str.strip()
+        work_df[par_col] = work_df[par_col].fillna("").astype(str).str.strip()
+        work_df[val_col] = pd.to_numeric(work_df[val_col], errors="coerce")
+        invalid_n = int(work_df[val_col].isna().sum())
+        if invalid_n > 0:
+            warnings.append(f"警告：{val_col} 列有 {invalid_n} 行无法转为数值，已忽略")
 
-    # 除 values 外，按列顺序取文本列作为层��列
-    level_cols = [c for c in work_df.columns if c != values_col and _is_text_col(work_df[c])]
+        # 零/负值叶节点会被丢弃（sunburst 要求正数），需明确警告
+        nonpos_n = int((work_df[val_col] <= 0).sum())
+        if nonpos_n > 0:
+            warnings.append(f"警告：{val_col} 列有 {nonpos_n} 行 ≤0，已忽略（旭日图需正数）")
+        work_df = work_df[work_df[val_col].notna() & (work_df[val_col] > 0)].copy()
 
-    if not level_cols:
-        return ChartResult(warnings=["找不到可用于层级的文本列"])
+        if work_df.empty:
+            return ChartResult(warnings=[f"错误：{val_col} 列无有效数据（需为正数）"])
 
-    # 只取前3层（可按需改成更多）
-    level_cols = level_cols[:3]
+        # 空字符串 parent 视为根节点
+        ids = work_df[lbl_col].astype(str).tolist()
+        labels = ids[:]
+        parents = [p if p != "" else "" for p in work_df[par_col].astype(str).tolist()]
+        values = work_df[val_col].astype(float).tolist()
+        level_cols = [lbl_col, par_col]
+        values_col = val_col
 
-    ids, labels, parents, values = _build_tree(work_df, level_cols, values_col)
-    if not ids:
-        return ChartResult(warnings=["错误：构建 sunburst 树失败（无有效节点）"])
+        warnings.append(f"使用扁平层级映射：labels={lbl_col}, parents={par_col}, values={val_col}")
+    else:
+        # ── 多层级列推断格式（原逻辑）──
+        # 尊重 mapping.values（若有），否则取最后一列/最后数值列
+        if isinstance(map_values, str) and map_values in df.columns:
+            values_col = map_values
+        else:
+            last_col = df.columns[-1]
+            if pd.api.types.is_numeric_dtype(df[last_col]):
+                values_col = last_col
+            else:
+                num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+                values_col = num_cols[-1] if num_cols else None
+
+        if values_col is None:
+            return ChartResult(warnings=["找不到数值列（最后一列或最后一个数值列）"])
+
+        work_df = df.copy()
+        work_df[values_col] = pd.to_numeric(work_df[values_col], errors="coerce")
+        invalid_n = int(work_df[values_col].isna().sum())
+        if invalid_n > 0:
+            warnings.append(f"警告：{values_col} 列有 {invalid_n} 行无法转为数值，已忽略")
+        nonpos_n = int((work_df[values_col] <= 0).sum())
+        if nonpos_n > 0:
+            warnings.append(f"警告：{values_col} 列有 {nonpos_n} 行 ≤0，已忽略（旭日图需正数）")
+        work_df = work_df[work_df[values_col].notna() & (work_df[values_col] > 0)].copy()
+
+        if work_df.empty:
+            return ChartResult(warnings=[f"错误：{values_col} 列无有效数据（需为正数）"])
+
+        # 除 values 外，按列顺序取文本列作为层级列
+        level_cols = [c for c in work_df.columns if c != values_col and _is_text_col(work_df[c])]
+
+        if not level_cols:
+            return ChartResult(warnings=["找不到可用于层级的文本列"])
+
+        # 只取前3层
+        level_cols = level_cols[:3]
+
+        ids, labels, parents, values = _build_tree(work_df, level_cols, values_col)
+        if not ids:
+            return ChartResult(warnings=["错误：构建 sunburst 树失败（无有效节点）"])
+        warnings.append(f"按列顺序自动识别层级：{level_cols}")
 
     colors = (marker_colors * (len(labels) // len(marker_colors) + 1))[:len(labels)]
 
-    # 构建 hovertemplate，显示层级路径和数值
-    hover_parts = []
-    for col in level_cols:
-        hover_parts.append(f"{col}=%{{customdata[{len(hover_parts)}]}}")
-    hover_parts.append(f"{values_col}=%{{value}}")
-    hovertemplate = "<br>".join(hover_parts) + "<extra></extra>"
-
-    # 构建 customdata，存储每个节点的完整路径信息
+    # 构建 hovertemplate，显示层级路径和数值。
+    # 扁平层级路径的 level_cols=[lbl,par] 与多层级路径语义不同，分别构造。
     customdata = []
-    for node_id in ids:
-        # 从 id 中解析出层级信息
-        parts = node_id.split("|")
-        level_values = []
-        for part in parts:
-            if "=" in part:
-                level_values.append(part.split("=", 1)[1])
-        # 补齐到 level_cols 的长度
-        while len(level_values) < len(level_cols):
-            level_values.append("")
-        customdata.append(level_values)
+    if flat_hierarchy:
+        # 扁平层级：customdata 存 [自身label, parent]
+        for i, nid in enumerate(ids):
+            customdata.append([labels[i], parents[i]])
+        hovertemplate = f"{lbl_col}=%{{customdata[0]}}<br>{par_col}=%{{customdata[1]}}<br>{values_col}=%{{value}}<extra></extra>"
+    else:
+        # 多层级路径：从 k=v|k=v 形式的 id 解析各层值
+        for node_id in ids:
+            parts = node_id.split("|")
+            level_values = []
+            for part in parts:
+                if "=" in part:
+                    level_values.append(part.split("=", 1)[1])
+            while len(level_values) < len(level_cols):
+                level_values.append("")
+            customdata.append(level_values)
+        hover_parts = []
+        for col in level_cols:
+            hover_parts.append(f"{col}=%{{customdata[{len(hover_parts)}]}}")
+        hover_parts.append(f"{values_col}=%{{value}}")
+        hovertemplate = "<br>".join(hover_parts) + "<extra></extra>"
 
     trace_data = {
         "type": "sunburst",

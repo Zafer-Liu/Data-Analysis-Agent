@@ -11,6 +11,9 @@ from typing import List, Dict, Any, Optional, TYPE_CHECKING
 
 log = logging.getLogger(__name__)
 
+DISCOVERED_TOOL_TTL_TURNS = 3
+MAX_ACTIVE_DISCOVERED_TOOLS = 20
+
 if TYPE_CHECKING:
     from agent.jobs import JobRunner
     from data.jobs_store import JobsStore
@@ -119,9 +122,11 @@ class ChatSession:
     # Typed activation audit, kept outside LLM message history so provider
     # payloads never receive application-only fields.
     turn_activations: List[Dict[str, Any]] = field(default_factory=list)
-    # D6: low-frequency tools discovered from user language stay available in
-    # this session, while data/workspace guards are still evaluated per turn.
+    # D6: low-frequency built-in tools stay active for the latest three user
+    # turns only. ``discovered_tools`` is the flattened compatibility view;
+    # ``discovered_tool_turns`` retains the turn boundary needed for TTL.
     discovered_tools: List[str] = field(default_factory=list)
+    discovered_tool_turns: List[List[str]] = field(default_factory=list)
     # Phase 2: bounded MCP full-schema discovery cache. Names are ordered from
     # least to most recently discovered/used.
     discovered_mcp_tools: List[str] = field(default_factory=list)
@@ -137,9 +142,9 @@ class ChatSession:
     _usage_lock: threading.RLock = field(
         default_factory=threading.RLock, repr=False, compare=False,
     )
-    # Skill name auto-loaded by the LLM via load_analysis_skill tool.
-    # Persisted across turns so guard/nudge logic works in subsequent turns
-    # (e.g. after ask_user user-reply starts a new turn).
+    # One-shot Skill continuation for headless Feishu ask_user replies. Web and
+    # desktop clients carry current-turn activation in their request payload;
+    # this value must never become a general cross-turn default.
     auto_loaded_skill: str = ""
     # Optional conversation-scoped Feishu bridge.  These fields deliberately
     # contain only a group identifier and display label; application credentials
@@ -510,17 +515,25 @@ class ChatSession:
         from agent.tools.exposure import discover_tool_names_for_query
 
         discovered = sorted(discover_tool_names_for_query(message))
-        if not discovered:
-            return []
-        existing = list(self.discovered_tools or [])
-        seen = set(existing)
-        added = []
-        for tool in discovered:
-            if tool not in seen:
-                existing.append(tool)
-                seen.add(tool)
-                added.append(tool)
-        self.discovered_tools = existing[-100:]
+        previous = set(self.discovered_tools or [])
+        turns = [
+            [str(name) for name in turn if str(name)]
+            for turn in list(self.discovered_tool_turns or [])[-(DISCOVERED_TOOL_TTL_TURNS - 1):]
+            if isinstance(turn, list)
+        ]
+        turns.append(discovered)
+        self.discovered_tool_turns = turns[-DISCOVERED_TOOL_TTL_TURNS:]
+
+        # Least-recent to most-recent LRU order. Rediscovery moves a tool to
+        # the end, so the global visibility cap can prefer fresh intent.
+        active: List[str] = []
+        for turn in self.discovered_tool_turns:
+            for tool in turn:
+                if tool in active:
+                    active.remove(tool)
+                active.append(tool)
+        self.discovered_tools = active[-MAX_ACTIVE_DISCOVERED_TOOLS:]
+        added = [tool for tool in discovered if tool not in previous]
         return added
 
     def record_discovered_mcp_tools(
@@ -664,6 +677,7 @@ class ChatSession:
         self.recent_artifacts.clear()
         self.turn_activations.clear()
         self.discovered_tools.clear()
+        self.discovered_tool_turns.clear()
         self.discovered_mcp_tools.clear()
         self.mcp_tool_last_used.clear()
         self.mcp_catalog_version = ""
@@ -687,6 +701,7 @@ class ChatSession:
             "recent_artifacts": self.recent_artifacts,
             "turn_activations": self.turn_activations,
             "discovered_tools": self.discovered_tools,
+            "discovered_tool_turns": self.discovered_tool_turns,
             "discovered_mcp_tools": self.discovered_mcp_tools,
             "mcp_tool_last_used": self.mcp_tool_last_used,
             "mcp_catalog_version": self.mcp_catalog_version,
@@ -723,7 +738,28 @@ class ChatSession:
         self.recent_sql = copy.deepcopy(list(state.get("recent_sql") or []))[-5:]
         self.recent_artifacts = copy.deepcopy(list(state.get("recent_artifacts") or []))[-20:]
         self.turn_activations = copy.deepcopy(list(state.get("turn_activations") or []))[-100:]
-        self.discovered_tools = copy.deepcopy(list(state.get("discovered_tools") or []))[-100:]
+        raw_turns = copy.deepcopy(list(state.get("discovered_tool_turns") or []))
+        if raw_turns:
+            self.discovered_tool_turns = [
+                [str(name) for name in turn if str(name)]
+                for turn in raw_turns[-DISCOVERED_TOOL_TTL_TURNS:]
+                if isinstance(turn, list)
+            ]
+        else:
+            legacy = [
+                str(name) for name in list(state.get("discovered_tools") or [])
+                if str(name)
+            ]
+            self.discovered_tool_turns = [
+                legacy[-MAX_ACTIVE_DISCOVERED_TOOLS:]
+            ] if legacy else []
+        self.discovered_tools = []
+        for turn in self.discovered_tool_turns:
+            for name in turn:
+                if name in self.discovered_tools:
+                    self.discovered_tools.remove(name)
+                self.discovered_tools.append(name)
+        self.discovered_tools = self.discovered_tools[-MAX_ACTIVE_DISCOVERED_TOOLS:]
         self.discovered_mcp_tools = copy.deepcopy(
             list(state.get("discovered_mcp_tools") or [])
         )[-10:]

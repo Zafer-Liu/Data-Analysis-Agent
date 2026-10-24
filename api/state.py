@@ -1,4 +1,5 @@
 """Shared singletons — import from here, never instantiate elsewhere."""
+import json
 import logging
 import os
 from pathlib import Path
@@ -13,7 +14,7 @@ from LLM.llm_config_manager import get_config_manager
 from LLM.mcp_config_manager import get_mcp_config_manager
 from data.datasource_config_manager import get_datasource_config_manager
 from data.workspace import workspace_manager
-from infrastructure.paths import data_path
+from infrastructure.paths import content_data_path
 
 
 class _ChartStore:
@@ -42,6 +43,24 @@ class _ChartStore:
         p = self._dir / f"{cid}.html"
         return p.read_text(encoding="utf-8") if p.exists() else default
 
+    # ── spec 边车：{cid}.spec.json 记录可复现的生成参数 ────────────────────
+    # 与 HTML 同目录同前缀。PNG 导出从这里取默认尺寸，图表迭代/审计从这里
+    # 读 chart_type/sql/field_mapping/options，不必重新推断。
+
+    def save_spec(self, cid: str, spec: dict) -> None:
+        (self._dir / f"{cid}.spec.json").write_text(
+            json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+    def get_spec(self, cid: str) -> dict | None:
+        p = self._dir / f"{cid}.spec.json"
+        if not p.exists():
+            return None
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+
 
 def _resolve_writable_dir(preferred: Path) -> Path:
     """Return *preferred* if writable, otherwise fall back to /tmp equivalent.
@@ -63,7 +82,7 @@ def _resolve_writable_dir(preferred: Path) -> Path:
         return fallback
 
 
-_CHARTS_DIR = _resolve_writable_dir(data_path("outputs", "charts"))
+_CHARTS_DIR = _resolve_writable_dir(content_data_path("outputs", "charts"))
 
 session_manager: SessionManager = SessionManager()
 config_manager = get_config_manager()
@@ -129,4 +148,22 @@ def require_session_ownership(f):
         if not allowed:
             return jsonify({"error": "无权访问此会话", "code": "forbidden"}), 403
         return f(sid, *args, **kwargs)
+    return wrapper
+
+
+def require_local_runtime_config(f):
+    """Reject user-controlled platform configuration in managed cloud."""
+    from functools import wraps
+    from flask import jsonify
+    from infrastructure.paths import is_cloud_managed_runtime
+
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        if is_cloud_managed_runtime():
+            return jsonify({
+                "error": "云端运行配置由部署环境统一管理",
+                "code": "cloud_config_read_only",
+            }), 403
+        return f(*args, **kwargs)
+
     return wrapper

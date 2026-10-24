@@ -2,6 +2,7 @@
 name: inset
 description: 诊断并处理缺失值（missing value 缺失值处理）
 icon: 🩹
+tags: [mode-business, mode-ml, mode-empirical, data-preparation]
 allowedTools: [get_schema, profile_data, clean_data, query_data]
 ---
 # 缺失值处理

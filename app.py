@@ -114,8 +114,8 @@ except ImportError as e:
 is_vercel = os.environ.get("VERCEL") == "1"
 
 # 日志目录
-from infrastructure.paths import data_path
-log_dir = data_path("outputs", "Log")
+from infrastructure.paths import content_data_path
+log_dir = content_data_path("outputs", "Log")
 os.environ.setdefault("LOG_DIR", str(log_dir))
 
 # 将项目根目录加入 sys.path
@@ -170,7 +170,12 @@ def _serve(app, host: str, port: int):
         _GunicornApp(app, {
             "bind": f"{host}:{port}",
             "workers": int(os.environ.get("BAA_WORKERS", "1")),
-            "worker_class": "sync",
+            # gthread：单 worker 多线程。LLM 流式响应（SSE）耗时长，
+            # sync 单线程会把唯一 worker 卡死导致后续请求全部排队超时；
+            # gthread 保持 workers=1（进程内会话共享不变），同时允许多个
+            # 流式请求并发，慢流不再阻塞其他用户。
+            "worker_class": "gthread",
+            "threads": int(os.environ.get("BAA_THREADS", "8")),
             "timeout": 300,        # SSE 长连接
         }).run()
     else:

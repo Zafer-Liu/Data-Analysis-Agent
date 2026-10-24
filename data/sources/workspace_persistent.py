@@ -28,7 +28,8 @@ import pandas as pd
 
 from ._utils import (
     _clean_identifier, _dedup_columns, _list_tables, _table_schema_str,
-    _preview_table_dict, _query, _register,
+    _preview_table_dict, _query, _register, is_write_sql,
+    snapshot_tables_to_memory,
 )
 from .excel import _excel_engine, _parse_sheets_parallel
 from .base import DataSource
@@ -268,8 +269,34 @@ class WorkspacePersistentSource(DataSource):
         with self._db_lock:
             self._conn = duckdb.connect(str(self._db_path))
             self._conn.execute("PRAGMA threads=4")
+        # A6 内存影子：Agent 写 SQL 首次触达时把全库快照进 :memory:，
+        # 之后所有读写都走影子（副 sheet），磁盘文件零改动。
+        self._shadow_conn: duckdb.DuckDBPyConnection | None = None
+        self._shadow_lock = threading.RLock()
         log.info("[WorkspaceDS] opened persistent duckdb: %s  tables=%s",
                  self._db_path, self.list_tables())
+
+    # ── A6 shadow (副 sheet) support ─────────────────────────────────────────
+
+    def writable_conn(self):
+        """Return the in-memory shadow, building it on first write.
+
+        All write SQL from the agent executes against this snapshot; the
+        on-disk ``workspace.duckdb`` is never modified by agent SQL.
+        """
+        if self._shadow_conn is not None:
+            return self._shadow_conn
+        with self._shadow_lock:
+            if self._shadow_conn is None:
+                with self._db_lock:
+                    self._shadow_conn = snapshot_tables_to_memory(self._conn)
+                log.info("[WorkspaceDS] shadow snapshot built  tables=%s",
+                         self.list_tables())
+        return self._shadow_conn
+
+    def _active_conn(self):
+        """The connection reflecting agent writes: shadow once materialized."""
+        return self._shadow_conn if self._shadow_conn is not None else self._conn
 
     def _register_csv(self, file_path: str, table_name: str) -> bool:
         """注册 CSV 文件到持久化连接。返回是否成功。"""
@@ -283,6 +310,7 @@ class WorkspacePersistentSource(DataSource):
                 )
                 # 清理列名
                 self._clean_columns(table_name)
+            self._invalidate_shadow()
             log.info("[WorkspaceDS] registered CSV %s → %s", file_path, table_name)
             return True
         except Exception as e:
@@ -302,6 +330,7 @@ class WorkspacePersistentSource(DataSource):
                         f'CREATE OR REPLACE TABLE "{table_name}" AS SELECT * FROM _tmp_ws_'
                     )
                     self._conn.unregister("_tmp_ws_")
+                self._invalidate_shadow()
                 return True
             except Exception as e2:
                 log.error("[WorkspaceDS] CSV %s pandas fallback failed: %s", file_path, e2)
@@ -371,36 +400,57 @@ class WorkspacePersistentSource(DataSource):
                         pass
 
         log.info("[WorkspaceDS] registered Excel %s → tables=%s", file_path, registered)
+        if registered:
+            self._invalidate_shadow()
         return registered
 
     def _clean_columns(self, table_name: str):
         """重命名表的列为合法标识符。"""
         _clean_table_columns(self._conn, table_name)
 
+    def _invalidate_shadow(self):
+        """Discard the in-memory snapshot (user imports changed the file DB)."""
+        stale = self._shadow_conn
+        self._shadow_conn = None
+        if stale is not None:
+            try:
+                stale.close()
+            except Exception:
+                pass
+            log.info("[WorkspaceDS] shadow dropped — file DB changed")
+
     # ── DataSource 接口实现 ──────────────────────────────────────────────────
 
     def get_schema(self) -> str:
         parts: List[str] = []
-        with self._db_lock:
+        with self._shadow_or_db_lock():
+            conn = self._active_conn()
             for table in (self.list_tables() or []):
                 try:
-                    rows = self._conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
-                    parts.append(_table_schema_str(self._conn, table, rows))
+                    rows = conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+                    parts.append(_table_schema_str(conn, table, rows))
                 except Exception as e:
                     log.warning("[WorkspaceDS] schema for %s failed: %s", table, e)
         return "\n\n".join(parts) if parts else "No tables in workspace."
 
     def execute_query(self, sql: str) -> Tuple[pd.DataFrame, str]:
+        # A6: agent writes go to the in-memory shadow, never the file DB.
+        if is_write_sql(sql):
+            with self._shadow_lock:
+                return _query(self.writable_conn(), sql)
         with self._db_lock:
-            return _query(self._conn, sql)
+            # Reads also prefer the shadow once it exists, so post-write
+            # SELECTs observe the agent's own modifications.
+            return _query(self._active_conn(), sql)
 
     def get_preview(self) -> List[dict]:
         result = []
-        with self._db_lock:
+        with self._shadow_or_db_lock():
+            conn = self._active_conn()
             for table in self.list_tables():
                 try:
-                    rows = self._conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
-                    info = _preview_table_dict(self._conn, table, table, 0)
+                    rows = conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+                    info = _preview_table_dict(conn, table, table, 0)
                     info["total_rows"] = rows
                     result.append(info)
                 except Exception:
@@ -408,40 +458,67 @@ class WorkspacePersistentSource(DataSource):
         return result
 
     def get_preview_table(self, table_name: str, max_rows: int = 100) -> dict:
-        with self._db_lock:
-            return _preview_table_dict(self._conn, table_name, table_name, max_rows)
+        with self._shadow_or_db_lock():
+            return _preview_table_dict(self._active_conn(), table_name, table_name, max_rows)
 
     def create_analysis_table(self, sql: str, table_name: str = "analysis_data", _df=None) -> str:
         try:
-            with acquire_synchronous_workspace_write_lease(self._db_path, self._lease_owner_id):
-                with self._db_lock:
+            if self._shadow_conn is not None or is_write_sql(sql or ""):
+                # A6: once the shadow is active (agent wrote SQL), derived
+                # tables must live in it too — the file DB never sees agent
+                # writes, and the shadow is the only consistent view.
+                with self._shadow_lock:
+                    conn = self.writable_conn()
                     if _df is not None:
                         temp_name = "_workspace_analysis_frame_"
-                        self._conn.register(temp_name, _df)
+                        conn.register(temp_name, _df)
                         try:
-                            self._conn.execute(
+                            conn.execute(
                                 f'CREATE OR REPLACE TABLE "{table_name}" AS '
                                 f'SELECT * FROM "{temp_name}"'
                             )
                         finally:
-                            self._conn.unregister(temp_name)
+                            conn.unregister(temp_name)
                     else:
-                        self._conn.execute(
+                        conn.execute(
                             f'CREATE OR REPLACE TABLE "{table_name}" AS ({sql})'
                         )
-                    rows = self._conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
+                    rows = conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
+            else:
+                with acquire_synchronous_workspace_write_lease(self._db_path, self._lease_owner_id):
+                    with self._db_lock:
+                        if _df is not None:
+                            temp_name = "_workspace_analysis_frame_"
+                            self._conn.register(temp_name, _df)
+                            try:
+                                self._conn.execute(
+                                    f'CREATE OR REPLACE TABLE "{table_name}" AS '
+                                    f'SELECT * FROM "{temp_name}"'
+                                )
+                            finally:
+                                self._conn.unregister(temp_name)
+                        else:
+                            self._conn.execute(
+                                f'CREATE OR REPLACE TABLE "{table_name}" AS ({sql})'
+                            )
+                        rows = self._conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
             return f"表 '{table_name}' 已创建，共 {rows} 行。"
         except Exception as e:
             return f"创建表失败：{e}"
 
     def list_tables(self) -> List[str]:
-        with self._db_lock:
-            return _list_tables(self._conn)
+        with self._shadow_or_db_lock():
+            return _list_tables(self._active_conn())
 
     def close(self):
         """关闭持久化连接。"""
-        try:
-            with self._db_lock:
-                self._conn.close()
-        except Exception:
-            pass
+        for conn in (self._conn, self._shadow_conn):
+            try:
+                if conn is not None:
+                    conn.close()
+            except Exception:
+                pass
+
+    def _shadow_or_db_lock(self):
+        """Lock guarding whichever connection is currently active."""
+        return self._shadow_lock if self._shadow_conn is not None else self._db_lock

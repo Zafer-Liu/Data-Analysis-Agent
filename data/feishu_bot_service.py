@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 
 import requests
@@ -104,7 +105,7 @@ def _inbound_runtime_state() -> tuple[str, str]:
 
 def get_status() -> FeishuBotStatus:
     config = load_config()
-    has_secret = bool(config["app_secret_ref"])
+    has_secret = bool(config["app_secret_ref"] or os.environ.get("BAA_FEISHU_APP_SECRET"))
     configured = bool(config["app_id"] and has_secret and config["receive_id"])
     inbound_status, inbound_error = _inbound_runtime_state()
     if config["inbound_transport"] == "webhook":
@@ -119,7 +120,10 @@ def get_status() -> FeishuBotStatus:
         app_id=config["app_id"],
         app_id_masked=_masked_value(config["app_id"]),
         app_secret_configured=has_secret,
-        event_verification_token_configured=bool(config["event_verification_token_ref"]),
+        event_verification_token_configured=bool(
+            config["event_verification_token_ref"]
+            or os.environ.get("BAA_FEISHU_EVENT_VERIFICATION_TOKEN")
+        ),
         inbound_transport=config["inbound_transport"],
         receive_id_type=config["receive_id_type"],
         receive_id=config["receive_id"],
@@ -146,6 +150,9 @@ def _configured_credentials(config: dict | None = None) -> tuple[str, str]:
         app_id = validate_app_id(config["app_id"])
     except ValueError as exc:
         raise FeishuBotError("请先保存飞书 App ID") from exc
+    env_secret = str(os.environ.get("BAA_FEISHU_APP_SECRET") or "").strip()
+    if env_secret:
+        return app_id, env_secret
     if not config["app_secret_ref"]:
         raise FeishuBotError("请先保存飞书 App Secret")
     try:
@@ -158,6 +165,9 @@ def _configured_credentials(config: dict | None = None) -> tuple[str, str]:
 def event_verification_token() -> str:
     """Load the event callback verifier only when the public endpoint needs it."""
     config = load_config()
+    env_token = str(os.environ.get("BAA_FEISHU_EVENT_VERIFICATION_TOKEN") or "").strip()
+    if env_token:
+        return env_token
     reference = config["event_verification_token_ref"]
     if not reference:
         raise FeishuBotError("请先在飞书机器人设置中保存事件校验 Token")
@@ -236,38 +246,7 @@ def list_joined_chats() -> list[dict[str, str]]:
     return chats
 
 
-def send_text(
-    text: str,
-    *,
-    receive_id: str | None = None,
-    receive_id_type: str | None = None,
-) -> None:
-    """Post a plain-text message without exposing secrets or response bodies.
-
-    A linked Web conversation supplies its own previously-selected ``chat_id``;
-    the settings-page test continues to use the configured default target.
-    """
-    message = str(text or "").strip()
-    if not message:
-        raise FeishuBotError("发送内容不能为空")
-    if len(message) > 4000:
-        raise FeishuBotError("飞书机器人单条测试消息不能超过 4000 个字符")
-    if receive_id is None:
-        app_id, app_secret, target_type, target_id = _configured_application()
-    else:
-        app_id, app_secret = _configured_credentials()
-        try:
-            target_type, target_id = validate_receive_target(
-                receive_id_type or "chat_id", receive_id,
-            )
-        except ValueError as exc:
-            raise FeishuBotError("飞书会话目标无效，请重新执行 /robot 连接") from exc
-    access_token = _tenant_access_token(app_id, app_secret)
-    payload = {
-        "receive_id": target_id,
-        "msg_type": "text",
-        "content": json.dumps({"text": message}, ensure_ascii=False),
-    }
+def _post_message(access_token: str, target_type: str, target_id: str, payload: dict) -> None:
     try:
         response = requests.post(
             _MESSAGE_URL,
@@ -288,20 +267,109 @@ def send_text(
         raise FeishuBotError("飞书拒绝了该消息，请检查机器人是否已加入目标群以及应用权限")
 
 
+def _resolve_target(receive_id: str | None, receive_id_type: str | None) -> tuple[str, str, str, str]:
+    """Return (app_id, app_secret, target_type, target_id) for a send call."""
+    if receive_id is None:
+        app_id, app_secret, target_type, target_id = _configured_application()
+        return app_id, app_secret, target_type, target_id
+    app_id, app_secret = _configured_credentials()
+    try:
+        target_type, target_id = validate_receive_target(
+            receive_id_type or "chat_id", receive_id,
+        )
+    except ValueError as exc:
+        raise FeishuBotError("飞书会话目标无效，请重新执行 /robot 连接") from exc
+    return app_id, app_secret, target_type, target_id
+
+
+def send_text(
+    text: str,
+    *,
+    receive_id: str | None = None,
+    receive_id_type: str | None = None,
+) -> None:
+    """Post a plain-text message without exposing secrets or response bodies.
+
+    A linked Web conversation supplies its own previously-selected ``chat_id``;
+    the settings-page test continues to use the configured default target.
+    """
+    message = str(text or "").strip()
+    if not message:
+        raise FeishuBotError("发送内容不能为空")
+    if len(message) > 4000:
+        raise FeishuBotError("飞书机器人单条测试消息不能超过 4000 个字符")
+    app_id, app_secret, target_type, target_id = _resolve_target(receive_id, receive_id_type)
+    access_token = _tenant_access_token(app_id, app_secret)
+    _post_message(
+        access_token, target_type, target_id,
+        {
+            "receive_id": target_id,
+            "msg_type": "text",
+            "content": json.dumps({"text": message}, ensure_ascii=False),
+        },
+    )
+
+
+# Card markdown elements accept roughly 4000 characters per message; split on
+# line boundaries so lists and code blocks are not cut mid-line.
+_CARD_CHUNK_LIMIT = 3600
+
+
+def _split_markdown(text: str) -> list[str]:
+    chunks: list[str] = []
+    remaining = str(text or "").strip()
+    while remaining:
+        if len(remaining) <= _CARD_CHUNK_LIMIT:
+            chunks.append(remaining)
+            break
+        cut = remaining.rfind("\n", 0, _CARD_CHUNK_LIMIT)
+        if cut < _CARD_CHUNK_LIMIT // 2:
+            cut = _CARD_CHUNK_LIMIT
+        chunks.append(remaining[:cut])
+        remaining = remaining[cut:].lstrip("\n")
+    return chunks
+
+
+def send_markdown(
+    text: str,
+    *,
+    receive_id: str | None = None,
+    receive_id_type: str | None = None,
+) -> None:
+    """Post Markdown as interactive card messages so Feishu renders it.
+
+    Feishu ``text`` messages show Markdown source verbatim; card ``markdown``
+    elements render headings, bold, lists, code blocks and tables natively.
+    """
+    message = str(text or "").strip()
+    if not message:
+        raise FeishuBotError("发送内容不能为空")
+    app_id, app_secret, target_type, target_id = _resolve_target(receive_id, receive_id_type)
+    access_token = _tenant_access_token(app_id, app_secret)
+    for chunk in _split_markdown(message):
+        _post_message(
+            access_token, target_type, target_id,
+            {
+                "receive_id": target_id,
+                "msg_type": "interactive",
+                "content": json.dumps(
+                    {"config": {"wide_screen_mode": True},
+                     "elements": [{"tag": "markdown", "content": chunk}]},
+                    ensure_ascii=False,
+                ),
+            },
+        )
+
+
 def send_conversation_turn(*, chat_id: str, user_message: str, assistant_message: str) -> None:
     """Mirror one completed Web turn in order, splitting long replies safely."""
-    parts = [
-        ("🧑 Web 对话", str(user_message or "").strip()),
-        ("🤖 智析 Agent", str(assistant_message or "").strip()),
-    ]
-    for label, content in parts:
-        if not content:
-            continue
-        prefix = f"{label}\n"
-        limit = 4000 - len(prefix)
-        while content:
-            chunk, content = content[:limit], content[limit:]
-            send_text(prefix + chunk, receive_id=chat_id, receive_id_type="chat_id")
+    user = str(user_message or "").strip()
+    if user:
+        send_text(f"🧑 Web 对话\n{user}", receive_id=chat_id, receive_id_type="chat_id")
+    assistant = str(assistant_message or "").strip()
+    if assistant:
+        # Assistant replies are Markdown; send as cards so Feishu renders them.
+        send_markdown(f"**🤖 智析 Agent**\n{assistant}", receive_id=chat_id, receive_id_type="chat_id")
 
 
 def send_test_message() -> None:

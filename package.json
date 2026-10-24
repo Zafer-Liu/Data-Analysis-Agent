@@ -1,7 +1,7 @@
 {
   "name": "data-analysis-agent-frontend",
   "private": true,
-  "version": "1.3.0",
+  "version": "1.4.0",
   "type": "module",
   "packageManager": "pnpm@11.7.0",
   "engines": {
@@ -11,10 +11,12 @@
     "build": "vite build && node scripts/build-chat.mjs",
     "build:chat": "node scripts/build-chat.mjs",
     "build:check": "node scripts/build-chat.mjs",
+    "test:frontend": "node --test --test-concurrency=1 \"tests/*.test.mjs\"",
+    "test:charts": "python -m pytest Function/Charts_generation/tests -q",
     "format": "prettier --write \"frontend/core/**/*.js\" \"frontend/entries/**/*.js\" \"vite*.config.js\" \"eslint.config.js\" \"package.json\"",
     "format:check": "prettier --check \"frontend/core/**/*.js\" \"frontend/entries/**/*.js\" \"vite*.config.js\" \"eslint.config.js\" \"package.json\"",
-    "lint": "eslint \"frontend/**/*.js\" \"vite*.config.js\"",
-    "quality": "pnpm format:check && pnpm lint && pnpm build:check && python -m unittest Test.test_api_smoke Test.test_job_ui"
+    "lint": "eslint \"frontend/**/*.js\" \"static/js/**/*.js\" \"vite*.config.js\"",
+    "quality": "npm run format:check && npm run lint && npm run build:check && npm run test:frontend && python scripts/generate_tool_inventory.py --check && npm run test:charts && python -m unittest discover -s tests -v"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",

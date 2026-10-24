@@ -1,0 +1,15 @@
+{
+  "enabled": true,
+  "mode": "managed",
+  "base_url": "http://127.0.0.1:8787",
+  "timeout": 180,
+  "runtime_dir": "E:\\Tool\\TimesFM3\\integration-review\\ui-data\\model-runtime",
+  "model_dir": "E:\\Tool\\TimesFM3\\model",
+  "python_executable": "E:\\Tool\\TimesFM3\\.venv\\Scripts\\python.exe",
+  "device": "cuda",
+  "port": 8787,
+  "auto_start": false,
+  "credential_ref": "",
+  "model": "google/timesfm-3.0-pytorch",
+  "service_id": ""
+}

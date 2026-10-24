@@ -2,19 +2,20 @@
 """Blueprint: business knowledge base — parse, preview, confirm, CRUD, toggle."""
 import logging
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 from flask import Blueprint, request, jsonify, send_from_directory
 
 from .state import session_manager, config_manager, require_session_ownership
-from infrastructure.paths import data_path
+from infrastructure.paths import content_data_path
 
 log = logging.getLogger(__name__)
 bp = Blueprint("knowledge", __name__)
 
 # Source mode: <project>/uploads/knowledge; packaged mode: <data-root>/uploads/knowledge.
 # This file lives at <root>/api/knowledge.py → parent = api/ → parent = root
-_KB_DIR = data_path("uploads", "knowledge")
+_KB_DIR = content_data_path("uploads", "knowledge")
 _ALLOWED_EXTS = {".xlsx", ".xls", ".docx"}
 
 
@@ -24,6 +25,7 @@ def _ensure_dir() -> None:
 
 def _scope_context() -> tuple[str, str]:
     """Resolve the trusted user plus the session's stable Workspace identity."""
+    import os as _os
     body = request.get_json(silent=True) if request.is_json else {}
     sid = str(
         request.args.get("session_id")
@@ -31,20 +33,19 @@ def _scope_context() -> tuple[str, str]:
         or (body or {}).get("session_id")
         or ""
     )
-    user_id = str(
-        request.headers.get("X-BAA-User-ID")
-        or request.args.get("user_id")
-        or (body or {}).get("user_id")
-        or ""
-    ).strip()[:200]
-    # Cloud mode: fall back to authenticated user
-    if not user_id:
-        import os as _os
-        if bool(_os.environ.get("RAILWAY_PROJECT_ID")) or _os.environ.get("VERCEL") == "1":
-            from .auth import current_user
-            auth_user = current_user()
-            if auth_user:
-                user_id = auth_user["id"]
+    if bool(_os.environ.get("RAILWAY_PROJECT_ID")) or _os.environ.get("VERCEL") == "1":
+        # Never let a browser-supplied header/query override the authenticated
+        # tenant in managed cloud mode.
+        from .auth import current_user
+        auth_user = current_user()
+        user_id = auth_user["id"] if auth_user else ""
+    else:
+        user_id = str(
+            request.headers.get("X-BAA-User-ID")
+            or request.args.get("user_id")
+            or (body or {}).get("user_id")
+            or ""
+        ).strip()[:200]
     if not user_id:
         user_id = "local-default"
     from data.workspace import workspace_manager
@@ -58,10 +59,21 @@ def _kb_dir() -> Path:
     return knowledge_scope_dir(workspace_id="", user_id=user_id)
 
 
+@contextmanager
 def _kb():
+    """Yield a short-lived KnowledgeBase and always close its connection.
+
+    Each API request opens its own SQLite connection; closing it here (rather
+    than relying on GC) avoids WAL read-snapshot retention and file-handle
+    growth under multi-tenant traffic.
+    """
     from Function.Knowledge.knowledge_base import KnowledgeBase
     _wid, user_id = _scope_context()
-    return KnowledgeBase(workspace_id="", user_id=user_id)
+    kb = KnowledgeBase(workspace_id="", user_id=user_id)
+    try:
+        yield kb
+    finally:
+        kb.close()
 
 
 def _category_id(default: int = 1):
@@ -101,14 +113,16 @@ def _get_client(sid: str, provider: str = ""):
 
 @bp.get("/api/knowledge/categories")
 def list_categories():
-    return jsonify(_kb().list_categories())
+    with _kb() as kb:
+        return jsonify(kb.list_categories())
 
 
 @bp.post("/api/knowledge/categories")
 def add_category():
     body = request.get_json(silent=True) or {}
     try:
-        return jsonify(_kb().add_category(body.get("name", ""))), 201
+        with _kb() as kb:
+            return jsonify(kb.add_category(body.get("name", ""))), 201
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
@@ -117,7 +131,8 @@ def add_category():
 def update_category(cid: int):
     body = request.get_json(silent=True) or {}
     patch = {k: body[k] for k in ("name", "enabled") if k in body}
-    record = _kb().update_category(cid, **patch)
+    with _kb() as kb:
+        record = kb.update_category(cid, **patch)
     if record is None:
         return jsonify({"error": "Not found"}), 404
     return jsonify(record)
@@ -125,16 +140,18 @@ def update_category(cid: int):
 
 @bp.post("/api/knowledge/categories/<int:cid>/toggle")
 def toggle_category(cid: int):
-    rec = _kb().get_category_by_id(cid)
-    if not rec:
-        return jsonify({"error": "Not found"}), 404
-    return jsonify(_kb().update_category(cid, enabled=0 if rec["enabled"] else 1))
+    with _kb() as kb:
+        rec = kb.get_category_by_id(cid)
+        if not rec:
+            return jsonify({"error": "Not found"}), 404
+        return jsonify(kb.update_category(cid, enabled=0 if rec["enabled"] else 1))
 
 
 @bp.delete("/api/knowledge/categories/<int:cid>")
 def delete_category(cid: int):
     try:
-        deleted = _kb().delete_category(cid)
+        with _kb() as kb:
+            deleted = kb.delete_category(cid)
         return jsonify({"ok": True, "deleted": deleted})
     except LookupError as e:
         return jsonify({"error": str(e)}), 404
@@ -170,9 +187,25 @@ def parse_file():
     f.save(str(save_path))
 
     try:
+        selected_provider = (
+            provider
+            or getattr(session_manager.get_or_create(sid), "model_provider", "")
+            or config_manager.get_default_provider()
+            or ""
+        )
         client, model = _get_client(sid, provider=provider)
+        _workspace_id, user_id = _scope_context()
+        from agent.model_call_audit import audit_model_call
         from Function.Knowledge.file_parser import parse_file as _parse
-        result = _parse(str(save_path), client, model)
+        result = _parse(
+            str(save_path), client, model,
+            audit_factory=lambda: audit_model_call(
+                user_id=user_id, session_id=sid, source="web",
+                purpose="knowledge_parse", billing_scope="platform",
+                provider=selected_provider, model=model,
+            ),
+            include_usage=config_manager.is_hosted_provider(selected_provider),
+        )
         result["filename"] = filename          # let frontend reference the file
         return jsonify(result)
     except Exception as e:
@@ -211,7 +244,8 @@ def delete_file(filename: str):
         return jsonify({"error": "File not found"}), 404
     target.unlink()
     try:
-        _kb().delete_document_index(filename)
+        with _kb() as kb:
+            kb.delete_document_index(filename)
     except Exception:
         log.exception("Failed to delete RAG index for %s", filename)
     return jsonify({"ok": True})
@@ -227,71 +261,133 @@ def confirm_records():
     if not records and not filename:
         return jsonify({"error": "No records or source file provided"}), 400
     try:
-        kb = _kb()
         category_id = _category_id()
-        counts = kb.bulk_insert(records, category_id=category_id) if records else {"metrics": 0, "rules": 0, "notes": 0}
-        rag = {"chunks": 0}
-        if filename:
-            source_path = _kb_dir() / filename
-            if source_path.exists() and source_path.suffix.lower() in _ALLOWED_EXTS:
-                from Function.Knowledge.file_parser import extract_text
-                text = extract_text(str(source_path))
-                if text.strip():
-                    rag = kb.index_document(filename, text, source_type="file", category_id=category_id)
+        with _kb() as kb:
+            counts = kb.bulk_insert(records, category_id=category_id) if records else {"metrics": 0, "rules": 0, "notes": 0}
+            rag = {"chunks": 0}
+            if filename:
+                source_path = _kb_dir() / filename
+                if source_path.exists() and source_path.suffix.lower() in _ALLOWED_EXTS:
+                    from Function.Knowledge.file_parser import extract_text
+                    text = extract_text(str(source_path))
+                    if text.strip():
+                        rag = kb.index_document(filename, text, source_type="file", category_id=category_id)
         return jsonify({"ok": True, "inserted": counts, "rag": rag})
     except Exception as e:
         log.exception("Knowledge confirm failed")
         return jsonify({"error": str(e)}), 500
 
 
+# ── Browser-owned cloud recovery ─────────────────────────────────────────────
+
+@bp.post("/api/knowledge/restore")
+def restore_structured_snapshot():
+    """Recreate the disposable cloud index from the browser's local snapshot."""
+    body = request.get_json(silent=True) or {}
+    try:
+        # Source files are restored by the browser immediately after this
+        # endpoint.  Remove only supported temporary source files so the
+        # server's file list cannot retain stale copies across restarts/tabs.
+        scope_dir = _kb_dir()
+        scope_dir.mkdir(parents=True, exist_ok=True)
+        for path in scope_dir.iterdir():
+            if path.is_file() and path.suffix.lower() in _ALLOWED_EXTS:
+                path.unlink()
+        with _kb() as kb:
+            restored = kb.replace_structured_snapshot(body.get("snapshot") or {})
+        return jsonify({"ok": True, "restored": restored})
+    except Exception as e:
+        log.exception("Knowledge structured restore failed")
+        return jsonify({"error": str(e)}), 400
+
+
+@bp.post("/api/knowledge/restore-file")
+def restore_source_file():
+    """Restore one browser-owned source file without calling an LLM again."""
+    if "file" not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+    f = request.files["file"]
+    original_name = f.filename or "knowledge-source"
+    ext = Path(original_name).suffix.lower()
+    if ext not in _ALLOWED_EXTS:
+        return jsonify({"error": f"不支持的文件格式 {ext}"}), 400
+    safe_stem = "".join(c if c.isalnum() or c in "-_." else "_"
+                        for c in Path(original_name).stem)[:60]
+    filename = f"{uuid.uuid4().hex[:8]}_{safe_stem}{ext}"
+    target = _kb_dir() / filename
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        f.save(str(target))
+        category_name = str(request.form.get("category_name") or "").strip()
+        with _kb() as kb:
+            categories = kb.list_categories()
+            fallback_category = int(categories[0]["id"]) if categories else 1
+            category_id = next(
+                (int(row["id"]) for row in categories if row["name"] == category_name),
+                fallback_category,
+            )
+            from Function.Knowledge.file_parser import extract_text
+            text = extract_text(str(target))
+            rag = kb.index_document(
+                filename, text, source_type="file", category_id=category_id,
+            ) if text.strip() else {"chunks": 0, "embedded": 0}
+        return jsonify({"ok": True, "filename": filename, "rag": rag})
+    except Exception as e:
+        target.unlink(missing_ok=True)
+        log.exception("Knowledge source restore failed")
+        return jsonify({"error": str(e)}), 400
+
+
 # ── Toggle enabled ────────────────────────────────────────────────────────────
 
 @bp.post("/api/knowledge/metrics/<int:mid>/toggle")
 def toggle_metric(mid: int):
-    rec = _kb().get_metric_by_id(mid)
-    if not rec:
-        return jsonify({"error": "Not found"}), 404
-    updated = _kb().update_metric(mid, enabled=0 if rec["enabled"] else 1)
-    return jsonify(updated)
+    with _kb() as kb:
+        rec = kb.get_metric_by_id(mid)
+        if not rec:
+            return jsonify({"error": "Not found"}), 404
+        return jsonify(kb.update_metric(mid, enabled=0 if rec["enabled"] else 1))
 
 
 @bp.post("/api/knowledge/rules/<int:rid>/toggle")
 def toggle_rule(rid: int):
-    rec = _kb().get_rule_by_id(rid)
-    if not rec:
-        return jsonify({"error": "Not found"}), 404
-    updated = _kb().update_rule(rid, enabled=0 if rec["enabled"] else 1)
-    return jsonify(updated)
+    with _kb() as kb:
+        rec = kb.get_rule_by_id(rid)
+        if not rec:
+            return jsonify({"error": "Not found"}), 404
+        return jsonify(kb.update_rule(rid, enabled=0 if rec["enabled"] else 1))
 
 
 @bp.post("/api/knowledge/notes/<int:nid>/toggle")
 def toggle_note(nid: int):
-    rec = _kb().get_note_by_id(nid)
-    if not rec:
-        return jsonify({"error": "Not found"}), 404
-    updated = _kb().update_note(nid, enabled=0 if rec["enabled"] else 1)
-    return jsonify(updated)
+    with _kb() as kb:
+        rec = kb.get_note_by_id(nid)
+        if not rec:
+            return jsonify({"error": "Not found"}), 404
+        return jsonify(kb.update_note(nid, enabled=0 if rec["enabled"] else 1))
 
 
 # ── Metrics CRUD ──────────────────────────────────────────────────────────────
 
 @bp.get("/api/knowledge/metrics")
 def list_metrics():
-    return jsonify(_kb().list_metrics(_category_id()))
+    with _kb() as kb:
+        return jsonify(kb.list_metrics(_category_id()))
 
 
 @bp.post("/api/knowledge/metrics")
 def add_metric():
     body = request.get_json(silent=True) or {}
     try:
-        record = _kb().add_metric(
-            name=body.get("name", ""),
-            alias=body.get("alias", ""),
-            definition=body.get("definition", ""),
-            sql_template=body.get("sql_template", ""),
-            notes=body.get("notes", ""),
-            category_id=body.get("category_id"),
-        )
+        with _kb() as kb:
+            record = kb.add_metric(
+                name=body.get("name", ""),
+                alias=body.get("alias", ""),
+                definition=body.get("definition", ""),
+                sql_template=body.get("sql_template", ""),
+                notes=body.get("notes", ""),
+                category_id=body.get("category_id"),
+            )
         return jsonify(record), 201
     except Exception as e:
         return jsonify({"error": str(e)}), 400
@@ -300,7 +396,8 @@ def add_metric():
 @bp.put("/api/knowledge/metrics/<int:mid>")
 def update_metric(mid: int):
     body = request.get_json(silent=True) or {}
-    record = _kb().update_metric(mid, **body)
+    with _kb() as kb:
+        record = kb.update_metric(mid, **body)
     if record is None:
         return jsonify({"error": "Not found"}), 404
     return jsonify(record)
@@ -308,7 +405,8 @@ def update_metric(mid: int):
 
 @bp.delete("/api/knowledge/metrics/<int:mid>")
 def delete_metric(mid: int):
-    _kb().delete_metric(mid)
+    with _kb() as kb:
+        kb.delete_metric(mid)
     return jsonify({"ok": True})
 
 
@@ -316,20 +414,22 @@ def delete_metric(mid: int):
 
 @bp.get("/api/knowledge/rules")
 def list_rules():
-    return jsonify(_kb().list_rules(_category_id()))
+    with _kb() as kb:
+        return jsonify(kb.list_rules(_category_id()))
 
 
 @bp.post("/api/knowledge/rules")
 def add_rule():
     body = request.get_json(silent=True) or {}
     try:
-        record = _kb().add_rule(
-            rule_id=body.get("rule_id", ""),
-            description=body.get("description", ""),
-            condition=body.get("condition", ""),
-            severity=body.get("severity", "warning"),
-            category_id=body.get("category_id"),
-        )
+        with _kb() as kb:
+            record = kb.add_rule(
+                rule_id=body.get("rule_id", ""),
+                description=body.get("description", ""),
+                condition=body.get("condition", ""),
+                severity=body.get("severity", "warning"),
+                category_id=body.get("category_id"),
+            )
         return jsonify(record), 201
     except Exception as e:
         return jsonify({"error": str(e)}), 400
@@ -338,7 +438,8 @@ def add_rule():
 @bp.put("/api/knowledge/rules/<int:rid>")
 def update_rule(rid: int):
     body = request.get_json(silent=True) or {}
-    record = _kb().update_rule(rid, **body)
+    with _kb() as kb:
+        record = kb.update_rule(rid, **body)
     if record is None:
         return jsonify({"error": "Not found"}), 404
     return jsonify(record)
@@ -346,7 +447,8 @@ def update_rule(rid: int):
 
 @bp.delete("/api/knowledge/rules/<int:rid>")
 def delete_rule(rid: int):
-    _kb().delete_rule(rid)
+    with _kb() as kb:
+        kb.delete_rule(rid)
     return jsonify({"ok": True})
 
 
@@ -354,19 +456,21 @@ def delete_rule(rid: int):
 
 @bp.get("/api/knowledge/notes")
 def list_notes():
-    return jsonify(_kb().list_notes(_category_id()))
+    with _kb() as kb:
+        return jsonify(kb.list_notes(_category_id()))
 
 
 @bp.post("/api/knowledge/notes")
 def add_note():
     body = request.get_json(silent=True) or {}
     try:
-        record = _kb().add_note(
-            topic=body.get("topic", ""),
-            content=body.get("content", ""),
-            tags=body.get("tags", ""),
-            category_id=body.get("category_id"),
-        )
+        with _kb() as kb:
+            record = kb.add_note(
+                topic=body.get("topic", ""),
+                content=body.get("content", ""),
+                tags=body.get("tags", ""),
+                category_id=body.get("category_id"),
+            )
         return jsonify(record), 201
     except Exception as e:
         return jsonify({"error": str(e)}), 400
@@ -375,7 +479,8 @@ def add_note():
 @bp.put("/api/knowledge/notes/<int:nid>")
 def update_note(nid: int):
     body = request.get_json(silent=True) or {}
-    record = _kb().update_note(nid, **body)
+    with _kb() as kb:
+        record = kb.update_note(nid, **body)
     if record is None:
         return jsonify({"error": "Not found"}), 404
     return jsonify(record)
@@ -383,7 +488,8 @@ def update_note(nid: int):
 
 @bp.delete("/api/knowledge/notes/<int:nid>")
 def delete_note(nid: int):
-    _kb().delete_note(nid)
+    with _kb() as kb:
+        kb.delete_note(nid)
     return jsonify({"ok": True})
 
 
@@ -394,7 +500,8 @@ def search():
     q = request.args.get("q", "").strip()
     if not q:
         return jsonify({"metrics": [], "rules": [], "notes": []})
-    return jsonify(_kb().search(q))
+    with _kb() as kb:
+        return jsonify(kb.search(q))
 
 
 # ── Temporary per-session prompt ──────────────────────────────────────────────
@@ -433,7 +540,21 @@ def _refine_temp_prompt(sid: str, provider: str, raw_text: str) -> tuple[str, st
     except Exception as e:
         return raw_text, f"未能调用模型整理（已按原文保存）：{e}"
     try:
-        resp = client.chat.completions.create(
+        sess = session_manager.get_or_create(sid)
+        selected_provider = (
+            provider or getattr(sess, "model_provider", "")
+            or config_manager.get_default_provider() or ""
+        )
+        from agent.model_call_audit import audit_model_call
+        from agent.retry import call_with_retry
+        audit = audit_model_call(
+            user_id=str(getattr(sess, "owner_user_id", "") or ""),
+            session_id=sid, source="web", purpose="temp_prompt_refine",
+            billing_scope="platform", provider=selected_provider, model=model,
+        )
+        resp = call_with_retry(
+            client.chat.completions.create,
+            on_attempt=audit.attempt,
             model=model,
             messages=[
                 {"role": "system", "content": _TEMP_PROMPT_REFINE_SYSTEM},
@@ -442,6 +563,7 @@ def _refine_temp_prompt(sid: str, provider: str, raw_text: str) -> tuple[str, st
             max_tokens=1024,
             temperature=0,
         )
+        audit.succeed(resp)
         refined = strip_temp_prompt_thinking(
             resp.choices[0].message.content or ""
         )
@@ -449,6 +571,8 @@ def _refine_temp_prompt(sid: str, provider: str, raw_text: str) -> tuple[str, st
             return raw_text, "模型未返回可用正文，已按原文保存。"
         return refined, ""
     except Exception as e:
+        if "audit" in locals():
+            audit.fail(e)
         log.warning("[temp-prompt] refine failed: %s", e)
         return raw_text, f"整理失败，已按原文保存：{e}"
 

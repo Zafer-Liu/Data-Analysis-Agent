@@ -34,24 +34,24 @@ _DESC = "通过蜂群避让布局将个体数据点分散排列，展示分布�
 def _auto_col(df: pd.DataFrame, *hints: str) -> Optional[str]:
     strs = [c for c in df.columns if pd.api.types.is_string_dtype(df[c])]
     nums = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-    col_lower = {c.lower(): c for c in df.columns}
+    col_lower = {str(c).lower(): c for c in df.columns}
 
     hints = [h for h in hints if h is not None]
 
     for h in hints:
-        h_lower = h.lower()
+        h_lower = str(h).lower()
         if h_lower in col_lower:
             return col_lower[h_lower]
 
     for h in hints:
-        h_lower = h.lower()
+        h_lower = str(h).lower()
         for col in df.columns:
-            col_lower_name = col.lower()
+            col_lower_name = str(col).lower()
             if h_lower in col_lower_name or col_lower_name in h_lower:
                 return col
 
     if hints:
-        hint = hints[0].lower()
+        hint = str(hints[0]).lower()
         if any(kw in hint for kw in ["source", "target", "label", "name", "group", "category", "phase", "row", "col", "path", "text", "word", "location", "geo"]):
             if strs:
                 return strs[0]
@@ -96,7 +96,7 @@ def _is_wide_format(df: pd.DataFrame) -> bool:
         return False
 
     standard_long_cols = {'group', 'value', 'x', 'y', 'category', 'measure', 'variable', 'sample'}
-    rest_cols_lower = {c.lower() for c in rest_cols}
+    rest_cols_lower = {str(c).lower() for c in rest_cols}
 
     if rest_cols_lower & standard_long_cols:
         return False
@@ -217,20 +217,26 @@ def generate(
         else:
             return ChartResult(warnings=["请提供 df 或 excel_path"])
 
-    is_wide = _is_wide_format(df)
+    # 宽格式检测仅在用户未显式提供映射时启用，避免 melt 覆盖用户意图
+    user_mapping = any(v is not None for v in (group, value)) or bool(mapping)
+    is_wide = not user_mapping and _is_wide_format(df)
     if is_wide:
         df = _wide_to_long(df)
         group_col = "group"
         value_col = "value"
         warnings.append("检测到宽格式数据，已自动转换为长格式")
     else:
-        group_col = mapping.get("group") or group
-        value_col = mapping.get("value") or value
+        # chart_selector 声明角色为 y(必填)/x：调度器不做 x→group 转换，因此
+        # 这里同时接受 selector 规范 (y=数值, x=分组) 与旧别名 (value/group)。
+        value_col = mapping.get("y")
+        value_col = value_col if value_col is not None else (mapping.get("value") if mapping.get("value") is not None else value)
+        group_col = mapping.get("x")
+        group_col = group_col if group_col is not None else (mapping.get("group") if mapping.get("group") is not None else group)
 
     title = options.get("title", title)
 
-    _group = _auto_col(df, group_col, "group", "分组", "类别", "行业", "地区") if group_col else None
-    _value = _auto_col(df, value_col, "value", "数值", "销售额", "薪资", "价格")
+    _group = _auto_col(df, group_col, "x", "group", "分组", "类别", "行业", "地区")
+    _value = _auto_col(df, value_col, "y", "value", "数值", "销售额", "薪资", "价格")
 
     if _value is None or _value not in df.columns:
         warnings.append("找不到必填字段 [value]")

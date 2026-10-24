@@ -2,6 +2,7 @@
 name: regression
 description: 执行线性回归并解释关键变量影响（linear regression 回归分析）
 icon: 📐
+tags: [mode-business, mode-ml, mode-empirical, modeling, inference]
 allowedTools: [get_schema, query_data, run_analysis, generate_chart]
 ---
 # 线性回归

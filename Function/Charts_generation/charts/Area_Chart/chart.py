@@ -78,16 +78,16 @@ def _auto_col(df: pd.DataFrame, role: str, exclude: set = None) -> Optional[str]
     3. 回退到第一个合适的列
     """
     exclude = exclude or set()
-    strs = [c for c in df.columns if df[c].dtype == object and c not in exclude]
+    strs = [c for c in df.columns if (df[c].dtype == object or pd.api.types.is_string_dtype(df[c])) and c not in exclude]
     nums = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c]) and c not in exclude]
-    col_lower = {c.lower(): c for c in df.columns if c not in exclude}
+    col_lower = {str(c).lower(): c for c in df.columns if c not in exclude}
     
     if role == "x":
         # x 优先查找时间/类别列
         time_hints = ["date","time","month","year","week","day","period","Week_Num","时间","日期","月份","年份","周","周数"]
         for hint in time_hints:
-            if hint.lower() in col_lower:
-                return col_lower[hint.lower()]
+            if str(hint).lower() in col_lower:
+                return col_lower[str(hint).lower()]
         # 回退到第一个字符串列
         if strs:
             return strs[0]
@@ -99,8 +99,8 @@ def _auto_col(df: pd.DataFrame, role: str, exclude: set = None) -> Optional[str]
         # y 优先查找数值列
         value_hints = ["value", "amount", "sales", "count", "frequency", "数值", "销售额", "销量", "金额","线上","线下"]
         for hint in value_hints:
-            if hint.lower() in col_lower:
-                return col_lower[hint.lower()]
+            if str(hint).lower() in col_lower:
+                return col_lower[str(hint).lower()]
         # 回退到第一个数值列
         if nums:
             return nums[0]
@@ -163,8 +163,10 @@ def generate(
         else:
             return ChartResult(warnings=["请提供 df 或 excel_path"])
 
-    x_col = mapping.get("x") or x
-    y_cols = mapping.get("y") or y
+    x_col = mapping.get("x")
+    x_col = x_col if x_col is not None else x
+    y_cols = mapping.get("y")
+    y_cols = y_cols if y_cols is not None else y
     title = options.get("title", title)
     color_scheme_name = options.get("color_scheme", "mckinsey")
 
@@ -225,7 +227,8 @@ def generate(
         _x = str(_x)
         
         # 检查是否有 series 列（分组）
-        series_col = mapping.get("series") or options.get("series")
+        series_col = mapping.get("series")
+        series_col = series_col if series_col is not None else options.get("series")
         
         # 准备绘图数据
         cols_to_use = [_x] + _y_cols

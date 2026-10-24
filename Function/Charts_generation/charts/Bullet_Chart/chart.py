@@ -23,6 +23,17 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from charts.base import ChartResult
 
+try:
+    from charts.color_schemes import get_color_scheme
+except ImportError as e:  # pragma: no cover - 兜底，保证独立调用可用
+    log.debug("[chart] 配色模块加载失败: %s", e)
+    def get_color_scheme(name: str = "mckinsey"):
+        return {"colors": [
+            "#003D7A", "#0084D1", "#00A4EF", "#7FBA00",
+            "#FFB81C", "#F7630C", "#DA3B01", "#A4373A",
+            "#6B2C91", "#00B4EF",
+        ]}
+
 __all__ = ["generate"]
 
 _DATA_FMT = "label列 + actual列 + target列 + [low/mid/high列]"
@@ -150,12 +161,20 @@ def generate(
         return ChartResult(warnings=["输入数据为空或格式错误"], meta={"error_stage": "input"})
 
     # 2) 参数优先级：mapping > 函数参数默认值
-    lbl_hint = mapping.get("label") or label
-    act_hint = mapping.get("actual") or actual
-    tgt_hint = mapping.get("target") or target
-    low_hint = mapping.get("low") or low
-    mid_hint = mapping.get("mid") or mid
-    high_hint = mapping.get("high") or high
+    # 注意 chart_selector 声明可选角色为 low/medium/high，而旧版模块读 "mid"。
+    # 这里统一以 selector 规范 medium 为准，并兼容旧别名 mid/middle。
+    lbl_hint = mapping.get("label")
+    lbl_hint = lbl_hint if lbl_hint is not None else label
+    act_hint = mapping.get("actual")
+    act_hint = act_hint if act_hint is not None else actual
+    tgt_hint = mapping.get("target")
+    tgt_hint = tgt_hint if tgt_hint is not None else target
+    low_hint = mapping.get("low")
+    low_hint = low_hint if low_hint is not None else low
+    mid_hint = mapping.get("medium")
+    mid_hint = mid_hint if mid_hint is not None else (mapping.get("mid") if mapping.get("mid") is not None else (mapping.get("middle") if mapping.get("middle") is not None else mid))
+    high_hint = mapping.get("high")
+    high_hint = high_hint if high_hint is not None else high
     title = options.get("title", title)
 
     # 3) 自动识别列
@@ -163,7 +182,7 @@ def generate(
     _act = _auto_col(df, act_hint, "actual", "value", "real", "实际", "达成", "完成")
     _tgt = _auto_col(df, tgt_hint, "target", "goal", "目标", "指标值")
     _low = _auto_col(df, *([low_hint] if low_hint else []), "low", "poor", "差", "低", "及格")
-    _mid = _auto_col(df, *([mid_hint] if mid_hint else []), "mid", "medium", "中", "良好")
+    _mid = _auto_col(df, *([mid_hint] if mid_hint else []), "medium", "mid", "middle", "中", "良好")
     _high = _auto_col(df, *([high_hint] if high_hint else []), "high", "good", "优", "高", "优秀")
 
     detected_mapping = {
@@ -171,7 +190,7 @@ def generate(
         "actual": _act,
         "target": _tgt,
         "low": _low,
-        "mid": _mid,
+        "medium": _mid,
         "high": _high
     }
 
@@ -230,6 +249,19 @@ def generate(
         )
 
     # 6) 画图
+    # 配色方案：优先用 options.color_scheme
+    _scheme = get_color_scheme(options.get("color_scheme", "mckinsey"))
+    _palette = _scheme.get("colors") or [
+        "#003D7A", "#0084D1", "#00A4EF", "#7FBA00",
+        "#FFB81C", "#F7630C", "#DA3B01", "#A4373A",
+        "#6B2C91", "#00B4EF",
+    ]
+    _actual_color = _scheme.get("primary", "rgba(0,91,154,1.0)")
+    _target_color = _scheme.get("negative", "#E74C3C")
+    _low_color = _scheme.get("negative", "rgba(244,67,54,0.35)")
+    _mid_color = _scheme.get("neutral", "rgba(255,193,7,0.35)")
+    _high_color = _scheme.get("positive", "rgba(76,175,80,0.35)")
+
     fig = go.Figure()
 
     # 动态区间标签：根据输入数据标签改变
@@ -248,7 +280,7 @@ def generate(
         if low_val is not None and low_val > 0:
             fig.add_trace(go.Bar(
                 y=[lbl], x=[low_val], orientation='h',
-                marker=dict(color='rgba(244,67,54,0.35)'),
+                marker=dict(color=_low_color),
                 name=low_label, showlegend=(idx == 0),
                 hovertemplate=f'<b>{lbl}</b><br>{low_label}区间: 0 - {low_val:.2f}<extra></extra>'
             ))
@@ -256,7 +288,7 @@ def generate(
         if low_val is not None and mid_val is not None and mid_val > low_val:
             fig.add_trace(go.Bar(
                 y=[lbl], x=[mid_val - low_val], orientation='h', base=low_val,
-                marker=dict(color='rgba(255,193,7,0.35)'),
+                marker=dict(color=_mid_color),
                 name=mid_label, showlegend=(idx == 0),
                 hovertemplate=f'<b>{lbl}</b><br>{mid_label}区间: {low_val:.2f} - {mid_val:.2f}<extra></extra>'
             ))
@@ -264,7 +296,7 @@ def generate(
         if mid_val is not None and high_val is not None and high_val > mid_val:
             fig.add_trace(go.Bar(
                 y=[lbl], x=[high_val - mid_val], orientation='h', base=mid_val,
-                marker=dict(color='rgba(76,175,80,0.35)'),
+                marker=dict(color=_high_color),
                 name=high_label, showlegend=(idx == 0),
                 hovertemplate=f'<b>{lbl}</b><br>{high_label}区间: {mid_val:.2f} - {high_val:.2f}<extra></extra>'
             ))
@@ -274,7 +306,7 @@ def generate(
         y=d[_lbl].astype(str),
         x=d[_act],
         orientation='h',
-        marker=dict(color='rgba(0,91,154,1.0)'),
+        marker=dict(color=_actual_color),
         name='实际值',
         text=d[_act].round(1),
         textposition='inside',
@@ -286,7 +318,7 @@ def generate(
         y=d[_lbl].astype(str),
         x=d[_tgt],
         mode='markers',
-        marker=dict(symbol='line-ns', size=22, color='#E74C3C', line=dict(width=3)),
+        marker=dict(symbol='line-ns', size=22, color=_target_color, line=dict(width=3)),
         name='目标值',
         hovertemplate='<b>%{y}</b><br>目标: %{x:.2f}<extra></extra>'
     ))

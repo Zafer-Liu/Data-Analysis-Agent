@@ -21,3 +21,16 @@ memory/
 .pytest_cache
 .ruff_cache
 .deps_installed
+.env
+.env.*
+secret_key
+auth.db
+auth.db-*
+business_canvas/*.sqlite*
+LLM/llm_config.json
+LLM/mcp_config.json
+LLM/embedding_config.json
+data/datasource_config.json
+config/hooks.json
+config/hooks-history.json
+config/feishu-bot.json

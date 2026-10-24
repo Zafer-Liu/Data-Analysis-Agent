@@ -1,15 +1,32 @@
 """Pre-built draw.io XML templates for business analysis frameworks.
 
 Each template is a complete <mxfile> XML string that renders the framework
-layout when loaded into the draw.io embed iframe.
+layout when loaded into the draw.io embed iframe. Page sizes vary per
+template (declared in each mxGraphModel); content stays within them.
 
-Viewport constraints: x 0-800, y 0-600.
 Cell IDs start from 2 (0 and 1 are root sentinels used by draw.io).
+`content_cells` maps agent-facing section keys to the mxCell id that
+`display_diagram`'s content-fill mode writes into — keep them in sync with
+agent/prompts.py, agent/tools/schemas.py and skills/*/SKILL.md.
 """
 
 from __future__ import annotations
 
+_BLANK_DIAGRAM_XML = (
+    '<mxfile><diagram name="Blank" id="blank">'
+    '<mxGraphModel pageWidth="820" pageHeight="660" pageFormat="custom"><root>'
+    '<mxCell id="0"/>'
+    '<mxCell id="1" parent="0"/>'
+    '</root></mxGraphModel></diagram></mxfile>'
+)
+
 DIAGRAM_TEMPLATES: dict[str, dict[str, str]] = {
+    "blank_canvas": {
+        "name": "空白画布",
+        "description": "Empty draw.io canvas",
+        "content_cells": {},
+        "xml": _BLANK_DIAGRAM_XML,
+    },
     "bcg_matrix": {
         "name": "BCG 矩阵",
         "description": "2×2 quadrant: market growth vs relative market share",
@@ -33,7 +50,7 @@ DIAGRAM_TEMPLATES: dict[str, dict[str, str]] = {
             'vertex="1" parent="1">'
             '<mxGeometry x="20" y="60" width="370" height="260" as="geometry"/>'
             "</mxCell>"
-            '<mxCell id="3" value="&#xa;点击编辑明星业务内容" '
+            '<mxCell id="3" value="点击编辑明星业务内容" '
             'style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=11;fontColor=#6c8ebf;" '
             'vertex="1" parent="2">'
             '<mxGeometry x="40" y="50" width="290" height="190" as="geometry"/>'
@@ -45,7 +62,7 @@ DIAGRAM_TEMPLATES: dict[str, dict[str, str]] = {
             'vertex="1" parent="1">'
             '<mxGeometry x="410" y="60" width="370" height="260" as="geometry"/>'
             "</mxCell>"
-            '<mxCell id="5" value="&#xa;点击编辑问题业务内容" '
+            '<mxCell id="5" value="点击编辑问题业务内容" '
             'style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=11;fontColor=#d6b656;" '
             'vertex="1" parent="4">'
             '<mxGeometry x="40" y="50" width="290" height="190" as="geometry"/>'
@@ -57,7 +74,7 @@ DIAGRAM_TEMPLATES: dict[str, dict[str, str]] = {
             'vertex="1" parent="1">'
             '<mxGeometry x="20" y="340" width="370" height="260" as="geometry"/>'
             "</mxCell>"
-            '<mxCell id="7" value="&#xa;点击编辑现金牛业务内容" '
+            '<mxCell id="7" value="点击编辑现金牛业务内容" '
             'style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=11;fontColor=#82b366;" '
             'vertex="1" parent="6">'
             '<mxGeometry x="40" y="50" width="290" height="190" as="geometry"/>'
@@ -69,7 +86,7 @@ DIAGRAM_TEMPLATES: dict[str, dict[str, str]] = {
             'vertex="1" parent="1">'
             '<mxGeometry x="410" y="340" width="370" height="260" as="geometry"/>'
             "</mxCell>"
-            '<mxCell id="9" value="&#xa;点击编辑瘦狗业务内容" '
+            '<mxCell id="9" value="点击编辑瘦狗业务内容" '
             'style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=11;fontColor=#b85450;" '
             'vertex="1" parent="8">'
             '<mxGeometry x="40" y="50" width="290" height="190" as="geometry"/>'
@@ -126,7 +143,7 @@ DIAGRAM_TEMPLATES: dict[str, dict[str, str]] = {
             'vertex="1" parent="1">'
             '<mxGeometry x="20" y="60" width="370" height="260" as="geometry"/>'
             "</mxCell>"
-            '<mxCell id="3" value="&#xa;列出内部优势…" '
+            '<mxCell id="3" value="列出内部优势…" '
             'style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=11;fontColor=#82b366;" '
             'vertex="1" parent="2">'
             '<mxGeometry x="40" y="50" width="290" height="190" as="geometry"/>'
@@ -138,7 +155,7 @@ DIAGRAM_TEMPLATES: dict[str, dict[str, str]] = {
             'vertex="1" parent="1">'
             '<mxGeometry x="410" y="60" width="370" height="260" as="geometry"/>'
             "</mxCell>"
-            '<mxCell id="5" value="&#xa;列出内部劣势…" '
+            '<mxCell id="5" value="列出内部劣势…" '
             'style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=11;fontColor=#b85450;" '
             'vertex="1" parent="4">'
             '<mxGeometry x="40" y="50" width="290" height="190" as="geometry"/>'
@@ -150,7 +167,7 @@ DIAGRAM_TEMPLATES: dict[str, dict[str, str]] = {
             'vertex="1" parent="1">'
             '<mxGeometry x="20" y="340" width="370" height="260" as="geometry"/>'
             "</mxCell>"
-            '<mxCell id="7" value="&#xa;列出外部机会…" '
+            '<mxCell id="7" value="列出外部机会…" '
             'style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=11;fontColor=#6c8ebf;" '
             'vertex="1" parent="6">'
             '<mxGeometry x="40" y="50" width="290" height="190" as="geometry"/>'
@@ -162,7 +179,7 @@ DIAGRAM_TEMPLATES: dict[str, dict[str, str]] = {
             'vertex="1" parent="1">'
             '<mxGeometry x="410" y="340" width="370" height="260" as="geometry"/>'
             "</mxCell>"
-            '<mxCell id="9" value="&#xa;列出外部威胁…" '
+            '<mxCell id="9" value="列出外部威胁…" '
             'style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=11;fontColor=#d6b656;" '
             'vertex="1" parent="8">'
             '<mxGeometry x="40" y="50" width="290" height="190" as="geometry"/>'

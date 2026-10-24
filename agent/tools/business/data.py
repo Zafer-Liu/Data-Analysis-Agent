@@ -4,13 +4,14 @@ import logging
 import re
 import sqlite3
 from contextlib import nullcontext
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
 log = logging.getLogger(__name__)
 
 _TIME_SERIES_PREFIX = "Time_Series_"
-_JOB_ANALYSIS_IDS = {"Torch_MLP"}
+_JOB_ANALYSIS_IDS = {"Torch_MLP", "Torch_RNN", "Time_Series_TimesFM3"}
 _ANALYSIS_JOB_ROW_THRESHOLD = 1000
 _CHART_JOB_ROW_THRESHOLD = 50_000
 _PROFILE_JOB_ROW_THRESHOLD = 50_000
@@ -49,8 +50,10 @@ def _execute_analysis(
         analysis_name.startswith(_TIME_SERIES_PREFIX) or analysis_name in _JOB_ANALYSIS_IDS
     ):
         kwargs["progress_callback"] = progress_callback
-    if analysis_name == "AB_Test_Analysis":
-        kwargs["analysis_options"] = analysis_options or {}
+    if analysis_options is not None and not isinstance(analysis_options, dict):
+        raise ValueError("analysis_options must be an object")
+    if analysis_name == "AB_Test_Analysis" or entry.get("accepts_analysis_options"):
+        kwargs["analysis_options"] = deepcopy(analysis_options or {})
     return entry, run_fn(**kwargs)
 
 
@@ -385,6 +388,13 @@ class DataToolsMixin:
         import duckdb
         import pandas as pd
 
+        # A6 guard: a job's fresh connection writes straight to the file DB,
+        # bypassing the in-memory shadow — refuse writes here so the shadow
+        # path (request thread) stays the only write route.
+        from data.sources._utils import is_write_sql
+        if is_write_sql(sql):
+            return pd.DataFrame(), "写操作不支持在后台 job 中执行（内存缓存路径）。"
+
         conn = None
         try:
             guard = lock or nullcontext()
@@ -406,6 +416,12 @@ class DataToolsMixin:
         if not src:
             log.warning("[tools] query_data  no data source  sql=%.80r", sql_preview)
             return "No data source. Please connect a database or upload an Excel file first.", []
+
+        # A6: write SQL must go through the source's shadow path on the
+        # request thread — never a background job's direct file connection.
+        from data.sources._utils import is_write_sql
+        if is_write_sql(rewritten_sql):
+            return self._tool_query_data_with_refs(sql)
 
         db_path, db_lock = self._query_data_job_connection_info(src)
         can_job = self._job_runner is not None and db_path is not None
@@ -732,6 +748,10 @@ class DataToolsMixin:
         analysis_options: dict | None = None,
     ):
         """Run large time-series analyses as cancellable JobRunner work."""
+        analysis_options = deepcopy(analysis_options)
+        if analysis_name == "Time_Series_TimesFM3":
+            analysis_options = dict(analysis_options or {})
+            analysis_options.setdefault("language", getattr(self, "_ui_lang", "zh"))
         if not self.data_source:
             return "No data source connected."
 
@@ -759,19 +779,24 @@ class DataToolsMixin:
             )
 
         result_holder = {}
+        preparation_message = (self._tt("正在准备预测服务", "Preparing forecast service")
+                               if analysis_name == "Time_Series_TimesFM3" else
+                               self._tt("正在准备深度学习训练", "Preparing model training")
+                               if analysis_name in _JOB_ANALYSIS_IDS else self._tt("正在准备时序分析", "Preparing time-series analysis"))
 
         def _worker(ctx):
             def _progress(pct: int, message: str = ""):
                 ctx.check_canceled()
                 ctx.set_progress(pct, message)
 
-            _progress(2, "正在准备深度学习训练" if analysis_name in _JOB_ANALYSIS_IDS else "正在准备时序分析")
+            _progress(2, preparation_message)
             entry, ret = _execute_analysis(
                 analysis_name,
                 df,
                 target_column,
                 groupby_column,
                 n_deciles,
+                analysis_options=analysis_options,
                 progress_callback=_progress,
             )
             ctx.check_canceled()
@@ -824,7 +849,7 @@ class DataToolsMixin:
         try:
             _out_tbls = entry.get("output_tables", [])
             self._write_analysis_df(result_df, "analysis_result")
-            if not breakdown_df.empty:
+            if not breakdown_df.empty or analysis_name == "Time_Series_TimesFM3":
                 self._write_analysis_df(breakdown_df, "analysis_breakdown")
             # Always write the third table so LLM SQL queries don't fail on missing table.
             # Write an empty-but-structured DataFrame when the result is empty.
@@ -972,23 +997,43 @@ class DataToolsMixin:
 
     def _render_chart_from_df(
         self, df, chart_type: str, field_mapping: dict, title: str = "",
+        highlight: str = "", size: str = "", color_scheme: str = "",
     ) -> dict:
         from chart_generate import generate_chart as _gen
 
+        scheme = color_scheme or self.ppt_color_scheme
         options = {"title": title} if title else {}
+        if highlight:
+            # schema 声明为逗号分隔字符串，但个别适配器会序列化成数组——统一归一
+            if isinstance(highlight, (list, tuple)):
+                highlight = ",".join(str(h) for h in highlight if str(h).strip())
+            options["highlight"] = highlight
+        if size:
+            options["size"] = size
         result = _gen(
             df=df,
             chart_type=chart_type,
             mapping=field_mapping,
             options=options,
-            color_scheme=self.ppt_color_scheme,
+            color_scheme=scheme,
         )
         if "error" in result:
             return {"error": result["error"]}
-        return {"html": result.get("html", ""), "chart_type": chart_type}
+        # rows/color_scheme 供 spec 边车记录（chat.py 落盘 {cid}.spec.json）
+        payload = {
+            "html": result.get("html", ""),
+            "chart_type": chart_type,
+            "rows": int(len(df)),
+            "color_scheme": scheme,
+        }
+        # QC/theme warnings 透传给 agent，LLM 可据此自我修正后重新生成
+        if result.get("warnings"):
+            payload["warnings"] = result["warnings"]
+        return payload
 
     def _tool_generate_chart(
-        self, chart_type: str, sql: str, field_mapping: dict, title: str = ""
+        self, chart_type: str, sql: str, field_mapping: dict, title: str = "",
+        highlight: str = "", size: str = "", color_scheme: str = "",
     ) -> dict:
         if not self.data_source:
             return {"error": "No data source connected."}
@@ -997,10 +1042,11 @@ class DataToolsMixin:
             return {"error": f"Data query failed: {error}"}
         if df.empty:
             return {"error": "Query returned no rows — cannot generate chart."}
-        return self._render_chart_from_df(df, chart_type, field_mapping, title)
+        return self._render_chart_from_df(df, chart_type, field_mapping, title, highlight, size, color_scheme)
 
     def _tool_generate_chart_with_jobs(
-        self, chart_type: str, sql: str, field_mapping: dict, title: str = ""
+        self, chart_type: str, sql: str, field_mapping: dict, title: str = "",
+        highlight: str = "", size: str = "", color_scheme: str = "",
     ):
         if not self.data_source:
             return {"error": "No data source connected."}
@@ -1012,11 +1058,14 @@ class DataToolsMixin:
 
         should_job = self._job_runner is not None and len(df) >= _CHART_JOB_ROW_THRESHOLD
         if not should_job:
-            return self._render_chart_from_df(df, chart_type, field_mapping, title)
+            return self._render_chart_from_df(df, chart_type, field_mapping, title, highlight, size, color_scheme)
 
         df_snapshot = df.copy(deep=True)
         mapping_snapshot = dict(field_mapping or {})
         title_snapshot = str(title or "")
+        highlight_snapshot = highlight or ""
+        size_snapshot = size or ""
+        scheme_snapshot = color_scheme or ""
         chart_type_snapshot = str(chart_type or "Bar_Chart")
         result_holder = {}
 
@@ -1025,7 +1074,8 @@ class DataToolsMixin:
             ctx.check_canceled()
             ctx.set_progress(35, "正在渲染图表")
             result = self._render_chart_from_df(
-                df_snapshot, chart_type_snapshot, mapping_snapshot, title_snapshot
+                df_snapshot, chart_type_snapshot, mapping_snapshot,
+                title_snapshot, highlight_snapshot, size_snapshot, scheme_snapshot
             )
             ctx.check_canceled()
             result_holder["chart"] = result

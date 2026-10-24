@@ -1,6 +1,8 @@
 import { registerUiIsland } from "../../core/ui-registry.js";
 import { bindBubbleImages } from "../../legacy/msg.js";
 import { renderMd } from "../../legacy/markdown.js";
+import { scrollBottom } from "../../core/dom.js";
+import { splitStableMarkdown } from "../markdown-stream.js";
 
 // Progressive Vue island for the chat message list.
 // It renders the outer message shell and now owns basic text-stream state.
@@ -26,6 +28,7 @@ export function mountChatUi() {
   const MIN_TOOL_VISIBLE_MS = 650;
   const ACTIVITY_KIND = "activity";
   const ACTIVITY_HIDE_DELAY_MS = 2000;
+  const REASONING_RENDER_THROTTLE_MS = 60;
 
   const chartObserver = window.IntersectionObserver
     ? new IntersectionObserver((entries) => {
@@ -251,10 +254,123 @@ export function mountChatUi() {
     return String(ev.detail || ev.display || "");
   }
 
+  function _toolContent(value) {
+    if (value === null || value === undefined) return "";
+    if (typeof value === "string") return value;
+    try { return JSON.stringify(value, null, 2); }
+    catch (_) { return String(value); }
+  }
+
   function _activityText(text) {
     if (text) return String(text);
     if (window.t) return t("tool.next_step") || "正在思考下一步…";
     return "正在思考下一步…";
+  }
+
+  function _reasoningDuration(elapsedMs) {
+    const totalSeconds = Math.max(1, Math.round(Math.max(0, Number(elapsedMs) || 0) / 1000));
+    if (totalSeconds < 60) {
+      return window.getLang?.() === "en" ? `${totalSeconds}s` : `${totalSeconds} 秒`;
+    }
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return window.getLang?.() === "en"
+      ? `${minutes}m ${seconds}s`
+      : `${minutes} 分 ${seconds} 秒`;
+  }
+
+  function _reasoningLabel(item) {
+    const key = item.finished ? "reasoning_toggle" : "reasoning_thinking";
+    const fallback = item.finished ? "思考过程" : "正在思考";
+    if (!window.t) return fallback;
+    const translated = t(key);
+    return translated && translated !== key ? translated : fallback;
+  }
+
+  function _reasoningDurationLabel(item) {
+    const elapsed = item.finished
+      ? item.elapsedMs
+      : Date.now() - (item.startedAt || Date.now());
+    return _reasoningDuration(elapsed);
+  }
+
+  function _toolDurationLabel(item) {
+    if (item.showDuration === false) return "";
+    if (!item.finished) return window.t ? (t("tool.running") || (window.getLang?.() === "en" ? "running" : "执行中")) : (window.getLang?.() === "en" ? "running" : "执行中");
+    if (!Number.isFinite(item.elapsedMs)) return "";
+    const elapsedMs = Math.max(0, Number(item.elapsedMs));
+    if (elapsedMs < 1000) {
+      const value = Math.max(1, Math.round(elapsedMs));
+      return window.getLang?.() === "en" ? `${value}ms` : `${value} 毫秒`;
+    }
+    const seconds = elapsedMs / 1000;
+    if (seconds < 10) {
+      const value = seconds.toFixed(1).replace(/\.0$/, "");
+      return window.getLang?.() === "en" ? `${value}s` : `${value} 秒`;
+    }
+    return _reasoningDuration(elapsedMs);
+  }
+
+  function _renderReasoning(item) {
+    const classes = ["reasoning-trace", item.finished ? "is-finished" : "is-streaming"];
+    return h("details", {
+      key: item.id,
+      class: classes.join(" "),
+      open: item.open,
+      onToggle: event => { item.open = event.currentTarget.open; },
+    }, [
+      h("summary", { class: "reasoning-trace-head" }, [
+        h("span", { class: "reasoning-trace-dot", "aria-hidden": "true" }),
+        h("span", { class: "reasoning-trace-label" }, _reasoningLabel(item)),
+        h("span", { class: "reasoning-trace-duration" }, _reasoningDurationLabel(item)),
+        h("span", { class: "reasoning-trace-chevron", "aria-hidden": "true" }),
+      ]),
+      h("div", {
+        class: "reasoning-trace-body",
+        role: "log",
+        "aria-live": item.finished ? "off" : "polite",
+      }, [
+        h("div", { class: "reasoning-trace-copy" }, item.text || ""),
+        item.finished ? null : h("span", { class: "reasoning-stream-caret", "aria-hidden": "true" }),
+      ]),
+    ]);
+  }
+
+  function _validationBadgeClass(status) {
+    if (status === "passed") return "tool-step-badge badge-passed";
+    if (status === "failed") return "tool-step-badge badge-failed";
+    if (status === "degraded") return "tool-step-badge badge-degraded";
+    return "tool-step-badge";
+  }
+
+  function _validationBadgeText(v) {
+    const status = v && v.status;
+    const en = window.getLang?.() === "en";
+    if (status === "passed") return en ? "verified" : "验证通过";
+    if (status === "failed") {
+      // Execution-phase failures carry a stable label key localized here.
+      if (v && v.label === "syntax_error") return en ? "syntax error" : "语法错误";
+      if (v && v.label === "run_failed") return en ? "run failed" : "运行失败";
+      // Back-compat: older backends sent raw Chinese labels.
+      if (v && v.label === "语法错误") return en ? "syntax error" : "语法错误";
+      if (v && v.label === "运行失败") return en ? "run failed" : "运行失败";
+      return en ? "failed" : "验证失败";
+    }
+    // sqlglot environment problems surface with an error code (SQLG-001/002)
+    // documented in the help center's 错误代码 section.
+    if (status === "degraded") return en ? "sqlglot error" : "sqlglot 错误";
+    return "";
+  }
+
+  function _renderValidationBadge(item) {
+    const v = item.validation;
+    if (!v || !v.status) return null;
+    const badge = h("span", {
+      class: _validationBadgeClass(v.status),
+      title: v.message || "",
+    }, _validationBadgeText(v));
+    const sep = h("span", { class: "tool-step-sep", "aria-hidden": "true" }, "丨");
+    return [sep, badge];
   }
 
   function _renderToolStep(item) {
@@ -264,6 +380,7 @@ export function mountChatUi() {
     if (item.compaction) classes.push("tool-step-compaction");
     if (!item.finished) classes.push("running");
     if (item.finished) classes.push(doneClass);
+    if (item.failed) classes.push("failed");
     const icon = item.finished ? (item.compaction ? "✦" : "✓") : "⟳";
     const attrs = {
       key: item.id,
@@ -272,6 +389,7 @@ export function mountChatUi() {
       "data-step-id": item.id,
     };
     if (item.finished) attrs["data-finished"] = "1";
+    if (item.argsTitle) attrs.title = item.argsTitle;
 
     if (item.compaction) {
       const progress = item.progress === undefined || item.progress === null
@@ -279,9 +397,10 @@ export function mountChatUi() {
         : Math.max(0, Math.min(100, Number(item.progress) || 0));
       const hasProgress = progress !== null;
       const progressLabel = item.progressLabel || (hasProgress ? `压缩进度 ${progress}%` : "");
-      const body = [
+      const body = [h("div", { class: "compaction-step-head" }, [
         h("span", { class: "tool-step-text" }, item.detail),
-      ];
+        h("span", { class: "tool-step-duration" }, _toolDurationLabel(item)),
+      ])];
       if (hasProgress) {
         body.push(h("div", { class: "compaction-progress-row" }, [
           h("div", {
@@ -291,7 +410,7 @@ export function mountChatUi() {
             "aria-valuemin": "0",
             "aria-valuemax": "100",
             "aria-valuenow": String(progress),
-          }, [h("span", { class: "job-progress-fill", style: { width: `${progress}%` } })]),
+          }, [h("span", { class: "job-progress-fill", style: { transform: `scaleX(${progress / 100})` } })]),
           h("span", { class: "job-progress-value compaction-progress-value" }, `${progress}%`),
         ]));
       }
@@ -299,6 +418,22 @@ export function mountChatUi() {
         h("span", { class: iconClass }, icon),
         h("div", { class: "compaction-progress-body" }, body),
       ]);
+    }
+
+    const normalizedSummary = String(item.summary || "").replace(/\s+/g, " ").trim();
+    const normalizedDetail = String(item.detail || "").replace(/\s+/g, " ").trim();
+    const detailParts = [];
+    if (item.detail && normalizedDetail !== normalizedSummary) {
+      detailParts.push(h("div", { class: "tool-step-description" }, item.detail));
+    }
+    if (item.auditMeta) {
+      detailParts.push(h("div", { class: "tool-step-meta" }, item.auditMeta));
+    }
+    if (item.result) {
+      detailParts.push(h("div", { class: "tool-step-result" }, item.result));
+    }
+    if (!detailParts.length && item.detail) {
+      detailParts.push(h("div", { class: "tool-step-description" }, item.detail));
     }
 
     return h("details", {
@@ -309,8 +444,10 @@ export function mountChatUi() {
       h("summary", { class: "tool-step-head" }, [
         h("span", { class: iconClass }, icon),
         h("span", { class: "tool-step-text" }, item.summary),
+        _renderValidationBadge(item),
+        h("span", { class: "tool-step-duration" }, _toolDurationLabel(item)),
       ]),
-      h("div", { class: "tool-step-detail" }, item.detail),
+      h("div", { class: "tool-step-detail" }, detailParts),
     ]);
   }
 
@@ -326,9 +463,10 @@ export function mountChatUi() {
   }
 
   function _renderRefItem(ref) {
+    const _refEn = window.getLang?.() === "en";
     const headChildren = [
-      h("span", { class: "knowledge-ref-type" }, ref.type || "来源"),
-      h("span", { class: "knowledge-ref-title" }, ref.title || ref.source || "未命名来源"),
+      h("span", { class: "knowledge-ref-type" }, ref.type || (_refEn ? "source" : "来源")),
+      h("span", { class: "knowledge-ref-title" }, ref.title || ref.source || (_refEn ? "unnamed source" : "未命名来源")),
     ];
     if (ref.score !== "" && ref.score !== null && ref.score !== undefined) {
       headChildren.push(h("span", { class: "knowledge-ref-score" }, `score ${ref.score}`));
@@ -388,6 +526,7 @@ export function mountChatUi() {
 
   function _renderToolItem(item) {
     if (item.kind === ACTIVITY_KIND) return _renderActivity(item);
+    if (item.kind === "reasoning") return _renderReasoning(item);
     if (item.kind === "step") return _renderToolStep(item);
     if (item.kind === "refs") return _renderRefsPanel(item);
     if (item.kind === "audit") return _renderAuditPanel(item);
@@ -517,7 +656,7 @@ export function mountChatUi() {
         "aria-valuemin": "0",
         "aria-valuemax": "100",
         "aria-valuenow": String(progress),
-      }, [h("span", { class: "job-progress-fill", style: { width: `${progress}%` } })]),
+      }, [h("span", { class: "job-progress-fill", style: { transform: `scaleX(${progress / 100})` } })]),
       h("div", { class: "job-card-meta" }, [
         h("span", { class: "job-progress-value" }, `${progress}%`),
         job.message ? h("span", { class: "job-message" }, job.message) : null,
@@ -695,7 +834,7 @@ export function mountChatUi() {
 
   function _renderAskUserCard(item) {
     const options = item.options || [];
-    const allOpts = options.concat(["__other__"]);
+    const allOpts = item.freeTextOnly ? [] : options.concat(["__other__"]);
 
     const chips = allOpts.map(opt => {
       const isOther = opt === "__other__";
@@ -728,10 +867,8 @@ export function mountChatUi() {
       }, isOther ? (window.t ? (t("ask_user.other") || "其他…") : "其他…") : opt);
     });
 
-    const children = [
-      h("div", { class: "ask-user-question" }, item.question || ""),
-      h("div", { class: "ask-user-chips" }, chips),
-    ];
+    const children = [h("div", { class: "ask-user-question" }, item.question || "")];
+    if (chips.length) children.push(h("div", { class: "ask-user-chips" }, chips));
 
     if (item.otherOpen) {
       children.push(h("div", { class: "ask-user-other-wrap" }, [
@@ -862,6 +999,11 @@ export function mountChatUi() {
       queueCallbacks: null,
       error: "",
       stopped: false,
+      stableRaw: "",
+      stableHtml: "",
+      renderTimer: 0,
+      lastRenderTime: 0,
+      textStarted: false,
     });
     _render();
     const el = _find(id);
@@ -884,6 +1026,9 @@ export function mountChatUi() {
     messages.forEach(msg => {
       (msg.tools || []).forEach(item => {
         if (item.finishTimer) clearTimeout(item.finishTimer);
+        if (item.renderTimer) clearTimeout(item.renderTimer);
+        if (item.ticker) clearInterval(item.ticker);
+        if (item.hideTimer) clearTimeout(item.hideTimer);
       });
     });
     messages.length = 0;
@@ -908,6 +1053,7 @@ export function mountChatUi() {
     const msg = _stateFor(target);
     if (!msg || msg.kind !== "message") return false;
     msg.text = String(text || "");
+    _resetMarkdownCache(msg);
     _render();
     const bubble = _bubbleFor(msg.id);
     if (bubble) {
@@ -927,21 +1073,53 @@ export function mountChatUi() {
     return true;
   }
 
+  const STREAM_RENDER_THROTTLE_MS = 120;
+
+  function _resetMarkdownCache(msg) {
+    msg.stableRaw = "";
+    msg.stableHtml = "";
+  }
+
+  function _renderStreamMarkdown(msg) {
+    const { stable, tail } = splitStableMarkdown(msg.text);
+    if (!stable.startsWith(msg.stableRaw)) {
+      _resetMarkdownCache(msg);
+      return renderMd(msg.text);
+    }
+
+    if (stable.length > msg.stableRaw.length) {
+      msg.stableHtml += renderMd(stable.slice(msg.stableRaw.length));
+      msg.stableRaw = stable;
+    }
+    return msg.stableHtml + renderMd(tail);
+  }
+
   function appendTextDelta(target, content, typing) {
     const msg = _stateFor(target);
     const bubble = _bubbleFor(target);
     if (!msg || !bubble) return false;
-    hideToolActivity(target);
-    _removeTyping(typing);
+    finishReasoning(target);
+    // Only hide tool activity on the first text delta for this message.
+    if (!msg.textStarted) {
+      hideToolActivity(target);
+      _removeTyping(typing);
+      msg.textStarted = true;
+    }
     msg.text += String(content || "");
-    if (msg.markdownFrame) return true;
-    msg.markdownFrame = requestAnimationFrame(() => {
-      msg.markdownFrame = 0;
+    // If a render is already scheduled, just accumulate text.
+    if (msg.renderTimer) return true;
+    // Throttle markdown re-renders to avoid full parse on every frame.
+    const elapsed = msg.lastRenderTime ? Date.now() - msg.lastRenderTime : 0;
+    const delay = elapsed >= STREAM_RENDER_THROTTLE_MS ? 0 : STREAM_RENDER_THROTTLE_MS - elapsed;
+    msg.renderTimer = setTimeout(() => {
+      msg.renderTimer = 0;
+      msg.lastRenderTime = Date.now();
       const currentBubble = _bubbleFor(msg.id);
       if (!currentBubble) return;
-      currentBubble.innerHTML = renderMd(msg.text);
+      currentBubble.innerHTML = _renderStreamMarkdown(msg);
       _bindImages(currentBubble);
-    });
+      scrollBottom();
+    }, delay);
     return true;
   }
 
@@ -949,14 +1127,17 @@ export function mountChatUi() {
     const msg = _stateFor(target);
     const bubble = _bubbleFor(target);
     if (!msg || !bubble) return false;
+    collapseReasoning(target);
     hideToolActivity(target);
     _removeTyping(typing);
-    if (msg.markdownFrame) {
-      cancelAnimationFrame(msg.markdownFrame);
-      msg.markdownFrame = 0;
+    if (msg.renderTimer) {
+      clearTimeout(msg.renderTimer);
+      msg.renderTimer = 0;
     }
+    msg.textStarted = false;
     msg.text = String(markdownText || "");
     msg.error = "";
+    _resetMarkdownCache(msg);
     bubble.innerHTML = renderMd(msg.text);
     _bindImages(bubble);
     return true;
@@ -966,10 +1147,15 @@ export function mountChatUi() {
     const msg = _stateFor(target);
     const bubble = _bubbleFor(target);
     if (!msg || !bubble) return false;
+    collapseReasoning(target);
     hideToolActivity(target);
     _removeTyping(typing);
+    if (msg.renderTimer) { clearTimeout(msg.renderTimer); msg.renderTimer = 0; }
     msg.error = String(message || "");
-    bubble.innerHTML = "";
+    // Keep partial output visible: a network drop after streamed text should
+    // not erase what the user has already read.
+    bubble.innerHTML = _renderStreamMarkdown(msg);
+    if (msg.text) _bindImages(bubble);
     const span = document.createElement("span");
     span.className = "stream-error";
     span.textContent = `⚠ ${msg.error}`;
@@ -982,33 +1168,87 @@ export function mountChatUi() {
     return true;
   }
 
-  function addReasoning(target, content, typing) {
+  function _activeReasoning(msg) {
+    if (!msg || !Array.isArray(msg.tools)) return null;
+    for (let index = msg.tools.length - 1; index >= 0; index -= 1) {
+      const item = msg.tools[index];
+      if (item.kind === "reasoning") return item.finished ? null : item;
+      if (item.kind === "step") return null;
+    }
+    return null;
+  }
+
+  function appendReasoningDelta(target, content, typing) {
     const msg = _stateFor(target);
-    const bubble = _bubbleFor(target);
-    if (!msg || !bubble) return false;
+    if (!msg) return false;
     _removeTyping(typing);
     const text = String(content || "");
+    if (!text) return true;
     msg.reasoning.push(text);
+    msg.tools = msg.tools || [];
+    let item = _activeReasoning(msg);
+    if (!item) {
+      item = {
+        id: `reasoning-${++toolSeq}`,
+        kind: "reasoning",
+        text: "",
+        startedAt: Date.now(),
+        elapsedMs: 0,
+        finished: false,
+        open: true,
+        renderTimer: null,
+        ticker: null,
+      };
+      msg.tools.push(item);
+      item.ticker = setInterval(() => _renderToolsFor(msg), 1000);
+      _renderToolsFor(msg);
+    }
+    item.text += text;
+    if (!item.renderTimer) {
+      item.renderTimer = setTimeout(() => {
+        item.renderTimer = null;
+        _renderToolsFor(msg);
+      }, REASONING_RENDER_THROTTLE_MS);
+    }
+    return true;
+  }
 
-    const block = document.createElement("div");
-    block.className = "reasoning-block";
-    const toggle = document.createElement("div");
-    toggle.className = "reasoning-toggle";
-    toggle.innerHTML = `<span class="reasoning-arrow">▶</span> ${window.t ? t('reasoning_toggle') : "Reasoning"}`;
-    const body = document.createElement("div");
-    body.className = "reasoning-body";
-    body.textContent = text;
-    toggle.addEventListener("click", () => {
-      toggle.classList.toggle("open");
-      body.classList.toggle("open");
+  function finishReasoning(target) {
+    const msg = _stateFor(target);
+    const item = _activeReasoning(msg);
+    if (!msg || !item) return false;
+    item.elapsedMs = Date.now() - (item.startedAt || Date.now());
+    item.finished = true;
+    if (item.renderTimer) {
+      clearTimeout(item.renderTimer);
+      item.renderTimer = null;
+    }
+    if (item.ticker) {
+      clearInterval(item.ticker);
+      item.ticker = null;
+    }
+    _renderToolsFor(msg);
+    return true;
+  }
+
+  function collapseReasoning(target) {
+    const msg = _stateFor(target);
+    if (!msg || !Array.isArray(msg.tools)) return false;
+    finishReasoning(target);
+    let changed = false;
+    msg.tools.forEach(item => {
+      if (item.kind === "reasoning" && item.open) {
+        item.open = false;
+        changed = true;
+      }
     });
-    block.appendChild(toggle);
-    block.appendChild(body);
-    bubble.before(block);
-    // Reasoning has finished rendering, but the backend may still be deciding
-    // whether to call another tool. Keep a visible hand-off state until the
-    // next tool_start or final output replaces it.
-    showToolActivity(target);
+    if (changed) _renderToolsFor(msg);
+    return true;
+  }
+
+  function addReasoning(target, content, typing) {
+    if (!appendReasoningDelta(target, content, typing)) return false;
+    finishReasoning(target);
     return true;
   }
 
@@ -1017,8 +1257,10 @@ export function mountChatUi() {
     const bubble = _bubbleFor(target);
     const body = _bodyFor(target);
     if (!msg || !bubble || !body) return false;
+    collapseReasoning(target);
     hideToolActivity(target);
     _removeTyping(typing);
+    if (msg.renderTimer) { clearTimeout(msg.renderTimer); msg.renderTimer = 0; }
     msg.stopped = true;
     const stopNote = document.createElement("div");
     stopNote.className = "stop-note";
@@ -1136,6 +1378,9 @@ export function mountChatUi() {
       if (!item.finishTimer) {
         item.finishTimer = setTimeout(() => {
           item.finishTimer = null;
+          if (!Number.isFinite(item.elapsedMs)) {
+            item.elapsedMs = Date.now() - (item.startedAt || Date.now());
+          }
           item.finished = true;
           item.markedFinished = true;
           _renderToolsFor(msg);
@@ -1147,6 +1392,7 @@ export function mountChatUi() {
       clearTimeout(item.finishTimer);
       item.finishTimer = null;
     }
+    item.elapsedMs = Date.now() - (item.startedAt || Date.now());
     item.finished = true;
     item.markedFinished = true;
     return true;
@@ -1155,6 +1401,7 @@ export function mountChatUi() {
   function startTool(target, ev) {
     const msg = _stateFor(target);
     if (!msg) return false;
+    finishReasoning(target);
     msg.tools = msg.tools || [];
     hideToolActivity(target, { delayMs: 0 });
     msg.tools.forEach(item => {
@@ -1170,9 +1417,12 @@ export function mountChatUi() {
       compaction: tool === "compaction",
       summary: _toolSummary(ev),
       detail: _toolDetail(ev),
+      purpose: ev.purpose || "",
+      validation: ev.validation || null,
       progress: ev.progress === undefined ? null : Math.max(0, Math.min(100, Number(ev.progress) || 0)),
       progressLabel: ev.progress_label || ev.progressLabel || "",
       startedAt: Date.now(),
+      elapsedMs: null,
       open: false,
       markedFinished: false,
       finished: false,
@@ -1219,6 +1469,89 @@ export function mountChatUi() {
     return true;
   }
 
+  function failActiveTool(target, message = "") {
+    const msg = _stateFor(target);
+    if (!msg || !Array.isArray(msg.tools)) return false;
+    const step = [...msg.tools].reverse().find(item =>
+      item.kind === "step" &&
+      !item.failed &&
+      !["skill_match", "skill_activate"].includes(item.tool) &&
+      (!item.finished || !!item.finishTimer)
+    );
+    if (!step) return false;
+    if (step.finishTimer) {
+      clearTimeout(step.finishTimer);
+      step.finishTimer = null;
+    }
+    if (!Number.isFinite(step.elapsedMs)) {
+      step.elapsedMs = Date.now() - (step.startedAt || Date.now());
+    }
+    step.finished = true;
+    step.markedFinished = true;
+    step.failed = true;
+    const errorText = String(message || "").trim();
+    step.auditMeta = errorText
+      ? `${window.getLang?.() === "en" ? "Failed" : "执行失败"} · ${errorText}`
+      : (window.getLang?.() === "en" ? "Failed" : "执行失败");
+    _renderToolsFor(msg);
+    return true;
+  }
+
+  function addSkillMatch(target, skills) {
+    const msg = _stateFor(target);
+    if (!msg) return false;
+    const items = Array.isArray(skills) ? skills : [];
+    const names = items.map(item => item?.name).filter(Boolean).join(", ");
+    if (!names) return true;
+    const description = items.length === 1
+      ? String(items[0]?.description || "")
+      : `${items.length} ${window.getLang?.() === "en" ? "candidates" : "个候选"}`;
+    msg.tools = msg.tools || [];
+    msg.tools.push({
+      id: `skill-${++toolSeq}`,
+      kind: "step",
+      tool: "skill_match",
+      summary: `${window.getLang?.() === "en" ? "Matched skills" : "匹配技能"}：${names}`,
+      detail: description,
+      startedAt: Date.now(),
+      elapsedMs: null,
+      showDuration: false,
+      open: false,
+      markedFinished: true,
+      finished: true,
+    });
+    _renderToolsFor(msg);
+    return true;
+  }
+
+  function activateSkill(target, name) {
+    const msg = _stateFor(target);
+    if (!msg) return false;
+    const skillName = String(name || "");
+    const step = _latestStep(msg, "load_analysis_skill");
+    if (step) {
+      step.summary = `${window.getLang?.() === "en" ? "Loading skill" : "加载技能"}：${skillName}`;
+      _renderToolsFor(msg);
+      return true;
+    }
+    msg.tools = msg.tools || [];
+    msg.tools.push({
+      id: `skill-${++toolSeq}`,
+      kind: "step",
+      tool: "skill_activate",
+      summary: `${window.getLang?.() === "en" ? "Loaded skill" : "已加载技能"}：${skillName}`,
+      detail: "",
+      startedAt: Date.now(),
+      elapsedMs: null,
+      showDuration: false,
+      open: false,
+      markedFinished: true,
+      finished: true,
+    });
+    _renderToolsFor(msg);
+    return true;
+  }
+
   function setKnowledgeRefs(target, ev) {
     const msg = _stateFor(target);
     const step = _latestStep(msg, "query_knowledge");
@@ -1229,7 +1562,11 @@ export function mountChatUi() {
       kind: "refs",
       panelClass: "knowledge-refs",
       refs,
-      title: refs.length ? `引用来源（${refs.length} 条）` : "引用来源（未命中）",
+      title: (() => {
+        const en = window.getLang?.() === "en";
+        if (en) return refs.length ? `Sources (${refs.length})` : "Sources (none)";
+        return refs.length ? `引用来源（${refs.length} 条）` : "引用来源（未命中）";
+      })(),
       open: false,
     });
   }
@@ -1263,31 +1600,32 @@ export function mountChatUi() {
       step.markedFinished = true;
       _finishToolItem(msg, step);
     }
-    const elapsed = ev.elapsed_seconds !== undefined ? `${ev.elapsed_seconds}s` : "";
+    if (ev.elapsed_seconds !== undefined && Number.isFinite(Number(ev.elapsed_seconds))) {
+      step.elapsedMs = Math.max(0, Number(ev.elapsed_seconds) * 1000);
+    }
     const sourceCount = Array.isArray(ev.sources) ? ev.sources.length : 0;
     const artifactCount = Array.isArray(ev.artifacts) ? ev.artifacts.length : 0;
+    const _auditEn = window.getLang?.() === "en";
     const bits = [
-      ev.parallel ? "并行" : "",
-      elapsed && `耗时 ${elapsed}`,
-      sourceCount ? `来源 ${sourceCount}` : "",
-      artifactCount ? `产物 ${artifactCount}` : "",
-      ev.error ? `错误 ${ev.error}` : "",
+      ev.parallel ? (_auditEn ? "parallel" : "并行") : "",
+      sourceCount ? (_auditEn ? `sources ${sourceCount}` : `来源 ${sourceCount}`) : "",
+      artifactCount ? (_auditEn ? `artifacts ${artifactCount}` : `产物 ${artifactCount}`) : "",
+      ev.error ? (_auditEn ? `error ${ev.error}` : `错误 ${ev.error}`) : "",
     ].filter(Boolean);
     let argsTitle = "";
     if (ev.args_preview) {
       try { argsTitle = JSON.stringify(ev.args_preview, null, 2); } catch (_) {}
     }
-    return _upsertPanel(msg, step, {
-      id: `panel-${++toolSeq}`,
-      kind: "audit",
-      panelClass: "tool-audit",
-      tool,
-      ok: ev.ok,
-      status: bits.length ? bits.join(" · ") : "工具执行完成",
-      content: ev.content ?? ev.data ?? ev.summary ?? "",
-      argsTitle,
-      open: false,
-    });
+    step.auditMeta = bits.join(" · ");
+    step.result = _toolContent(ev.content ?? ev.data ?? ev.summary ?? "");
+    step.argsTitle = argsTitle;
+    step.failed = ev.ok === false || !!ev.error;
+    if (ev.validation) {
+      step.validation = ev.validation;
+    }
+    msg.tools = msg.tools.filter(item => !(item.kind === "audit" && item.forStep === step.id));
+    _renderToolsFor(msg);
+    return true;
   }
 
   function addChartRef(target, chartId, title = "", chartType = "") {
@@ -1352,8 +1690,9 @@ export function mountChatUi() {
         .filter((option, index, all) => option && all.indexOf(option) === index)
         .slice(0, 6),
       multiSelect: !!ev.multi_select,
+      freeTextOnly: !!ev.free_text_only,
       selected: [],
-      otherOpen: false,
+      otherOpen: !!ev.free_text_only,
       otherText: "",
       locked: false,
       callbacks: callbacks || {},
@@ -1376,6 +1715,9 @@ export function mountChatUi() {
     appendTextDelta,
     setMarkdown,
     setError,
+    appendReasoningDelta,
+    finishReasoning,
+    collapseReasoning,
     addReasoning,
     markStopped,
     finishFinishedTools,
@@ -1385,6 +1727,9 @@ export function mountChatUi() {
     startTool,
     updateToolProgress,
     endTool,
+    failActiveTool,
+    addSkillMatch,
+    activateSkill,
     setKnowledgeRefs,
     setDataRefs,
     setToolAudit,

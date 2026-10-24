@@ -11,18 +11,63 @@ from infrastructure.paths import resource_path
 log = logging.getLogger(__name__)
 
 
+def _fix_mimetypes() -> None:
+    """Force correct MIME types for web assets.
+
+    On Windows, Python's mimetypes reads the registry, where third-party
+    software often re-registers .js as text/plain. Browsers then refuse to
+    execute every script ("Expected a JavaScript module…"), freezing the UI.
+    """
+    for ext, mime_type in (
+        (".js", "text/javascript"),
+        (".mjs", "text/javascript"),
+        (".css", "text/css"),
+        (".svg", "image/svg+xml"),
+        (".json", "application/json"),
+        (".wasm", "application/wasm"),
+    ):
+        guessed, _ = mimetypes.guess_type(f"x{ext}")
+        if guessed and guessed != mime_type:
+            log.warning(
+                "[startup] system MIME table maps %s to %r (likely a broken "
+                "Windows registry entry); forcing %r",
+                ext, guessed, mime_type,
+            )
+        mimetypes.add_type(mime_type, ext)
+
+
+_STATIC_MIME_BY_EXT = {
+    ".js": "text/javascript",
+    ".mjs": "text/javascript",
+    ".css": "text/css",
+    ".svg": "image/svg+xml",
+    ".json": "application/json",
+    ".wasm": "application/wasm",
+}
+
+
+def _enforce_static_mime(app: Flask) -> None:
+    """Safety net: serve known static extensions with the correct MIME type
+    regardless of what the OS MIME table says."""
+    @app.after_request
+    def _force_static_mimetype(response):
+        if response.mimetype == "text/plain" and request.path.startswith(app.static_url_path + "/"):
+            for ext, mime_type in _STATIC_MIME_BY_EXT.items():
+                if request.path.endswith(ext):
+                    response.mimetype = mime_type
+                    break
+        return response
+
+
 def _start_background_services() -> None:
-    """Start long-lived background services (local only, skipped on Vercel)."""
+    """Start long-lived background services (local only, skipped on Vercel).
+
+    The bundled MCP resource tree is no longer shipped in the repository, so
+    there is no local MCP background service to start. External Stdio/SSE MCP
+    servers are configured at runtime through ``/api/mcp/servers``.
+    """
     if os.environ.get("VERCEL"):
         return
-    if not resource_path("MCP").is_dir():
-        log.info("[startup] bundled MCP resources are not installed; continuing without them")
-    else:
-        try:
-            from MCP.flowchart_server import ensure_flowchart_server
-            ensure_flowchart_server()
-        except Exception as e:
-            log.warning("[startup] flowchart server: %s", e)
 
 
 def _run_startup_hooks() -> None:
@@ -37,20 +82,22 @@ def _run_startup_hooks() -> None:
 
 
 def create_app() -> Flask:
+    _fix_mimetypes()
     _start_background_services()
-
-    # Windows registry MIME associations can map .js to text/plain, which
-    # makes browsers reject both classic scripts and ES modules.
-    mimetypes.add_type("text/javascript", ".js", strict=True)
-    mimetypes.add_type("text/javascript", ".mjs", strict=True)
 
     app = Flask(
         __name__,
         template_folder=str(resource_path("templates")),
         static_folder=str(resource_path("static")),
     )
-    from .auth import SECRET_KEY as _AUTH_SECRET, is_cloud_managed as _is_cloud
+    _enforce_static_mime(app)
+    from .auth import SECRET_KEY as _AUTH_SECRET, is_cloud_managed as _is_cloud, run_mode as _run_mode
     app.secret_key = _AUTH_SECRET
+    app.config.update(
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE="Lax",
+        SESSION_COOKIE_SECURE=bool(_is_cloud()),
+    )
     local_origins = [
         r"http://localhost(?::\d+)?",
         r"http://127\.0\.0\.1(?::\d+)?",
@@ -88,7 +135,10 @@ def create_app() -> Flask:
     from .workflows       import bp as workflows_bp
     from .workflow_runs   import bp as workflow_runs_bp
     from .auth             import bp as auth_bp
+    from .admin            import bp as admin_bp
     from .gpu              import bp as gpu_bp
+    from .forecast         import bp as forecast_bp
+    from .local_services   import bp as local_services_bp
     from .feishu_bot       import bp as feishu_bot_bp
 
     app.register_blueprint(models_bp)
@@ -114,7 +164,10 @@ def create_app() -> Flask:
     app.register_blueprint(workflows_bp)
     app.register_blueprint(workflow_runs_bp)
     app.register_blueprint(auth_bp)
+    app.register_blueprint(admin_bp)
     app.register_blueprint(gpu_bp)
+    app.register_blueprint(forecast_bp)
+    app.register_blueprint(local_services_bp)
     app.register_blueprint(feishu_bot_bp)
     try:
         from infrastructure.feishu_long_connection import start_long_connection
@@ -124,6 +177,12 @@ def create_app() -> Flask:
         # The app remains usable when the optional Feishu SDK is unavailable.
         log.warning("[startup] Feishu long connection skipped: %s", type(exc).__name__)
     _run_startup_hooks()
+    if _run_mode() != "cloud":
+        try:
+            from infrastructure.forecast_runtime import resume_enabled
+            resume_enabled()
+        except Exception as exc:
+            log.warning("[forecast] optional auto-start unavailable: %s", type(exc).__name__)
 
     @app.before_request
     def reject_cross_origin_writes():
@@ -145,12 +204,16 @@ def create_app() -> Flask:
 
     @app.before_request
     def cloud_auth_guard():
-        """In cloud mode, require authentication for API routes."""
-        if not _is_cloud():
+        """Require authentication in cloud *and* desktop modes; local CLI is open."""
+        mode = _run_mode()
+        if mode == "local":
             return None
         path = request.path
         # Exempt auth endpoints, health check, static files, and the login page
-        if (path.startswith("/api/auth/") or path == "/api/health"
+        if (path.startswith("/api/auth/")
+                or path == "/api/models/catalog"
+                or path == "/api/desktop/llm/chat/completions"
+                or path == "/api/health"
                 or path == "/api/feishu-bot/events"
                 or path.startswith("/static/") or path == "/login"
                 or path == "/favicon.ico"):
@@ -164,16 +227,17 @@ def create_app() -> Flask:
 
     @app.get("/")
     def index():
-        cloud = _is_cloud()
-        if cloud:
+        mode = _run_mode()
+        if mode != "local":
             from .auth import current_user
             if not current_user():
                 from .auth import _agreement_ctx
                 return render_template("login.html", quota_limit=__import__("data.auth_store", fromlist=["DAILY_TOKEN_LIMIT"]).DAILY_TOKEN_LIMIT, **_agreement_ctx())
         resp = render_template(
             "agent_chat.html",
-            desktop_lifecycle_enabled=os.environ.get("BAA_DESKTOP_LIFECYCLE") == "1",
-            is_cloud_managed=cloud,
+            desktop_lifecycle_enabled=mode == "desktop",
+            is_cloud_managed=mode == "cloud",
+            run_mode=mode,
         )
         from flask import make_response
         resp = make_response(resp)
@@ -186,7 +250,16 @@ def create_app() -> Flask:
 
     @app.get("/api/health")
     def health():
-        """Minimal desktop-launch readiness probe; never expose local config."""
+        """Readiness probe without disclosing deployment configuration."""
+        if _run_mode() == "cloud":
+            from infrastructure.paths import account_storage_ready
+            if not account_storage_ready():
+                return {
+                    "ok": False,
+                    "status": "unhealthy",
+                    "service": "business-analytics-agent",
+                    "code": "persistent_account_storage_unavailable",
+                }, 503
         return {
             "ok": True,
             "status": "healthy",
@@ -196,6 +269,14 @@ def create_app() -> Flask:
     @app.after_request
     def add_security_headers(response):
         """Apply a restrictive browser baseline while allowing generated charts."""
+        if _run_mode() == "cloud" and (
+            request.path.startswith("/api/")
+            or request.path.startswith("/dashboard/")
+            or request.path == "/admin"
+        ):
+            response.headers["Cache-Control"] = "no-store, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
         is_chart = request.path.startswith("/api/chart/")
         is_drawio = request.path.startswith("/static/drawio/")
         if is_chart:

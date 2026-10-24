@@ -25,7 +25,7 @@ import * as autosave from "./autosave.js";
 import * as datasource from "./datasource.js";
 import * as jobHistory from "./job_history.js";
 import { sidebar } from "../features/sidebar.js";
-import { renderMd } from "./markdown.js";
+import { initializeLocalStorageSetup } from "../core/local-storage-setup.js";
 import * as preview from "./preview.js";
 import * as sessions from "./sessions.js";
 import { runUpdate } from "./update.js";
@@ -93,12 +93,16 @@ if (globalThis.__baaAppDelegationRegistered) {
       }
     },
     closePanel: (_el, name) => sidebar.closePanel(name),
-    // KB inline form
-    kbCancelForm: () => { window.BAA.knowledge?.kbCancelForm?.(); sidebar.closeKbInlineForm(); },
 
     // Overlay
     openOverlay:  (_el, id) => window.openOverlay(id),
     closeOverlay: (_el, id) => window.BAA.overlay.closeOverlay(id),
+
+    // Account menu
+    toggleAccountMenu: () => window.BAA.account?.toggleMenu?.(),
+    showQuotaDetail:   () => window.BAA.account?.showQuotaDetail?.(),
+    showInvitePanel:   () => window.BAA.account?.showInvitePanel?.(),
+    copyInviteLink:    () => window.BAA.account?.copyInviteLink?.(),
 
     // Sidebar / header
     disconnectSrc:     () => datasource.disconnectSrc(),
@@ -131,8 +135,9 @@ if (globalThis.__baaAppDelegationRegistered) {
     loadSample:        () => datasource.loadSample(),
     connectDB:         () => datasource.connectDB(),
     connectGSheets:    () => datasource.connectGSheets(),
+    connectFeishu:     () => datasource.connectFeishu(),
     connectAPI:        () => datasource.connectAPI(),
-    cloudLogout:       () => { fetch("/api/auth/logout", {method:"POST"}).finally(() => { window.location.href = "/login"; }); },
+    cloudLogout:       () => window.BAA.account?.cloudLogout?.(),
 
     // Settings — model providers
     toggleAddCustom:   () => window.BAA.models.toggleAddCustom(),
@@ -172,6 +177,7 @@ if (globalThis.__baaAppDelegationRegistered) {
     addMcpServer:     () => window.BAA.mcp.addMcpServer(),
     switchMcpTab:     (_el, tab) => window.BAA.mcp.switchMcpTab(tab),
     scanLocalMcp:     () => window.BAA.mcp.scanLocalMcp(),
+    applyMcpPreset:   (_el, id) => window.BAA.mcp.applyMcpPreset(id),
     parseMcpConfig:   () => window.BAA.mcp.parseMcpConfig(),
     updateMcpCmdPreview: () => window.BAA.mcp.updateMcpCmdPreview(),
 
@@ -201,39 +207,10 @@ if (globalThis.__baaAppDelegationRegistered) {
     // Data-source modal sub-controls
     toggleApiAuthValue: () => datasource.toggleApiAuthValue(),
 
-    // Sidebar — open the user-facing Instruction.md doc in a modal,
-    // rendered with marked + DOMPurify (same pipeline as chat messages).
-    openInstruction: async () => {
-      const body = $("instruction-body");
-      window.openOverlay("ov-instruction");
-      // Fetch on every open so doc edits show up without a page reload.
-      // The desktop build serves this from a local server that may have just
-      // resumed from a backgrounded tab, so retry once before surfacing an
-      // error and keep the message actionable instead of a raw TypeError.
-      const loadOnce = async () => {
-        const r = await fetch("/api/instruction", { cache: "no-store" });
-        return r.json();
-      };
-      try {
-        let d;
-        try {
-          d = await loadOnce();
-        } catch (_firstError) {
-          await new Promise(resolve => setTimeout(resolve, 400));
-          d = await loadOnce();
-        }
-        if (d.ok && d.markdown) {
-          body.innerHTML = renderMd(d.markdown);
-        } else {
-          body.innerHTML = `<div class="instruction-loading">${
-            window.BAA.dom.esc(d.error || "Instruction.md not found")
-          }</div>`;
-        }
-      } catch (e) {
-        body.innerHTML = `<div class="instruction-loading">`
-          + `${window.BAA.dom.esc(t("modal.instruction.load_fail") || "文档加载失败，请稍后重试。")}`
-          + `<br><small>${window.BAA.dom.esc(String(e))}</small></div>`;
-      }
+    // Sidebar — open the user-facing Instruction doc as an external link
+    // (hosted at sage-agent.online so it stays current across builds).
+    openInstruction: () => {
+      window.open("https://sage-agent.online/instructions.html", "_blank", "noopener,noreferrer");
     },
 
     // Sidebar — "Add data source" dropdown
@@ -535,6 +512,8 @@ if (globalThis.__baaAppDelegationRegistered) {
     await jobHistory.init(state.SID);
     await window.BAA.models.loadModels();
     await window.BAA.models.loadBuiltinProviders();
+    await initializeLocalStorageSetup();
+    await window.BAA.knowledge?.restoreBrowserKnowledge?.();
     await sessions.loadSavedList();
     await datasource.loadWarehouseList();
     await datasource.loadDatasourceConfigs();

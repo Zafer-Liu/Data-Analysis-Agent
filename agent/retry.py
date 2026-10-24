@@ -59,7 +59,7 @@ def is_retryable(exc: Exception) -> Tuple[bool, float]:
     return False, 0.0
 
 
-def call_with_retry(fn, *args, max_retries: int = 3, **kwargs):
+def call_with_retry(fn, *args, max_retries: int = 3, on_attempt=None, **kwargs):
     """Call fn(*args, **kwargs) with exponential backoff on transient errors.
 
     Schedule (base_wait × 2**(attempt-1)):
@@ -69,9 +69,19 @@ def call_with_retry(fn, *args, max_retries: int = 3, **kwargs):
     """
     attempt = 0
     while True:
+        if on_attempt is not None:
+            try:
+                on_attempt("start", attempt + 1, None)
+            except Exception:
+                log.exception("[retry] attempt observer failed before call")
         try:
             return fn(*args, **kwargs)
         except Exception as exc:
+            if on_attempt is not None:
+                try:
+                    on_attempt("error", attempt + 1, exc)
+                except Exception:
+                    log.exception("[retry] attempt observer failed after error")
             retryable, base_wait = is_retryable(exc)
             attempt += 1
             if not retryable or attempt > max_retries:

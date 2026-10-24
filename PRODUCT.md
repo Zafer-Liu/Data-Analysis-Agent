@@ -29,7 +29,7 @@ web (Flask + vanilla JS, desktop-first with responsive adaptations)
 ### Core Analysis
 - **自然语言数据分析**：输入自然语言问题，自动生成 SQL、执行查询、推荐图表并输出业务洞察
 - **多数据源支持**：文件（Excel / CSV）、数据库（SQLite / MySQL / PostgreSQL / SQL Server）
-- **智能图表系统**：6 大类 43 种图表自动推荐（对比、时间趋势、分布、地理、关系、占比）
+- **智能图表系统**：6 大类 41 种图表自动推荐（对比、时间趋势、分布、地理、关系、占比）
 - **SSE 流式输出**：分析过程实时可见，分阶段展示进度
 
 ### Advanced Capabilities

@@ -37,27 +37,27 @@ _DESC = "展示数值分布。单列数据显示频率分布直方图；双列�
 
 def _auto_col(df: pd.DataFrame, *hints: str) -> Optional[str]:
     """根据提示自动查找匹配的列名。"""
-    strs = [c for c in df.columns if df[c].dtype == object]
+    strs = [c for c in df.columns if (df[c].dtype == object or pd.api.types.is_string_dtype(df[c]))]
     nums = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-    col_lower = {c.lower(): c for c in df.columns}
+    col_lower = {str(c).lower(): c for c in df.columns}
     
     # 1. 精确匹配 hints
     for h in hints:
-        h_lower = h.lower()
+        h_lower = str(h).lower()
         if h_lower in col_lower:
             return col_lower[h_lower]
     
     # 2. 模糊匹配（包含关系）
     for h in hints:
-        h_lower = h.lower()
+        h_lower = str(h).lower()
         for col in df.columns:
-            col_lower_name = col.lower()
+            col_lower_name = str(col).lower()
             if h_lower in col_lower_name or col_lower_name in h_lower:
                 return col
     
     # 3. 类型匹配
     if hints:
-        hint = hints[0].lower()
+        hint = str(hints[0]).lower()
         if any(kw in hint for kw in ["source", "target", "label", "name", "group", "category", "phase", "row", "col", "path", "text", "word", "location", "geo"]):
             if strs:
                 return strs[0]
@@ -196,8 +196,10 @@ def generate(
     
     elif n_cols >= 2:
         # 模式 2：双列数据 → 帕累托图（柱子 + 累积曲线）
-        x_col = mapping.get("x") or df.columns[0]
-        y_col = mapping.get("y") or df.columns[1]
+        x_col = mapping.get("x")
+        x_col = x_col if x_col is not None else df.columns[0]
+        y_col = mapping.get("y")
+        y_col = y_col if y_col is not None else df.columns[1]
         
         # 自动检测列
         _x = _auto_col(df, x_col, "类别", "分组", "group", "category")
@@ -214,6 +216,8 @@ def generate(
         
         # 计算累积百分比
         total = grouped[_y].sum()
+        if total <= 0:
+            return ChartResult(warnings=warnings + ["数值列总和为 0，无法计算帕累托累积百分比"])
         grouped['cumulative'] = grouped[_y].cumsum()
         grouped['cumulative_pct'] = (grouped['cumulative'] / total * 100).round(2)
 

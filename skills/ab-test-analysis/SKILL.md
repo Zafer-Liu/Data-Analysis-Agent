@@ -2,6 +2,7 @@
 name: ab-test-analysis
 description: 分析已有 A/B 实验数据的分组质量、转化或连续指标提升、统计显著性与置信区间，并输出审慎上线建议。用于用户要求 A/B 测试、实验效果、显著性检验、转化率对比、对照组与实验组评估时。
 icon: 🧪
+tags: [mode-business, mode-empirical, experimentation, inference, visualization]
 allowedTools: [get_schema, query_data, run_analysis, generate_chart]
 ---
 # A/B 实验分析

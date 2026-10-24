@@ -15,14 +15,14 @@ from pathlib import Path
 from typing import Any
 
 from infrastructure.credential_store import delete_secret, store_secret
-from infrastructure.paths import data_path
+from infrastructure.paths import content_data_path
 
 
 _LOCK = threading.RLock()
 
 
 def config_path() -> Path:
-    return data_path("config", "feishu-bot.json")
+    return content_data_path("config", "feishu-bot.json")
 
 
 def _default_config() -> dict[str, Any]:
@@ -47,16 +47,21 @@ def load_config() -> dict[str, Any]:
         except Exception:
             raw = {}
     raw = raw if isinstance(raw, dict) else {}
+    env_enabled = str(os.environ.get("BAA_FEISHU_ENABLED") or "").lower() in {"1", "true", "yes"}
     return {
-        "enabled": bool(raw.get("enabled", False)),
-        "app_id": str(raw.get("app_id") or ""),
+        "enabled": bool(raw.get("enabled", env_enabled)),
+        "app_id": str(raw.get("app_id") or os.environ.get("BAA_FEISHU_APP_ID") or ""),
         "app_secret_ref": str(raw.get("app_secret_ref") or ""),
         "event_verification_token_ref": str(raw.get("event_verification_token_ref") or ""),
         "inbound_transport": (
-            "webhook" if raw.get("inbound_transport") == "webhook" else "long_connection"
+            "webhook"
+            if (raw.get("inbound_transport") or os.environ.get("BAA_FEISHU_INBOUND_TRANSPORT")) == "webhook"
+            else "long_connection"
         ),
-        "receive_id_type": str(raw.get("receive_id_type") or "chat_id"),
-        "receive_id": str(raw.get("receive_id") or ""),
+        "receive_id_type": str(
+            raw.get("receive_id_type") or os.environ.get("BAA_FEISHU_RECEIVE_ID_TYPE") or "chat_id"
+        ),
+        "receive_id": str(raw.get("receive_id") or os.environ.get("BAA_FEISHU_RECEIVE_ID") or ""),
         "updated_at": str(raw.get("updated_at") or ""),
     }
 

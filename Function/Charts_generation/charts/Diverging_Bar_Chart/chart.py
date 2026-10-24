@@ -21,6 +21,16 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from charts.base import ChartResult
 
+try:
+    from charts.color_schemes import get_color_scheme
+except ImportError as e:  # pragma: no cover - 兜底，保证独立调用可用
+    logger.debug("[chart] 配色模块加载失败: %s", e)
+    def get_color_scheme(name: str = "mckinsey"):
+        return {"colors": [
+            "#005B9A", "#1E88E5", "#2E7D32", "#43A047",
+            "#E74C3C", "#C0392B", "#A93226", "#922B21",
+        ]}
+
 __all__ = ["generate"]
 import logging
 logger = logging.getLogger(__name__)
@@ -74,25 +84,25 @@ def _auto_col(df: pd.DataFrame, *hints: str) -> Optional[str]:
     if not hints or not df.columns.size:
         return None
 
-    col_lower = {c.lower(): c for c in df.columns}
+    col_lower = {str(c).lower(): c for c in df.columns}
 
     # 1. 精确匹配
     for h in hints:
-        h_lower = h.lower()
+        h_lower = str(h).lower()
         if h_lower in col_lower:
             return col_lower[h_lower]
 
     # 2. 模糊匹配
     for h in hints:
-        h_lower = h.lower()
+        h_lower = str(h).lower()
         for col in df.columns:
-            col_lower_name = col.lower()
+            col_lower_name = str(col).lower()
             if h_lower in col_lower_name or col_lower_name in h_lower:
                 return col
 
     # 3. 类型匹配
-    hint = hints[0].lower() if hints else ""
-    strs = [c for c in df.columns if df[c].dtype == object]
+    hint = str(hints[0]).lower() if hints else ""
+    strs = [c for c in df.columns if (df[c].dtype == object or pd.api.types.is_string_dtype(df[c]))]
     nums = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
 
     if any(kw in hint for kw in ["label", "name", "item", "category", "group", "国家", "地区", "名称", "项目"]):
@@ -165,10 +175,14 @@ def generate(
     logger.info(f"[Diverging_Bar_Chart] incoming columns={df.columns.tolist()}")
     logger.info(f"[Diverging_Bar_Chart] mapping={mapping}, item={item}, value={value}")
 
-    item_col = mapping.get("item") or item
-    value_col = mapping.get("value") or value
-    item_col = mapping.get("item") or item
-    value_col = mapping.get("value") or value
+    item_col = mapping.get("item")
+    item_col = item_col if item_col is not None else item
+    value_col = mapping.get("value")
+    value_col = value_col if value_col is not None else value
+    item_col = mapping.get("item")
+    item_col = item_col if item_col is not None else item
+    value_col = mapping.get("value")
+    value_col = value_col if value_col is not None else value
     title = options.get("title", title)
 
     _item = _auto_col(
@@ -184,9 +198,16 @@ def generate(
     # 检测数据格式
     fmt = _detect_format(df, _item)
 
+    # 配色方案：优先用 options.color_scheme
+    _scheme = get_color_scheme(options.get("color_scheme", "mckinsey"))
+    _palette = _scheme.get("colors") or [
+        "#005B9A", "#1E88E5", "#2E7D32", "#43A047",
+        "#E74C3C", "#C0392B", "#A93226", "#922B21",
+    ]
+
     if fmt == "multi":
         # 多列模式（李克特量表）
-        return _generate_multi_column(df, _item, title, warnings)
+        return _generate_multi_column(df, _item, title, warnings, _palette)
     else:
         # 单列模式
         _value = _auto_col(
@@ -195,14 +216,14 @@ def generate(
             "value", "score", "diff", "change",
             "得分", "分数", "净得分", "ESG", "评分", "增减", "变化"
         )
-        
+
         if _value is None or _value not in df.columns:
             return ChartResult(warnings=["找不到必填字段 [value]"])
 
-        return _generate_single_column(df, _item, _value, title, warnings)
+        return _generate_single_column(df, _item, _value, title, warnings, _scheme, _palette)
 
 
-def _generate_single_column(df: pd.DataFrame, item_col: str, value_col: str, title: str, warnings: list) -> ChartResult:
+def _generate_single_column(df: pd.DataFrame, item_col: str, value_col: str, title: str, warnings: list, scheme: dict = None, palette: list = None) -> ChartResult:
     """单列模式：item + value"""
     try:
         d = df[[item_col, value_col]].copy()
@@ -231,12 +252,15 @@ def _generate_single_column(df: pd.DataFrame, item_col: str, value_col: str, tit
     positive = d[d[value_col] >= 0]
     negative = d[d[value_col] < 0]
 
+    _pos_color = (scheme or {}).get("primary", "#005B9A") if scheme else "#005B9A"
+    _neg_color = (scheme or {}).get("negative", "#E74C3C") if scheme else "#E74C3C"
+
     if len(positive) > 0:
         fig.add_trace(go.Bar(
             y=positive[item_col],
             x=positive[value_col],
             orientation='h',
-            marker=dict(color='#005B9A'),
+            marker=dict(color=_pos_color),
             name='正值',
             hovertemplate='<b>%{y}</b><br>%{x:.2f}<extra></extra>'
         ))
@@ -246,7 +270,7 @@ def _generate_single_column(df: pd.DataFrame, item_col: str, value_col: str, tit
             y=negative[item_col],
             x=negative[value_col],
             orientation='h',
-            marker=dict(color='#E74C3C'),
+            marker=dict(color=_neg_color),
             name='负值',
             hovertemplate='<b>%{y}</b><br>%{x:.2f}<extra></extra>'
         ))
@@ -287,15 +311,14 @@ def _generate_single_column(df: pd.DataFrame, item_col: str, value_col: str, tit
     return ChartResult(html=html, spec={}, warnings=warnings, meta=meta)
 
 
-def _generate_multi_column(df: pd.DataFrame, item_col: str, title: str, warnings: list) -> ChartResult:
+def _generate_multi_column(df: pd.DataFrame, item_col: str, title: str, warnings: list, palette: list = None) -> ChartResult:
     """多列模式：李克特量表（堆叠正负值）"""
     
     d = df.copy()
-    d = d.dropna()
 
     # 获取所有数值列（除了 item 列）
     num_cols = [c for c in d.columns if c != item_col and pd.api.types.is_numeric_dtype(d[c])]
-    
+
     if len(num_cols) < 2:
         return ChartResult(warnings=["多列模式需要至少2个数值列"])
 
@@ -303,6 +326,12 @@ def _generate_multi_column(df: pd.DataFrame, item_col: str, title: str, warnings
     for col in num_cols:
         s = _get_1d_series(d, col, warnings, role="multi-value")
         d[col] = pd.to_numeric(s, errors="coerce")
+
+    # 仅丢弃数值列含 NaN 的行（原 d.dropna() 会因任意无关列的 NaN 误删完整行）
+    before = len(d)
+    d = d.dropna(subset=num_cols)
+    if before != len(d):
+        warnings.append(f"已忽略 {before - len(d)} 行含缺失数值的数据")
 
     # 分离负值列和正值列
     negative_cols = [c for c in num_cols if (d[c] < 0).any()]
@@ -322,8 +351,13 @@ def _generate_multi_column(df: pd.DataFrame, item_col: str, title: str, warnings
     fig = go.Figure()
 
     # 配色
+    _palette = palette or []
     neg_colors = ['#E74C3C', '#C0392B', '#A93226', '#922B21']
     pos_colors = ['#005B9A', '#1E88E5', '#2E7D32', '#43A047']
+    # 若有 scheme palette，从中派生正/负色
+    if _palette:
+        pos_colors = [_palette[i % len(_palette)] for i in range(max(1, len(positive_cols)))]
+        neg_colors = [_palette[(len(_palette) // 2 + i) % len(_palette)] for i in range(max(1, len(negative_cols)))]
 
     # 添加负值列（从右到左堆叠）
     for idx, col in enumerate(sorted(negative_cols, reverse=True)):

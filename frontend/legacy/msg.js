@@ -131,7 +131,7 @@ import { renderMd } from "./markdown.js";
 
     if (contextWindow) {
       const pct = Math.min(promptTokens / contextWindow * 100, 100);
-      fill.style.width = pct + "%";
+      fill.style.transform = `scaleX(${pct / 100})`;
       if      (pct >= 85) fill.classList.add("crit");
       else if (pct >= 60) fill.classList.add("warn");
       label.textContent = t('ctx.bar', {
@@ -140,7 +140,7 @@ import { renderMd } from "./markdown.js";
         pct:   pct.toFixed(1),
       });
     } else {
-      fill.style.width = "0%";
+      fill.style.transform = "scaleX(0)";
       label.textContent = t('token.bar', { input: fmtK(totalInput), output: fmtK(totalOutput) });
     }
 

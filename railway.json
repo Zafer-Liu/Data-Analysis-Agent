@@ -4,10 +4,11 @@
     "builder": "DOCKERFILE"
   },
   "deploy": {
-    "startCommand": "python app.py",
-    "healthcheckPath": "/api/health",
-    "healthcheckTimeout": 300,
-    "restartPolicyType": "ON_FAILURE",
-    "restartPolicyMaxRetries": 3
+  "startCommand": "python app.py",
+  "healthcheckPath": "/api/health",
+  "healthcheckTimeout": 300,
+  "restartPolicyType": "ON_FAILURE",
+  "restartPolicyMaxRetries": 3,
+  "numReplicas": 1
   }
 }

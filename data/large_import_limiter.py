@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-from infrastructure.paths import data_path
+from infrastructure.paths import content_data_path
 
 
 MAX_CONCURRENT_IMPORTS = max(1, int(os.environ.get("BAA_MAX_CONCURRENT_IMPORTS", "2")))
@@ -41,7 +41,7 @@ class ImportSlot:
 
 class ImportSlotStore:
     def __init__(self, path: Path | None = None, max_slots: int = MAX_CONCURRENT_IMPORTS):
-        self.path = path or data_path("outputs", "jobs", "large_import_slots.db")
+        self.path = path or content_data_path("outputs", "jobs", "large_import_slots.db")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.max_slots = max(1, max_slots)
         with self._connection() as conn:

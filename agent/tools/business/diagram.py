@@ -1,14 +1,14 @@
 """Agent tool implementations for draw.io diagram operations.
 
-Tools: display_diagram, edit_diagram, get_diagram, get_shape_library.
+Model-visible tools: display_diagram, edit_diagram, and get_diagram.
+Shape-library lookup is an internal validation helper used by diagram writes.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import os
 import re
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +23,45 @@ from agent.tools.business.xml_utils import (
 
 log = logging.getLogger(__name__)
 
-_SHAPE_LIBS_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "shape_libs"
+_SHAPE_LIBS_DIR = Path(__file__).resolve().parents[3] / "data" / "shape_libs"
+_SHAPE_LIBRARY_REF_RE = re.compile(r"\bmxgraph\.([a-z0-9_-]+)(?:\.|;)", re.IGNORECASE)
+
+
+def _load_shape_library_reference(library: str) -> dict[str, Any]:
+    """Load one local draw.io shape catalog for internal diagram validation."""
+    normalized = str(library or "").strip().lower()
+    if not normalized or not re.fullmatch(r"[a-z0-9_-]+", normalized):
+        return {"ok": False, "error": "Invalid shape library name"}
+
+    lib_file = _SHAPE_LIBS_DIR / f"{normalized}.md"
+    if not lib_file.is_file():
+        available = sorted(path.stem for path in _SHAPE_LIBS_DIR.glob("*.md"))
+        return {
+            "ok": False,
+            "library": normalized,
+            "error": f"Shape library '{normalized}' is not installed",
+            "available": available,
+        }
+    try:
+        return {
+            "ok": True,
+            "library": normalized,
+            "content": lib_file.read_text(encoding="utf-8"),
+        }
+    except OSError as exc:
+        return {"ok": False, "library": normalized, "error": f"Failed to read shape library: {exc}"}
+
+
+def _inspect_shape_libraries(xml: str) -> dict[str, Any]:
+    """Resolve all mxgraph libraries referenced by XML without a model tool call."""
+    libraries = sorted(set(_SHAPE_LIBRARY_REF_RE.findall(str(xml or ""))))
+    resolved = [_load_shape_library_reference(library) for library in libraries]
+    missing = [item for item in resolved if not item.get("ok")]
+    return {
+        "ok": not missing,
+        "libraries": libraries,
+        "missing": missing,
+    }
 
 
 # ── display_diagram ──────────────────────────────────────────
@@ -43,39 +81,32 @@ def _fill_template_content(template_id: str, content: dict[str, str]) -> str:
     if not template:
         raise ValueError(f"Unknown template_id: {template_id}")
     cell_map = template.get("content_cells", {})
-    xml = template["xml"]
 
+    # Parse with ElementTree instead of regex substitution so existing cell
+    # values (placeholders) and attribute ordering are handled safely.
+    root = ET.fromstring(template["xml"])
+    id_to_cell = {cell.get("id"): cell for cell in root.iter("mxCell")}
+    applied = 0
     for key, text in content.items():
-        cell_id = cell_map.get(key)
-        if not cell_id:
+        cell = id_to_cell.get(cell_map.get(key, ""))
+        if cell is None:
             continue
-        escaped = _escape_xml_value(text)
-        # Replace the value="" attribute of the cell with matching id
-        # Pattern: <mxCell id="X" value="..." ...
-        pattern = re.compile(
-            r'(<mxCell\s+id="' + re.escape(cell_id) + r'"\s+value=")([^"]*)(")'
+        cell.set("value", str(text))
+        applied += 1
+    if not applied and content:
+        raise ValueError(
+            f"No content cells matched for template {template_id}; known keys: {sorted(cell_map)}"
         )
-        xml = pattern.sub(
-            lambda m: m.group(1) + escaped + m.group(3),
-            xml,
-            count=1,
-        )
-
-    return xml
+    # ET emits newlines inside attribute values as &#10; character references,
+    # which XML parsers preserve (draw.io renders them as line breaks).
+    return ET.tostring(root, encoding="unicode")
 
 
-def _escape_xml_value(text: str) -> str:
-    """Escape text for use in an XML attribute value."""
-    text = text.replace("&", "&amp;")
-    text = text.replace("<", "&lt;")
-    text = text.replace(">", "&gt;")
-    text = text.replace('"', "&quot;")
-    text = text.replace("\n", "&#xa;")
-    text = text.replace("\r", "")
-    return text
-
-
-def handle_display_diagram(params: dict[str, Any], session_id: str | None = None) -> dict[str, Any]:
+def handle_display_diagram(
+    params: dict[str, Any],
+    session_id: str | None = None,
+    color_scheme: str = "mckinsey",
+) -> dict[str, Any]:
     """Create or replace a diagram in the canvas project.
 
     Validates XML, auto-fixes if needed, stores in project, and returns
@@ -98,6 +129,15 @@ def handle_display_diagram(params: dict[str, Any], session_id: str | None = None
 
     if not xml:
         return {"ok": False, "error": "either xml or (template_id + content) is required"}
+
+    shape_libraries = _inspect_shape_libraries(xml)
+    if not shape_libraries["ok"]:
+        missing = ", ".join(item["library"] for item in shape_libraries["missing"])
+        return {
+            "ok": False,
+            "error": f"Diagram XML references unavailable shape libraries: {missing}",
+            "shape_libraries": shape_libraries,
+        }
 
     # Wrap bare XML
     if "<mxfile>" not in xml:
@@ -122,6 +162,12 @@ def handle_display_diagram(params: dict[str, Any], session_id: str | None = None
             "truncated": True,
         }
 
+    # 主题换肤（槽位色 → 会话配色方案）+ 概念图质检；warnings 回传 LLM 同轮可修
+    from agent.tools.business.diagram_theme import apply_diagram_theme, qc_diagram
+
+    xml, _theme_warnings = apply_diagram_theme(xml, color_scheme)
+    warnings = qc_diagram(xml)
+
     store = get_business_canvas_store()
 
     if project_id:
@@ -139,7 +185,14 @@ def handle_display_diagram(params: dict[str, Any], session_id: str | None = None
             project_id=project_id,
             rendering_mode="diagram",
         )
-        return {"ok": True, "project": project, "xml": xml, "fixes_applied": result.get("fixes", [])}
+        return {
+            "ok": True,
+            "project": project,
+            "xml": xml,
+            "fixes_applied": result.get("fixes", []),
+            "shape_libraries": shape_libraries["libraries"],
+            "warnings": warnings,
+        }
     else:
         # Create new project with diagram template
         if not template_id:
@@ -163,13 +216,24 @@ def handle_display_diagram(params: dict[str, Any], session_id: str | None = None
             project_id=project["id"],
             rendering_mode="diagram",
         )
-        return {"ok": True, "project": project, "xml": xml, "fixes_applied": result.get("fixes", [])}
+        return {
+            "ok": True,
+            "project": project,
+            "xml": xml,
+            "fixes_applied": result.get("fixes", []),
+            "shape_libraries": shape_libraries["libraries"],
+            "warnings": warnings,
+        }
 
 
 # ── edit_diagram ──────────────────────────────────────────────
 
 
-def handle_edit_diagram(params: dict[str, Any], session_id: str | None = None) -> dict[str, Any]:
+def handle_edit_diagram(
+    params: dict[str, Any],
+    session_id: str | None = None,
+    color_scheme: str = "mckinsey",
+) -> dict[str, Any]:
     """Edit specific cells in the current diagram by ID-based operations."""
     project_id = str(params.get("project_id") or "")
     operations = params.get("operations") or []
@@ -199,6 +263,21 @@ def handle_edit_diagram(params: dict[str, Any], session_id: str | None = None) -
 
     new_xml = validation["fixed"] or new_xml
 
+    shape_libraries = _inspect_shape_libraries(new_xml)
+    if not shape_libraries["ok"]:
+        missing = ", ".join(item["library"] for item in shape_libraries["missing"])
+        return {
+            "ok": False,
+            "error": f"Result XML references unavailable shape libraries: {missing}",
+            "shape_libraries": shape_libraries,
+        }
+
+    # 编辑同样过主题换肤（新增槽位色统一）+ 质检
+    from agent.tools.business.diagram_theme import apply_diagram_theme, qc_diagram
+
+    new_xml, _theme_warnings = apply_diagram_theme(new_xml, color_scheme)
+    warnings = qc_diagram(new_xml)
+
     # Store updated XML
     project = store.update_project_diagram_xml(
         project_id=project_id,
@@ -212,6 +291,8 @@ def handle_edit_diagram(params: dict[str, Any], session_id: str | None = None) -
         "xml": new_xml,
         "operation_errors": errors,
         "fixes_applied": validation.get("fixes", []),
+        "shape_libraries": shape_libraries["libraries"],
+        "warnings": warnings,
     }
 
 
@@ -232,29 +313,3 @@ def handle_get_diagram(params: dict[str, Any], session_id: str | None = None) ->
 
     xml = project.get("diagram_xml", "")
     return {"ok": True, "project_id": project_id, "xml": xml, "template_id": project.get("template_id", "")}
-
-
-# ── get_shape_library ──────────────────────────────────────────
-
-
-def handle_get_shape_library(params: dict[str, Any], session_id: str | None = None) -> dict[str, Any]:
-    """Return draw.io shape library documentation for reference."""
-    library = str(params.get("library") or "").strip().lower()
-
-    if not library:
-        return {"ok": False, "error": "library parameter is required"}
-
-    # Sanitize: only allow safe filenames
-    if not re.match(r"^[a-z0-9_-]+$", library):
-        return {"ok": False, "error": "Invalid library name"}
-
-    lib_file = _SHAPE_LIBS_DIR / f"{library}.md"
-    if not lib_file.exists():
-        available = [f.stem for f in _SHAPE_LIBS_DIR.glob("*.md")] if _SHAPE_LIBS_DIR.exists() else []
-        return {"ok": False, "error": f"Library '{library}' not found. Available: {', '.join(available)}"}
-
-    try:
-        content = lib_file.read_text(encoding="utf-8")
-        return {"ok": True, "library": library, "content": content}
-    except Exception as exc:
-        return {"ok": False, "error": f"Failed to read library file: {exc}"}

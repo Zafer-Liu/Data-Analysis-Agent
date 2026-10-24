@@ -24,6 +24,17 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from charts.base import ChartResult
 
+try:
+    from charts.color_schemes import get_color_scheme
+except ImportError as e:  # pragma: no cover - 兜底，保证独立调用可用
+    log.debug("[chart] 配色模块加载失败: %s", e)
+    def get_color_scheme(name: str = "mckinsey"):
+        return {"colors": [
+            "#005B9A", "#1E88E5", "#27AE60", "#43A047", "#8E44AD",
+            "#6C63FF", "#16A085", "#2C3E50", "#C0392B", "#E74C3C",
+            "#7F8C8D", "#2ECC71", "#9B59B6", "#1ABC9C", "#34495E",
+        ]}
+
 __all__ = ["generate"]
 
 _DATA_FMT = "source列 + target列 + [weight列]"
@@ -37,16 +48,17 @@ _NODE_COLORS = [
 ]
 
 
-def _auto_col(df: pd.DataFrame, *hints: str) -> Optional[str]:
+def _auto_col(df: pd.DataFrame, *hints: str, exclude: set = None) -> Optional[str]:
     """根据提示自动查找匹配的列名。"""
     if not hints or not df.columns.size:
         return None
 
+    exclude = exclude or set()
     valid_hints = [h for h in hints if h is not None]
     if not valid_hints:
         return None
 
-    col_lower = {c.lower(): c for c in df.columns}
+    col_lower = {str(c).lower(): c for c in df.columns if c not in exclude}
 
     # 1. 精确匹配
     for h in valid_hints:
@@ -58,14 +70,16 @@ def _auto_col(df: pd.DataFrame, *hints: str) -> Optional[str]:
     for h in valid_hints:
         h_lower = str(h).lower()
         for col in df.columns:
+            if col in exclude:
+                continue
             col_lower_name = str(col).lower()
             if h_lower in col_lower_name or col_lower_name in h_lower:
                 return col
 
     # 3. 类型匹配
     hint = str(valid_hints[0]).lower() if valid_hints else ""
-    strs = [c for c in df.columns if df[c].dtype == object]
-    nums = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+    strs = [c for c in df.columns if c not in exclude and (df[c].dtype == object or pd.api.types.is_string_dtype(df[c]))]
+    nums = [c for c in df.columns if c not in exclude and pd.api.types.is_numeric_dtype(df[c])]
 
     if any(kw in hint for kw in ["source", "target", "label", "name", "from", "to", "起点", "终点"]):
         return strs[0] if strs else (nums[0] if nums else None)
@@ -252,16 +266,30 @@ def generate(
         else:
             return ChartResult(warnings=["请提供 df 或 excel_path"])
 
-    src_col = mapping.get("source") or source
-    tgt_col = mapping.get("target") or target
-    weight_col = mapping.get("weight") or weight
+    src_col = mapping.get("source")
+    src_col = src_col if src_col is not None else source
+    tgt_col = mapping.get("target")
+    tgt_col = tgt_col if tgt_col is not None else target
+    weight_col = mapping.get("weight")
+    weight_col = weight_col if weight_col is not None else weight
     title = options.get("title", title)
 
+    # 链式 exclude：target 排除已解析的 source，避免无 hint 时两者回退到
+    # 同一 strs[0]，groupby([src, tgt]) 撞列报错
     _src = _auto_col(df, src_col, "source", "起点", "from", "origin")
-    _tgt = _auto_col(df, tgt_col, "target", "终点", "to", "destination")
+    _tgt = _auto_col(df, tgt_col, "target", "终点", "to", "destination",
+                     exclude={_src} if _src else None)
+    if _src is not None and _src == _tgt:
+        _tgt = None
 
-    # 即使 weight_col 没显式传，也自动尝试识别
-    _weight = _auto_col(df, weight_col, "weight", "权重", "strength", "value", "amount", "size")
+    # 仅在用户显式提供 weight 提示时才自动识别权重列。
+    # 此前即使 weight_col=None 也传 "value"/"amount"/"size" 作提示词，
+    # 会把任意数值列自动选为权重，造成用户意图外的加权。现在无显式提示
+    # 则默认不加权（_weight=None），边宽统一。
+    if weight_col:
+        _weight = _auto_col(df, weight_col, "weight", "权重", "strength")
+    else:
+        _weight = None
 
     for role, col in [("source", _src), ("target", _tgt)]:
         if col is None or col not in df.columns:
@@ -317,7 +345,10 @@ def generate(
         edge_widths = [3.0] * len(edge_list)
 
     # 节点颜色
-    node_color_map = _assign_unique_colors(all_nodes, _NODE_COLORS)
+    # 配色方案：优先用 options.color_scheme，回退到 _NODE_COLORS
+    _scheme = get_color_scheme(options.get("color_scheme", "mckinsey"))
+    _palette = _scheme.get("colors") or _NODE_COLORS
+    node_color_map = _assign_unique_colors(all_nodes, _palette)
     node_colors = [node_color_map[n] for n in all_nodes]
 
     # 创建 Plotly 图表

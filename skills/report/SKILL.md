@@ -2,6 +2,7 @@
 name: report
 description: 规划结构化业务分析报告（report 报告生成）
 icon: 📄
+tags: [mode-business, mode-ml, mode-empirical, reporting, export]
 allowedTools: [get_schema, query_data, propose_report_outline]
 ---
 # 报告规划

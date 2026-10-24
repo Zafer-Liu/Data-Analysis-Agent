@@ -2,3 +2,6 @@
 # Pin PyInstaller so Windows/macOS GitHub runners produce comparable layouts.
 pyinstaller==6.21.0
 Pillow>=10.0.0         # installer/make_ico.py — PNG to multi-size ICO conversion
+# Native desktop shell. On Windows this uses WebView2; on macOS it uses the
+# system WKWebView through Cocoa/PyObjC. Server-only/Linux builds do not need it.
+pywebview==6.2.1; sys_platform == "win32" or sys_platform == "darwin"

@@ -459,6 +459,8 @@ class PromptContext:
     needs_chart: bool = False
     needs_output: bool = False
     needs_hooks: bool = False
+    needs_browser: bool = False
+    needs_ingest: bool = False
     has_knowledge: bool = False
     has_unnamed_columns: bool = False
     needs_diagram: bool = False
@@ -508,19 +510,35 @@ Accuracy guardrails:
   equivalent quality SQL when key filters depend on missing values, dates, ids or labels.
   If profile_data reports pseudo-null strings or low date parse rates, stop and clean or
   explain the blocker before computing key metrics.
+- Missing-value checks must follow the platform standard: count NULLs together with
+  empty/whitespace strings and pseudo-null tokens ('', 'null', 'nan', 'n/a', '-'), and
+  report zero values in numeric columns separately. A column is "complete" only after
+  all three checks pass; never conclude completeness from an IS NULL count alone.
 - For every key metric, state a metric contract before interpreting it: numerator,
   denominator, sample scope, time window and exclusions. Do not mix conversion rates,
   event distributions and window coverage rates.
 - In final reports, every numeric claim must be traceable to successful tool output.
-  Separate conclusions into data-supported facts, hypotheses and not-verifiable items.
-  Do not assert merchant category, campaign, holiday, user scenario or causal reasons
-  unless those fields or retrieved knowledge explicitly support them.
+  Report tables may only contain columns that executed queries actually returned; if a
+  metric column was never queried, do not fill it from memory or interpolation — query
+  it first or drop the column. Copy counts and statistics verbatim from the tool result
+  instead of retyping them. Separate conclusions into data-supported facts, hypotheses
+  and not-verifiable items. Do not assert merchant category, campaign, holiday, user
+  scenario or causal reasons unless those fields or retrieved knowledge explicitly
+  support them.
 
 1. Call get_schema before writing SQL unless the current-turn evidence already contains
 the exact table structure. For a table omitted from a compact schema, call
 get_table_detail before querying it. Use exact identifiers; never guess.
 2. Execute SQL through query_data. Report empty results and errors honestly. Do not
-replace them with inferred values.
+replace them with inferred values. Always fill the `purpose` argument with a one-sentence
+business goal (e.g. '统计各月销售额趋势', '对比 A/B 两组转化率') — it is shown to the user
+next to the SQL validation badge so they can see what each query is for.
+You may also use write SQL (CREATE TABLE / INSERT / UPDATE / DELETE / ALTER / TRUNCATE)
+inside query_data or create_analysis_table for data preparation: every write applies
+only to the in-memory session cache and never modifies the user's original files.
+Prefer CREATE TABLE … AS SELECT over mutating an existing table, and prefer
+create_analysis_table for derived tables you want the user to see. Never emit
+PRAGMA, INSTALL/LOAD, ATTACH, COPY TO file, SET, transactions or multi-statement SQL.
 3. Regression, correlation, significance tests, clustering, forecasting and other
 statistical computation must use run_analysis or query_data; never calculate results
 in-context.
@@ -574,7 +592,25 @@ selection only when regenerating an already confirmed chart type in the same tur
 field_mapping values must be SQL result column names, not raw arrays or display objects;
 multi-series y and parallel-coordinate dimensions are lists. Ensure every required role
 is selected by the SQL. NEVER use placeholder strings like 'category' or 'value' as
-field_mapping values -- they must always be real column names from the SQL result."""
+field_mapping values -- they must always be real column names from the SQL result.
+
+Visual quality rules for every chart:
+- One chart, one message. Pick the chart type that makes the user's main point visible
+  at a glance; anything that does not support that message should be aggregated away.
+- Aggregate before plotting: if a categorical axis would exceed ~8 slices or bars,
+  reduce it in SQL to Top N plus an '其他' bucket ordered by the metric descending
+  (dense time axes are exempt). If more than 5-6 series are needed, keep the key ones,
+  sum the rest into '其他' or split into separate charts.
+- Filter NULL/empty category values in SQL instead of plotting them.
+- Sort categories by value (descending) unless the axis is inherently ordered (time,
+  age band, process stage); alphabetical or random bars hide the message.
+- Bar/column value axes start at zero. Avoid dual axes -- when units differ, use two
+  stacked panels or normalized/indexed series instead.
+- Use the highlight parameter for at most 1-2 focal series or category values; the
+  renderer dims everything else. One accent is the goal, two is the cap.
+- A generate_chart result may end with QC warnings (complexity budget exceeded, empty
+  labels, duplicate series names). Fix meaningful ones by adjusting the SQL/mapping and
+  calling generate_chart again in the same turn instead of shipping the chart as is."""
 
 
 OUTPUT_RULES = """## Output artifact rules
@@ -609,6 +645,32 @@ then call configure_hooks with merge=true. Never invent undocumented endpoint fi
 Use command hooks only when the user explicitly requests a local Python script hook and
 confirms command hooks; never generate a shell snippet. Preserve existing hooks unless
 replacement was explicitly requested."""
+
+
+BROWSER_RULES = """## Browser research rules
+
+When the user asks to search, research, or investigate something on the web, use the
+browser tools to perform visible web research. The browser opens as a real window on
+screen so the user can watch every action.
+
+Workflow: browser_search to find relevant pages, browser_navigate to open a result,
+browser_extract to read page content, browser_click/browser_fill to interact if needed,
+browser_screenshot to capture evidence, browser_close when done.
+
+Always start with browser_search unless the user gave a specific URL. After extracting
+content, summarize findings for the user. Close the browser when research is complete."""
+
+
+INGEST_RULES = """## Web table ingestion rules
+
+When the user wants tables or data from a URL brought INTO the conversation for
+analysis (grabbing / importing / converting into tables), call fetch_table with the
+exact URL once; it registers every extracted table as a new data source in one step.
+For JavaScript-rendered pages (empty or missing tables), browser_navigate first, then
+browser_extract_tables. After registration, report each table's name, row count and
+any truncation flag, then continue with get_schema and the normal SQL/analysis tools.
+Never fabricate table contents; when nothing usable is found, say so honestly and
+suggest the browser fallback. Private/local network URLs are rejected."""
 
 
 MULTI_SOURCE_RULES = """## Multi-source SQL rules
@@ -704,6 +766,26 @@ Escape special characters inside `value`: `&lt;` `&gt;` `&amp;` `&quot;` `&#xa;`
 - Text label only: `text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;`
 - Fill colors (use consistently): blue `fillColor=#dae8fc;strokeColor=#6c8ebf;`, green `fillColor=#d5e8d4;strokeColor=#82b366;`, yellow `fillColor=#fff2cc;strokeColor=#d6b656;`, red `fillColor=#f8cecc;strokeColor=#b85450;`, purple `fillColor=#e1d5e7;strokeColor=#9673a6;`, grey `fillColor=#f5f5f5;strokeColor=#666666;`
 
+### Visual quality rules (the renderer enforces the palette)
+
+- Use ONLY the six palette slots above — the renderer re-maps them to the
+  session brand scheme automatically. NEVER invent custom hex colors; they
+  will clash with the rest of the conversation's charts and diagrams.
+- One color, one meaning: assign each slot a consistent semantic (e.g. green
+  = strengths/opportunity, red = risks) and keep it across the diagram.
+- When the diagram has a focal message, let 1-2 slots carry it and use grey
+  for context; four-quadrant frameworks (SWOT/BCG) keep all four slots.
+- Node budget: ~30 meaningful nodes is the ceiling for one message; aggregate
+  minor nodes or split into multiple diagrams (QC warns past 60).
+- Pick ONE flow direction per diagram (left-to-right or top-to-bottom) and
+  keep edge exits/entries consistent with it.
+- Label every edge whose direction or meaning matters, with a short verb
+  phrase (`value="approves"`), not sentences.
+- Keep fontSize in 10-16 (titles may use 18-20); avoid a font-size zoo.
+- If the tool result carries QC warnings (complexity budget, floating or
+  isolated nodes, font bounds), fix them with another edit_diagram call in
+  the same turn instead of leaving the diagram as is.
+
 ### Edge routing rules
 
 1. Specify `exitX`, `exitY`, `entryX`, `entryY` in the style for every edge.
@@ -790,6 +872,16 @@ _HOOKS_INTENT_RE = re.compile(
     r"(hooks?|webhooks?|callback|automation|回调|自动化|钩子|配置这个.{0,20}(?:链接|url))",
     re.IGNORECASE,
 )
+_BROWSER_INTENT_RE = re.compile(
+    r"(google|baidu|bing|search|搜索|调研|查找|查一下|浏览器|browser)",
+    re.IGNORECASE,
+)
+_INGEST_URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+_INGEST_HINT_RE = re.compile(
+    r"(表格|数据|抓取|抓下来|爬取|提取|导入|转成.{0,6}表|scrape|crawl|fetch|import|"
+    r"table|dataset|csv|json|pdf)",
+    re.IGNORECASE,
+)
 _CHART_INTENT_RE = re.compile(
     r"(chart|plot|visuali[sz]|dashboard|图表|可视化|画图|绘图|看板)",
     re.IGNORECASE,
@@ -833,6 +925,16 @@ def message_needs_workspace_rules(message: str, *, has_workspace: bool = False) 
 
 def message_needs_hooks_rules(message: str) -> bool:
     return bool(_HOOKS_INTENT_RE.search(str(message or "")))
+
+
+def message_needs_browser_rules(message: str) -> bool:
+    return bool(_BROWSER_INTENT_RE.search(str(message or "")))
+
+
+def message_needs_ingest_rules(message: str) -> bool:
+    # A bare URL alone must not attach the block; require an ingest hint too.
+    text = str(message or "")
+    return bool(_INGEST_URL_RE.search(text) and _INGEST_HINT_RE.search(text))
 
 
 def message_needs_chart_rules(message: str) -> bool:
@@ -882,6 +984,10 @@ def get_system_prompt(
         blocks.append(TEAMS_RULES)
     if context.needs_hooks:
         blocks.append(HOOKS_RULES)
+    if context.needs_browser:
+        blocks.append(BROWSER_RULES)
+    if context.needs_ingest:
+        blocks.append(INGEST_RULES)
     if context.source_count > 1:
         blocks.append(MULTI_SOURCE_RULES)
     if context.has_unnamed_columns:

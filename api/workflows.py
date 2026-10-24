@@ -6,6 +6,7 @@ from flask import Blueprint, jsonify, request
 from agent.workflows.models import WorkflowContractError, WorkflowErrorCode
 from agent.workflows.runtime import workflow_runtime_manager
 from agent.workflows.service import WorkflowService
+from .state import require_session_ownership
 
 
 bp = Blueprint("workflows", __name__)
@@ -39,6 +40,7 @@ def _body() -> dict:
 
 
 @bp.get("/api/session/<sid>/agent-profiles")
+@require_session_ownership
 def list_agent_profiles(sid: str):
     try:
         with WorkflowService.for_session(sid) as service:
@@ -49,6 +51,7 @@ def list_agent_profiles(sid: str):
 
 
 @bp.post("/api/session/<sid>/agent-profiles")
+@require_session_ownership
 def create_agent_profile(sid: str):
     body = _body()
     try:
@@ -68,6 +71,7 @@ def create_agent_profile(sid: str):
 
 
 @bp.get("/api/session/<sid>/workflows")
+@require_session_ownership
 def list_workflows(sid: str):
     try:
         with WorkflowService.for_session(sid) as service:
@@ -83,6 +87,7 @@ def list_workflows(sid: str):
 
 
 @bp.post("/api/session/<sid>/workflows")
+@require_session_ownership
 def create_workflow(sid: str):
     body = _body()
     try:
@@ -101,6 +106,7 @@ def create_workflow(sid: str):
 
 
 @bp.get("/api/session/<sid>/workflows/<workflow_id>")
+@require_session_ownership
 def get_workflow(sid: str, workflow_id: str):
     try:
         with WorkflowService.for_session(sid) as service:
@@ -111,6 +117,7 @@ def get_workflow(sid: str, workflow_id: str):
 
 
 @bp.delete("/api/session/<sid>/workflows/<workflow_id>")
+@require_session_ownership
 def delete_workflow(sid: str, workflow_id: str):
     try:
         result = workflow_runtime_manager.get(sid).delete_workflow(workflow_id)
@@ -120,6 +127,7 @@ def delete_workflow(sid: str, workflow_id: str):
 
 
 @bp.put("/api/session/<sid>/workflows/<workflow_id>/draft")
+@require_session_ownership
 def update_workflow_draft(sid: str, workflow_id: str):
     body = _body()
     try:
@@ -139,6 +147,7 @@ def update_workflow_draft(sid: str, workflow_id: str):
 
 
 @bp.post("/api/session/<sid>/workflows/<workflow_id>/validate")
+@require_session_ownership
 def validate_workflow(sid: str, workflow_id: str):
     try:
         with WorkflowService.for_session(sid) as service:
@@ -149,6 +158,7 @@ def validate_workflow(sid: str, workflow_id: str):
 
 
 @bp.post("/api/session/<sid>/workflows/<workflow_id>/publish")
+@require_session_ownership
 def publish_workflow(sid: str, workflow_id: str):
     body = _body()
     try:

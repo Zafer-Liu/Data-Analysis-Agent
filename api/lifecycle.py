@@ -42,10 +42,11 @@ def _check_auth():
 
 
 def _require_cloud_auth():
-    """Require an authenticated user in cloud-managed deployments.
+    """Keep global storage-maintenance endpoints out of managed cloud.
 
-    In desktop mode (no cloud env) this is a no-op so local users can still
-    manage their own storage without a login step.
+    These APIs enumerate and mutate process-wide temporary files, so an
+    account-level login is not sufficient authorization in a multi-user Web
+    deployment.  Desktop/local users retain the existing maintenance UI.
     """
     from .auth import is_cloud_managed, current_user
     if not is_cloud_managed():
@@ -54,6 +55,8 @@ def _require_cloud_auth():
     if not user:
         from flask import abort
         abort(401)
+    from flask import abort
+    abort(404)
 
 
 def _retention_days() -> int:

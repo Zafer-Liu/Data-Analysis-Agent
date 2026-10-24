@@ -7,15 +7,16 @@ A5 起：路由支持 ?sid=<session_id> 查询参数。
 import logging
 import os
 import re
-from infrastructure.paths import data_path
+from infrastructure.paths import content_data_path
 
 from flask import Blueprint, send_file, abort, request, jsonify, Response
+from .state import check_session_ownership, require_session_ownership
 
 log = logging.getLogger(__name__)
 
 bp = Blueprint("output", __name__)
 
-_EXPORT_DIR = str(data_path("outputs", "exports"))
+_EXPORT_DIR = str(content_data_path("outputs", "exports"))
 
 
 def _resolve_filepath(filename: str) -> str | None:
@@ -80,14 +81,49 @@ def download_export(filename: str):
     Security: filename 经过路径穿越校验；artifacts_dir 路径 resolve 后必须在
     runtime.artifacts_dir 内。
     """
+    sid = (request.args.get("sid") or "").strip()
+    from infrastructure.paths import is_cloud_managed_runtime
+    if is_cloud_managed_runtime():
+        if not sid:
+            abort(403)
+        allowed, _ = check_session_ownership(sid)
+        if not allowed:
+            abort(403)
+
+        # A caller may only resolve the current Workspace or one explicitly
+        # referenced by an artifact created in its own live session.
+        requested_workspace = (request.args.get("workspace_id") or "").strip()
+        if requested_workspace:
+            from api.state import session_manager
+            from data.workspace import workspace_manager
+
+            sess = session_manager.get(sid)
+            allowed_workspaces = {
+                str(workspace_manager.workspace_id_for_session(sid) or ""),
+                *{
+                    str(item.get("workspace_id") or "")
+                    for item in getattr(sess, "recent_artifacts", []) if isinstance(item, dict)
+                },
+            }
+            if requested_workspace not in allowed_workspaces:
+                abort(403)
+
     filepath = _resolve_filepath(filename)
     if filepath is None:
-        abort(404)
+        # File expired, was cleaned, or the workspace/session no longer
+        # resolves the artifact. Return a structured error so the front
+        # end can surface "该文件已过期，请重新生成" instead of a bare 404
+        # page the user can't act on.
+        return jsonify({
+            "error": "file_expired",
+            "message": "该导出文件已过期或被清理，请重新生成。",
+        }), 404
 
     return send_file(filepath, as_attachment=True, download_name=filename)
 
 
 @bp.get("/api/session/<sid>/tool-results/<artifact_id>")
+@require_session_ownership
 def read_tool_result(sid: str, artifact_id: str):
     """Read a B6 persisted result after validating it belongs to the session."""
     from api.state import session_manager

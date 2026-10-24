@@ -8,7 +8,26 @@ from typing import Literal
 
 
 SKILL_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
+SKILL_TAG_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+MAX_SKILL_TAGS = 12
+ANALYSIS_MODES = frozenset({"business", "ml", "empirical"})
 SkillSource = Literal["builtin", "user", "workspace", "workflow"]
+
+
+def normalize_skill_tags(value: object) -> tuple[str, ...]:
+    """Validate and normalize ordered, multi-valued Skill tags."""
+    if value is None:
+        return ()
+    if not isinstance(value, (list, tuple)) or not all(isinstance(item, str) for item in value):
+        raise ValueError("tags must be a list of tag IDs")
+    tags = tuple(item.strip().lower() for item in value)
+    if len(tags) > MAX_SKILL_TAGS:
+        raise ValueError(f"skill has more than {MAX_SKILL_TAGS} tags")
+    if any(not tag or not SKILL_TAG_RE.fullmatch(tag) for tag in tags):
+        raise ValueError("tags must use lowercase letters, digits, and hyphens")
+    if len(set(tags)) != len(tags):
+        raise ValueError("duplicate skill tags are not allowed")
+    return tags
 
 
 @dataclass(frozen=True)
@@ -27,6 +46,7 @@ class SkillDef:
     path: Path
     icon: str = "🧩"
     allowed_tools: tuple[str, ...] = ()
+    tags: tuple[str, ...] = ()
     source: SkillSource = "builtin"
     resources: tuple[SkillResource, ...] = ()
     display_name: str = ""
@@ -42,6 +62,7 @@ class SkillDef:
             raise ValueError("skill prompt is required")
         if len(set(self.allowed_tools)) != len(self.allowed_tools):
             raise ValueError(f"duplicate allowed tools for skill {self.name!r}")
+        normalize_skill_tags(self.tags)
 
     def to_public_dict(self) -> dict[str, object]:
         return {
@@ -50,4 +71,10 @@ class SkillDef:
             "description": self.description,
             "icon": self.icon,
             "source": self.source,
+            "tags": list(self.tags),
         }
+
+    def supports_analysis_mode(self, mode: str) -> bool:
+        """Whether this Skill declares itself available for an analysis mode."""
+        normalized = str(mode or "").strip().lower()
+        return normalized in ANALYSIS_MODES and f"mode-{normalized}" in self.tags

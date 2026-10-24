@@ -2,6 +2,7 @@
 name: arima
 description: 使用 ARIMA 进行单变量时间序列预测（forecast）
 icon: 〰️
+tags: [mode-business, mode-ml, forecasting]
 allowedTools: [get_schema, query_data, run_analysis, generate_chart]
 ---
 # ARIMA 预测

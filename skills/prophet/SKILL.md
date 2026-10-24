@@ -2,6 +2,7 @@
 name: prophet
 description: 使用 Prophet 分解趋势季节性并预测（forecast 时间序列预测）
 icon: 🔮
+tags: [mode-business, mode-ml, forecasting]
 allowedTools: [get_schema, query_data, run_analysis, generate_chart]
 ---
 # Prophet 预测

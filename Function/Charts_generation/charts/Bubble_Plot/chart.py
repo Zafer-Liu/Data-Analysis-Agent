@@ -52,11 +52,11 @@ def _num_col(df: pd.DataFrame, hint: str, exclude: set) -> str:
         if c in exclude or not _is_numeric(df[c]):
             continue
         # 跳过 "Color" 列（保留给颜色映射）
-        if c.lower() == "color":
+        if str(c).lower() == "color":
             continue
-        if h and (h in c.lower() or c.lower() in h):
+        if h and (h in str(c).lower() or str(c).lower() in h):
             return c
-    nums = [c for c in df.columns if c not in exclude and _is_numeric(df[c]) and c.lower() != "color"]
+    nums = [c for c in df.columns if c not in exclude and _is_numeric(df[c]) and str(c).lower() != "color"]
     return nums[0] if nums else None
 
 
@@ -66,14 +66,14 @@ def _str_col(df: pd.DataFrame, hint: str, exclude: set) -> str:
     h = (hint or "").lower()
     # 优先查找名为 "Color" 的列（无论是否有 hint）
     for c in df.columns:
-        if c not in exclude and not _is_numeric(df[c]) and c.lower() == "color":
+        if c not in exclude and not _is_numeric(df[c]) and str(c).lower() == "color":
             return c
     # 如果有 hint，按 hint 匹配
     if h:
         for c in df.columns:
             if c in exclude or _is_numeric(df[c]):
                 continue
-            if h in c.lower() or c.lower() in h:
+            if h in str(c).lower() or str(c).lower() in h:
                 return c
     # 最后才返回第一个字符串列
     strs = [c for c in df.columns if c not in exclude and not _is_numeric(df[c])]
@@ -126,10 +126,14 @@ def generate(
     # 确保列名全部为字符串
     df.columns = df.columns.astype(str)
 
-    xh = mapping.get("x") or x
-    yh = mapping.get("y") or y
-    sh = mapping.get("size") or size
-    ch = mapping.get("color") or color
+    xh = mapping.get("x")
+    xh = xh if xh is not None else x
+    yh = mapping.get("y")
+    yh = yh if yh is not None else y
+    sh = mapping.get("size")
+    sh = sh if sh is not None else size
+    ch = mapping.get("color")
+    ch = ch if ch is not None else color
     title = options.get("title", title)
     color_scheme_name = options.get("color_scheme", "mckinsey")
     
@@ -167,7 +171,7 @@ def generate(
     # 第二优先级：查找名为 "Color" 的列
     if not _c:
         for col in df.columns:
-            if col not in used and col.lower() == "color":
+            if col not in used and str(col).lower() == "color":
                 _c = col
                 break
     # 第三优先级：自动检测（先字符串，后数值）
@@ -307,7 +311,7 @@ def generate(
     # 如果 options 中没有，尝试从数据列中提取
     if x_mid_raw is None:
         for col in df.columns:
-            col_lower = col.lower()
+            col_lower = str(col).lower()
             if ("x" in col_lower and ("mid" in col_lower or "中线" in col_lower)) or col_lower == "x_mid":
                 vals = pd.to_numeric(df[col], errors="coerce").dropna()
                 if not vals.empty:
@@ -316,7 +320,7 @@ def generate(
     
     if y_mid_raw is None:
         for col in df.columns:
-            col_lower = col.lower()
+            col_lower = str(col).lower()
             if ("y" in col_lower and ("mid" in col_lower or "中线" in col_lower)) or col_lower == "y_mid":
                 vals = pd.to_numeric(df[col], errors="coerce").dropna()
                 if not vals.empty:
@@ -487,6 +491,8 @@ def generate(
             s["itemStyle"] = {"opacity": 0.85, "borderColor": "#fff", "borderWidth": 2}
 
     opt_json = _json.dumps(echarts_opt, ensure_ascii=False)
+    # 嵌入 <script> 时转义 `</`，防止数据/列名含 `</script>` 破壳注入
+    opt_json = opt_json.replace("</", "<\\/")
 
     # ── 子标题 ─────────────────────────────────────────
     sub = f"{_x} | {_y}"
@@ -495,18 +501,23 @@ def generate(
     if _c:
         sub += f" | color={_c}"
 
+    # title/sub 插入 HTML 上下文（<title>/<h1>），需 HTML 转义防注入
+    import html as _html
+    esc_title = _html.escape(title)
+    esc_sub = _html.escape(sub)
+
     # ── 完整 HTML ──────────────────────────────────────
     html = (
         "<!DOCTYPE html><html lang='zh-CN'><head><meta charset='UTF-8'>"
         "<meta name='viewport' content='width=device-width, initial-scale=1.0'>"
-        f"<title>{_jesc(title)}</title>"
+        f"<title>{esc_title}</title>"
         "<style>*{margin:0;padding:0;box-sizing:border-box}"
         "html,body{width:100%;height:100%;font-family:Heiti SC,Microsoft YaHei,sans-serif;background:#fff}"
         f"#header{{padding:12px 24px;background:#fff;border-bottom:2px solid #e8ecf0;box-shadow:0 1px 4px rgba(0,0,0,.06)}}"
         f"#header h1{{font-size:16px;color:{MCK_PRIMARY};font-weight:700}}"
         f"#header .sub{{font-size:11px;color:{MCK_GRAY};margin-top:4px}}"
         "#chart{width:100%;height:calc(100vh - 60px)}</style></head><body>"
-        f"<div id='header'><h1>{_jesc(title)}</h1><div class='sub'>{_jesc(sub)}</div></div>"
+        f"<div id='header'><h1>{esc_title}</h1><div class='sub'>{esc_sub}</div></div>"
         "<div id='chart'></div>"
         "<script src='/static/vendor/echarts.min.js'></script>"
         "<script>(function(){"

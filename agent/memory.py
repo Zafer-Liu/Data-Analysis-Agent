@@ -10,9 +10,12 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+from .model_call_audit import audit_model_call
+from .retry import call_with_retry
+
 from agent.reasoning import split_reasoning_tags
 from data import memory_store
-from infrastructure.paths import data_path
+from infrastructure.paths import content_data_path
 
 log = logging.getLogger(__name__)
 _EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="baa-memory")
@@ -267,15 +270,27 @@ def _extract(*, provider: str, session_id: str, user_id: str, workspace_id: str,
             "existing_memory": summaries,
             "turn": {"user": user_message, "assistant": assistant_message},
         }
-        response = client.chat.completions.create(
-            model=config.model,
-            temperature=0,
-            max_tokens=output_budget,
-            messages=[
-                {"role": "system", "content": _EXTRACT_SYSTEM},
-                {"role": "user", "content": json.dumps(extraction_input, ensure_ascii=False)},
-            ],
+        audit = audit_model_call(
+            user_id=user_id, session_id=session_id, source="web",
+            purpose="memory_extraction", billing_scope="platform",
+            provider=selected, model=config.model,
         )
+        try:
+            response = call_with_retry(
+                client.chat.completions.create,
+                on_attempt=audit.attempt,
+                model=config.model,
+                temperature=0,
+                max_tokens=output_budget,
+                messages=[
+                    {"role": "system", "content": _EXTRACT_SYSTEM},
+                    {"role": "user", "content": json.dumps(extraction_input, ensure_ascii=False)},
+                ],
+            )
+        except Exception as exc:
+            audit.fail(exc)
+            raise
+        audit.succeed(response)
         raw = _final_response_content(response.choices[0].message)
         if not raw:
             memory_store.record_extraction_activity(
@@ -291,15 +306,27 @@ def _extract(*, provider: str, session_id: str, user_id: str, workspace_id: str,
                 "[memory] invalid JSON on first extraction attempt sid=%s shape=%s; retrying",
                 session_id, _response_diagnostics(raw),
             )
-            response = client.chat.completions.create(
-                model=config.model,
-                temperature=0,
-                max_tokens=output_budget,
-                messages=[
-                    {"role": "system", "content": _EXTRACT_REPAIR_SYSTEM},
-                    {"role": "user", "content": json.dumps(extraction_input, ensure_ascii=False)},
-                ],
+            repair_audit = audit_model_call(
+                user_id=user_id, session_id=session_id, source="web",
+                purpose="memory_repair", billing_scope="platform",
+                provider=selected, model=config.model,
             )
+            try:
+                response = call_with_retry(
+                    client.chat.completions.create,
+                    on_attempt=repair_audit.attempt,
+                    model=config.model,
+                    temperature=0,
+                    max_tokens=output_budget,
+                    messages=[
+                        {"role": "system", "content": _EXTRACT_REPAIR_SYSTEM},
+                        {"role": "user", "content": json.dumps(extraction_input, ensure_ascii=False)},
+                    ],
+                )
+            except Exception as exc:
+                repair_audit.fail(exc)
+                raise
+            repair_audit.succeed(response)
             raw = _final_response_content(response.choices[0].message)
             if not raw:
                 raise json.JSONDecodeError("empty repair response", "", 0)
@@ -466,14 +493,14 @@ def _apply_operations(operations: list[Any], *, session_id: str, user_id: str, w
                 label = "工作区级" if saved["scope"] == "workspace" else "用户级"
                 _push_notice(session_id, f"已记住（{label}）：{saved['title']}")
         except ValueError as exc:
-            log.warning("[memory] extraction op rejected sid=%s name=%s: %s", session_id, name, exc)
+            log.warning("[memory] extraction op rejected sid=%s error_type=%s", session_id, type(exc).__name__)
     return applied
 
 
 # ── consolidation (P2 governance) ──────────────────────────────────────────
 
 def _consolidation_lock_path():
-    return data_path("memory", ".consolidate-lock")
+    return content_data_path("memory", ".consolidate-lock")
 
 
 def _acquire_consolidation_lock() -> float | None:
@@ -545,22 +572,34 @@ def _consolidate(*, provider: str, session_id: str, user_id: str, workspace_id: 
             _rollback_consolidation_lock(previous_mtime)
             return
         client = get_llm_client(selected)
-        response = client.chat.completions.create(
-            model=config.model,
-            temperature=0,
-            max_tokens=4000,
-            messages=[
-                {"role": "system", "content": _CONSOLIDATE_SYSTEM},
-                {"role": "user", "content": json.dumps({
-                    "today": time.strftime("%Y-%m-%d"),
-                    "memory": [
-                        {key: record.get(key, "") for key in
-                         ("name", "type", "title", "body", "updated_at", "last_seen_at")}
-                        for record in records
-                    ],
-                }, ensure_ascii=False)},
-            ],
+        audit = audit_model_call(
+            user_id=user_id, session_id=session_id, source="web",
+            purpose="memory_consolidation", billing_scope="platform",
+            provider=selected, model=config.model,
         )
+        try:
+            response = call_with_retry(
+                client.chat.completions.create,
+                on_attempt=audit.attempt,
+                model=config.model,
+                temperature=0,
+                max_tokens=4000,
+                messages=[
+                    {"role": "system", "content": _CONSOLIDATE_SYSTEM},
+                    {"role": "user", "content": json.dumps({
+                        "today": time.strftime("%Y-%m-%d"),
+                        "memory": [
+                            {key: record.get(key, "") for key in
+                             ("name", "type", "title", "body", "updated_at", "last_seen_at")}
+                            for record in records
+                        ],
+                    }, ensure_ascii=False)},
+                ],
+            )
+        except Exception as exc:
+            audit.fail(exc)
+            raise
+        audit.succeed(response)
         raw = str(response.choices[0].message.content or "").strip()
         if not raw:
             return
@@ -600,5 +639,5 @@ def _apply_consolidation_ops(operations: list[Any], *, user_id: str, workspace_i
                 ):
                     archived += 1
         except ValueError as exc:
-            log.warning("[memory] consolidation op rejected name=%s: %s", name, exc)
+            log.warning("[memory] consolidation op rejected error_type=%s", type(exc).__name__)
     return updated, archived

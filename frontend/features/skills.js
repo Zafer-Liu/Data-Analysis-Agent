@@ -6,6 +6,11 @@ import { $, state } from "../core/runtime.js";
   let AVAILABLE_TOOLS = [];
   const _selectedTools = new Set();
 
+  // ── Tag filter state ──
+  const _selectedTags = new Set();
+  // Tag ordering: mode tags first, then capability tags alphabetically.
+  const MODE_TAGS = ["mode-business", "mode-ml", "mode-empirical"];
+
   async function _loadTools() {
     if (AVAILABLE_TOOLS.length) return AVAILABLE_TOOLS;
     try {
@@ -26,6 +31,136 @@ import { $, state } from "../core/runtime.js";
     return raw.replace(/(^|[-\s])([a-z])/g, (_, sep, ch) => sep + ch.toUpperCase());
   }
 
+  function skillTags(skill) {
+    return Array.isArray(skill?.tags) ? skill.tags.filter(tag => typeof tag === "string" && tag) : [];
+  }
+
+  function tagLabel(tag) {
+    const labels = {
+      "mode-business": ["商业分析", "Business"],
+      "mode-ml": ["机器学习", "Machine learning"],
+      "mode-empirical": ["实证研究", "Empirical"],
+      "data-preparation": ["数据准备", "Data preparation"],
+      profiling: ["数据诊断", "Profiling"],
+      visualization: ["可视化", "Visualization"],
+      forecasting: ["预测", "Forecasting"],
+      modeling: ["建模", "Modeling"],
+      inference: ["统计推断", "Inference"],
+      experimentation: ["实验", "Experimentation"],
+      segmentation: ["分群", "Segmentation"],
+      strategy: ["战略", "Strategy"],
+      reporting: ["报告", "Reporting"],
+      export: ["导出", "Export"],
+      integration: ["集成", "Integration"],
+      workflow: ["工作流", "Workflow"],
+    };
+    const pair = labels[tag];
+    return pair ? pair[window.getLang?.() === "en" ? 1 : 0] : tag;
+  }
+
+  function _collectTags() {
+    const counts = {};
+    SKILLS.forEach(skill => {
+      skillTags(skill).forEach(tag => {
+        counts[tag] = (counts[tag] || 0) + 1;
+      });
+    });
+    const mode = MODE_TAGS.filter(t => counts[t]).map(t => [t, counts[t]]);
+    const capability = Object.entries(counts)
+      .filter(([t]) => !MODE_TAGS.includes(t))
+      .sort((a, b) => a[0].localeCompare(b[0]));
+    return [...mode, ...capability];
+  }
+
+  function _renderTagChips() {
+    // Excel-style filter: render into the popover under the filter button.
+    const pop = $("skill-filter-pop");
+    const btn = $("skill-filter-btn");
+    if (!pop || !btn) return;
+    const tags = _collectTags();
+    pop.innerHTML = "";
+    if (!tags.length) {
+      pop.innerHTML = `<div class="sb-panel-filter-empty">暂无可筛选项</div>`;
+    } else {
+      tags.forEach(([tag, cnt]) => {
+        const item = document.createElement("button");
+        item.type = "button";
+        item.className = "sb-panel-filter-item" + (_selectedTags.has(tag) ? " active" : "");
+        item.dataset.tag = tag;
+        item.title = `${tag} · ${cnt} skill${cnt > 1 ? "s" : ""}`;
+        const check = document.createElement("span");
+        check.className = "sb-panel-filter-check";
+        check.textContent = _selectedTags.has(tag) ? "✓" : "";
+        const label = document.createElement("span");
+        label.className = "sb-panel-filter-label";
+        label.textContent = `${tagLabel(tag)}`;
+        const badge = document.createElement("span");
+        badge.className = "sb-panel-filter-badge";
+        badge.textContent = String(cnt);
+        item.append(check, label, badge);
+        item.addEventListener("click", () => {
+          if (_selectedTags.has(tag)) _selectedTags.delete(tag);
+          else _selectedTags.add(tag);
+          state.skillPickerIndex = 0;
+          _updateFilterIndicator();
+          _renderTagChips();
+          render($("skill-picker-search")?.value || "");
+        });
+        pop.appendChild(item);
+      });
+    }
+  }
+
+  function _updateFilterIndicator() {
+    const count = $("skill-filter-count");
+    if (!count) return;
+    const n = _selectedTags.size;
+    if (n > 0) {
+      count.textContent = String(n);
+      count.hidden = false;
+    } else {
+      count.hidden = true;
+    }
+  }
+
+  function _toggleFilterPop(force) {
+    const pop = $("skill-filter-pop");
+    const btn = $("skill-filter-btn");
+    if (!pop || !btn) return;
+    const willOpen = typeof force === "boolean" ? force : pop.hidden;
+    if (willOpen) {
+      _renderTagChips();
+      pop.hidden = false;
+      btn.setAttribute("aria-expanded", "true");
+      btn.classList.add("open");
+    } else {
+      pop.hidden = true;
+      btn.setAttribute("aria-expanded", "false");
+      btn.classList.remove("open");
+    }
+  }
+
+  function _initFilterToggle() {
+    const btn = $("skill-filter-btn");
+    const pop = $("skill-filter-pop");
+    if (!btn || !pop || btn.dataset.bound) return;
+    btn.dataset.bound = "1";
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      _toggleFilterPop();
+    });
+    // Close on outside click
+    document.addEventListener("click", (e) => {
+      if (pop.hidden) return;
+      if (pop.contains(e.target) || btn.contains(e.target)) return;
+      _toggleFilterPop(false);
+    });
+    // Close on Escape
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && !pop.hidden) _toggleFilterPop(false);
+    });
+  }
+
   function esc(value) {
     return String(value || "").replace(/[&<>"']/g, ch => ({
       "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -36,9 +171,15 @@ import { $, state } from "../core/runtime.js";
     const list = $("skill-picker-list");
     if (!list) return;
     const term = String(filter || "").trim().toLowerCase();
-    const matched = SKILLS.filter(skill => !term
-      || skill.name.toLowerCase().includes(term)
-      || String(skill.description || "").toLowerCase().includes(term));
+    const tagSel = _selectedTags.size;
+    const matched = SKILLS.filter(skill => {
+      const matchesTerm = !term
+        || skill.name.toLowerCase().includes(term)
+        || String(skill.description || "").toLowerCase().includes(term)
+        || skillTags(skill).some(tag => tag.includes(term) || tagLabel(tag).toLowerCase().includes(term));
+      const matchesTag = !tagSel || skillTags(skill).some(t => _selectedTags.has(t));
+      return matchesTerm && matchesTag;
+    });
     list.innerHTML = "";
     if (!matched.length) {
       list.innerHTML = `<div class="skill-picker-empty">${esc(t("skills.empty"))}</div>`;
@@ -49,11 +190,16 @@ import { $, state } from "../core/runtime.js";
       button.type = "button";
       button.className = `skill-picker-item${index === state.skillPickerIndex ? " active" : ""}`;
       button.dataset.skill = skill.name;
+      const tags = skillTags(skill);
+      const tagMarkup = tags.length
+        ? `<span class="skill-picker-tags">${tags.map(tag => `<span class="skill-picker-tag" title="${esc(tag)}">${esc(tagLabel(tag))}</span>`).join("")}</span>`
+        : "";
       button.innerHTML = `
         <span class="skill-picker-icon skill-picker-icon--letter">${esc((skill.display_name || skill.name || "S")[0].toUpperCase())}</span>
         <span class="skill-picker-copy">
           <strong title="${esc(displaySkillName(skill))}">${esc(displaySkillName(skill))}</strong>
           <small>${esc(skill.description || displaySkillName(skill))}</small>
+          ${tagMarkup}
         </span>
         <span class="skill-picker-actions">
           <span class="skill-picker-source">${esc(sourceLabel(skill.source))}</span>
@@ -79,10 +225,12 @@ import { $, state } from "../core/runtime.js";
       if (!response.ok) throw new Error(`Skill catalog failed (${response.status})`);
       const payload = await response.json();
       SKILLS.splice(0, SKILLS.length, ...(payload.skills || []));
+      _renderTagChips();
       render($("skill-picker-search")?.value || "");
     } catch (error) {
       console.warn("[BAA] skills unavailable:", error);
       SKILLS.splice(0, SKILLS.length);
+      _renderTagChips();
       render();
     }
   }
@@ -96,9 +244,14 @@ import { $, state } from "../core/runtime.js";
     const search = $("skill-picker-search");
     if (search) {
       search.value = "";
+      _selectedTags.clear();
+      state.skillPickerIndex = 0;
+      _renderTagChips();
       render();
       requestAnimationFrame(() => search.focus());
     }
+    // Bind the Excel-style tag filter toggle (idempotent via dataset.bound).
+    _initFilterToggle();
   }
 
   function close() {
@@ -187,11 +340,10 @@ import { $, state } from "../core/runtime.js";
     const title = $("skill-modal-title");
     const nameInput = $("skill-form-name");
     const descInput = $("skill-form-desc");
+    const tagsInput = $("skill-form-tags");
     const iconInput = $("skill-form-icon");
-    const toolsInput = $("skill-form-tools");
     const toolsTrigger = $("skill-form-tools-trigger");
     const promptArea = $("skill-form-prompt");
-    const rawView = $("skill-form-raw-view");
     const msgEl = $("skill-form-msg");
     const saveBtn = $("skill-save-btn");
     const deleteBtn = $("skill-delete-btn");
@@ -203,10 +355,10 @@ import { $, state } from "../core/runtime.js";
     if (hub && overlay.parentElement !== hub) {
       hub.appendChild(overlay);
     }
-    // Dynamically set left to sidebar width + panel width (340px)
+    // Dynamically set left to sidebar width + panel width (330px)
     if (panel) {
       const sidebarWidth = hub ? hub.querySelector(".sb-main")?.offsetWidth || 280 : 280;
-      overlay.style.left = (sidebarWidth + 340) + "px";
+      overlay.style.left = (sidebarWidth + 330) + "px";
     }
 
     if (name) {
@@ -221,13 +373,15 @@ import { $, state } from "../core/runtime.js";
         nameInput.value = sk.name;
         nameInput.disabled = false;
         descInput.value = sk.description;
+        tagsInput.value = skillTags(sk).join(", ");
         iconInput.value = sk.icon || "";
         setToolsValue(sk.allowed_tools || []);
-        promptArea.value = sk.raw || "";
+        promptArea.value = sk.readonly ? (sk.raw || "") : (sk.prompt || "");
         if (sk.readonly) {
           // Builtin: show raw content, disable editing
           nameInput.disabled = true;
           descInput.disabled = true;
+          tagsInput.disabled = true;
           iconInput.disabled = true;
           toolsTrigger.style.pointerEvents = "none";
           toolsTrigger.style.opacity = ".5";
@@ -237,6 +391,7 @@ import { $, state } from "../core/runtime.js";
         } else {
           nameInput.disabled = false;
           descInput.disabled = false;
+          tagsInput.disabled = false;
           iconInput.disabled = false;
           toolsTrigger.style.pointerEvents = "";
           toolsTrigger.style.opacity = "";
@@ -255,6 +410,8 @@ import { $, state } from "../core/runtime.js";
       nameInput.disabled = false;
       descInput.value = "";
       descInput.disabled = false;
+      tagsInput.value = "";
+      tagsInput.disabled = false;
       iconInput.value = "";
       iconInput.disabled = false;
       toolsTrigger.style.pointerEvents = "";
@@ -438,6 +595,7 @@ import { $, state } from "../core/runtime.js";
     msgEl.textContent = "";
     const name = $("skill-form-name").value.trim();
     const description = $("skill-form-desc").value.trim();
+    const tags = $("skill-form-tags").value.split(",").map(tag => tag.trim()).filter(Boolean);
     const icon = $("skill-form-icon").value.trim() || "🧩";
     const allowed_tools = [..._selectedTools];
     const prompt = $("skill-form-prompt").value.trim();
@@ -448,7 +606,7 @@ import { $, state } from "../core/runtime.js";
       return;
     }
 
-    const body = { name, description, icon, prompt, allowed_tools };
+    const body = { name, description, icon, prompt, allowed_tools, tags };
     const suffix = state.SID ? `?sid=${encodeURIComponent(state.SID)}` : "";
 
     try {
@@ -480,6 +638,7 @@ import { $, state } from "../core/runtime.js";
     if (!_editingSkill) return;
     const msgEl = $("skill-form-msg");
     if (!window.BAA?.ui?.confirm) {
+      // eslint-disable-next-line no-restricted-globals -- intentional native fallback when the Vue confirm island is unavailable
       if (!confirm(`确定删除 Skill "${_editingSkill}" 吗?`)) return;
     } else {
       const ok = await window.BAA.ui.confirm({

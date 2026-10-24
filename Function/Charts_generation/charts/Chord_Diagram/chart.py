@@ -4,7 +4,7 @@
 """
 import logging
 log = logging.getLogger(__name__)
-import os, sys, json
+import os, sys, json, html as _html
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
 import pandas as pd
@@ -15,6 +15,16 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from charts.base import ChartResult
 
+try:
+    from charts.color_schemes import get_color_scheme
+except ImportError as e:  # pragma: no cover - 兜底，保证独立调用可用
+    log.debug("[chart] 配色模块加载失败: %s", e)
+    def get_color_scheme(name: str = "mckinsey"):
+        return {"colors": [
+            "#003D7A", "#0084D1", "#00A4EF", "#7FBA00", "#FFB81C",
+            "#F7630C", "#DA3B01", "#A4373A", "#6B2C91", "#00B4EF",
+        ]}
+
 __all__ = ["generate"]
 
 MCKINSEY_COLORS = [
@@ -24,26 +34,26 @@ MCKINSEY_COLORS = [
 
 def _auto_col(df: pd.DataFrame, *hints: str, exclude: set = None) -> Optional[str]:
     exclude = exclude or set()
-    strs = [c for c in df.columns if df[c].dtype == object and c not in exclude]
+    strs = [c for c in df.columns if (df[c].dtype == object or pd.api.types.is_string_dtype(df[c])) and c not in exclude]
     nums = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c]) and c not in exclude]
-    col_lower = {c.lower(): c for c in df.columns if c not in exclude}
+    col_lower = {str(c).lower(): c for c in df.columns if c not in exclude}
 
     for h in hints:
-        h_lower = h.lower()
+        h_lower = str(h).lower()
         if h_lower in col_lower:
             return col_lower[h_lower]
 
     for h in hints:
-        h_lower = h.lower()
+        h_lower = str(h).lower()
         for col in df.columns:
             if col in exclude:
                 continue
-            col_lower_name = col.lower()
+            col_lower_name = str(col).lower()
             if h_lower in col_lower_name or col_lower_name in h_lower:
                 return col
 
     if hints:
-        hint = hints[0].lower()
+        hint = str(hints[0]).lower()
         if any(kw in hint for kw in ["source", "target", "label", "name", "group"]):
             if strs:
                 return strs[0]
@@ -125,27 +135,38 @@ def _normalize_matrix(matrix: pd.DataFrame) -> pd.DataFrame:
     return matrix
 
 
-def _build_chord_html(matrix: pd.DataFrame, title: str, highlight_node: Optional[str] = None, highlight_color: str = "#003D7A") -> str:
+def _safe_json(obj) -> str:
+    """JSON 序列化并转义 `</`，防止嵌入 <script> 时 `</script>` 破壳注入。
+    节点名来自 SQL 列名/数据值，用户/LLM 可控，含 `</script>` 即可提前闭合脚本块。
+    """
+    return json.dumps(obj, ensure_ascii=False).replace("</", "<\\/")
+
+
+def _build_chord_html(matrix: pd.DataFrame, title: str, highlight_node: Optional[str] = None, highlight_color: str = "#003D7A", palette: list = None) -> str:
     nodes = list(matrix.index)
     n = len(nodes)
 
     matrix_array = matrix.values.tolist()
 
+    _palette = palette or MCKINSEY_COLORS
     node_colors = []
     for i, node in enumerate(nodes):
         if highlight_node and node == highlight_node:
             node_colors.append(highlight_color)
         else:
-            node_colors.append(MCKINSEY_COLORS[i % len(MCKINSEY_COLORS)])
+            node_colors.append(_palette[i % len(_palette)])
 
-    matrix_json = json.dumps(matrix_array, ensure_ascii=False)
-    nodes_json = json.dumps([{"id": node, "color": color} for node, color in zip(nodes, node_colors)], ensure_ascii=False)
+    # 安全 JSON：转义 </ 防止 </script> 破壳
+    matrix_json = _safe_json(matrix_array)
+    nodes_json = _safe_json([{"id": node, "color": color} for node, color in zip(nodes, node_colors)])
+    # title 用户/LLM 可控，HTML 转义防注入
+    esc_title = _html.escape(title)
 
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>{title}</title>
+    <title>{esc_title}</title>
     <script src="https://d3js.org/d3.v7.min.js"></script>
     <style>
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
@@ -165,7 +186,7 @@ def _build_chord_html(matrix: pd.DataFrame, title: str, highlight_node: Optional
 </head>
 <body>
 <div class="container">
-    <h1>{title}</h1>
+    <h1>{esc_title}</h1>
     <div class="subtitle">弦图 Chord Diagram | D3.js</div>
     <div id="chord-container"></div>
 </div>
@@ -294,13 +315,12 @@ def generate(
     elif fmt == "adjacency":
         matrix = _normalize_matrix(df.copy())
     elif fmt == "edge_list":
-        src_col = mapping.get("source") or src_col or source
-        tgt_col = mapping.get("target") or tgt_col or target
-        val_col = mapping.get("value") or val_col or value
-
-        _src = _auto_col(df, src_col, "source", "起点", "from")
-        _tgt = _auto_col(df, tgt_col, "target", "终点", "to")
-        _val = _auto_col(df, val_col, "value", "流量", "amount")
+        # _detect_format 解析三元组时已用 exclude 保证 src/tgt 不撞列；
+        # 这里直接复用其结果，mapping 显式指定的角色优先。此前无 exclude
+        # 地重新解析会让 src/tgt 回退到同一 strs[0]，df[[c,c,v]] 产生重复列。
+        _src = mapping.get("source") if mapping.get("source") in df.columns else src_col
+        _tgt = mapping.get("target") if mapping.get("target") in df.columns else tgt_col
+        _val = mapping.get("value") if mapping.get("value") in df.columns else val_col
 
         if _src is None or _src not in df.columns:
             return ChartResult(warnings=["找不到必填字段 [source]"])
@@ -323,7 +343,11 @@ def generate(
         log.warning("[chart] 图表生成异常: %s", e)
         return ChartResult(warnings=[f"数据类型转换失败: {e}"])
 
-    html = _build_chord_html(matrix, title, highlight_node, highlight_color)
+    # 配色方案：优先用 options.color_scheme，回退到 MCKINSEY_COLORS
+    _scheme = get_color_scheme(options.get("color_scheme", "mckinsey"))
+    _palette = _scheme.get("colors") or MCKINSEY_COLORS
+
+    html = _build_chord_html(matrix, title, highlight_node, highlight_color, _palette)
 
     meta = {
         "chart_id": "chord_diagram",

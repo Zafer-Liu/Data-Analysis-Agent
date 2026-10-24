@@ -537,7 +537,13 @@ class WorkflowRuntime:
             content = json.dumps(value, ensure_ascii=False, indent=2, default=str)
         target.write_text(content, encoding="utf-8")
         from infrastructure.artifact_lifecycle import register_artifact
-        register_artifact(target, artifact_type="workflow_export", session_id=self.session_id, workspace_id=self.workspace.workspace_id)
+        register_artifact(
+            target,
+            artifact_type="workflow_export",
+            session_id=self.session_id,
+            workspace_id=self.workspace.workspace_id,
+            workspace_root=self.workspace.workdir,
+        )
         result = {
             "path": str(target),
             "filename": target.name,

@@ -7,7 +7,7 @@
   <title>智析Agent — 登录</title>
   <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}">
   <script src="{{ url_for('static', filename='js/theme_bootstrap.js', v='fe0') }}"></script>
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/parts/tokens.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/parts/tokens.css', v='v1.4.0-polish-2') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/login.css', v='20261009-1') }}">
 </head>
 <body>
@@ -22,7 +22,6 @@
       </a>
 
       <div class="story-copy">
-        <p class="story-eyebrow">DATA ANALYSIS WORKSPACE</p>
         <h1 id="story-title" aria-label="让复杂数据，变成清晰判断。" data-i18n-aria-label="story.title_full"><span class="story-title-line" data-i18n="story.title_line_1">让复杂数据，</span><br><span class="story-title-accent" data-i18n="story.title_line_2">变成清晰判断。</span></h1>
         <p class="story-summary" data-i18n="story.summary">从原始数据到可执行结论，在同一个工作区完成分析、验证与表达。</p>
       </div>
@@ -55,7 +54,7 @@
       </div>
 
       <div class="story-footer">
-        <span>v1.3.0 LTS</span>
+        <span>v1.4.0 LTS</span>
         <a href="https://www.zaferliu.me" target="_blank" rel="noopener noreferrer">@Zafer_Liu</a>
       </div>
     </section>
@@ -66,10 +65,13 @@
           <img src="/static/Images/icon-sm.png" alt="" width="40" height="40">
           <div><strong data-i18n="brand.name">智析Agent</strong><span data-i18n="brand.mobile_subtitle">智能数据分析工作台</span></div>
         </div>
+        <div class="lang-switch" role="group" aria-label="语言 / Language">
+          <button class="lang-btn active" id="lang-zh" type="button" data-lang="zh" aria-pressed="true">中</button>
+          <button class="lang-btn" id="lang-en" type="button" data-lang="en" aria-pressed="false">EN</button>
+        </div>
       </div>
 
       <div class="auth-heading">
-        <p class="auth-kicker">WELCOME</p>
         <h2 data-i18n="auth.heading">进入你的分析工作台</h2>
         <p data-i18n="auth.description">登录或创建账户，继续处理你的数据任务。</p>
       </div>
@@ -92,6 +94,9 @@
           <div class="input-shell">
             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
             <input class="form-input" id="login-password" type="password" autocomplete="current-password" placeholder="输入登录密码" data-i18n-placeholder="placeholder.password">
+          </div>
+          <div class="password-meta">
+            <button class="text-action" id="forgot-password-btn" type="button" data-i18n="action.forgot">忘记密码？</button>
           </div>
         </div>
         <div class="form-error" id="login-error" aria-live="polite"></div>
@@ -117,11 +122,40 @@
           <label class="form-label" for="reg-password" data-i18n="field.password">密码</label>
           <div class="input-shell">
             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
-            <input class="form-input" id="reg-password" type="password" autocomplete="new-password" placeholder="4 个字符以上">
+            <input class="form-input" id="reg-password" type="password" autocomplete="new-password" placeholder="至少 8 个字符" data-i18n-placeholder="placeholder.password_new">
           </div>
         </div>
         <div class="form-error" id="reg-error" aria-live="polite"></div>
         <button class="btn btn-primary" id="reg-btn" type="button"><span data-i18n="action.register">创建账户</span><span aria-hidden="true">→</span></button>
+      </div>
+
+      <div id="form-reset" style="display:none">
+        <div class="flow-heading">
+          <h2 data-i18n="reset.heading">重置登录密码</h2>
+          <p data-i18n="reset.description">验证码 5 分钟内有效。设置新密码后，其他设备上的登录会立即失效。</p>
+          <button class="text-action flow-back" id="reset-back-btn" type="button" data-i18n="action.back_login">← 返回登录</button>
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="reset-email" data-i18n="field.email">邮箱</label>
+          <input class="form-input form-input--plain" id="reset-email" type="email" autocomplete="email" placeholder="输入注册邮箱" data-i18n-placeholder="placeholder.registered_email">
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="reset-code" data-i18n="field.code">验证码</label>
+          <div class="code-row">
+            <input class="form-input form-input--plain" id="reset-code" type="text" maxlength="6" autocomplete="one-time-code" placeholder="6 位验证码" inputmode="numeric" data-i18n-placeholder="placeholder.code">
+            <button class="code-btn" id="reset-send-code-btn" type="button" data-i18n="action.send_code">发送验证码</button>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="reset-password" data-i18n="field.new_password">新密码</label>
+          <input class="form-input form-input--plain" id="reset-password" type="password" autocomplete="new-password" placeholder="至少 8 个字符" data-i18n-placeholder="placeholder.password_new">
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="reset-password-confirm" data-i18n="field.confirm_password">确认新密码</label>
+          <input class="form-input form-input--plain" id="reset-password-confirm" type="password" autocomplete="new-password" placeholder="再次输入新密码" data-i18n-placeholder="placeholder.password_confirm">
+        </div>
+        <div class="form-error" id="reset-error" aria-live="polite"></div>
+        <button class="btn btn-primary" id="reset-btn" type="button"><span data-i18n="action.reset">重置密码</span><span aria-hidden="true">→</span></button>
       </div>
 
       <label class="agree-row" id="agreement-row">

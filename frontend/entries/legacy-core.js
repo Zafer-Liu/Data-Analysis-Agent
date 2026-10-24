@@ -1,7 +1,14 @@
 import { dom, esc } from "../core/dom.js";
 import { installLegacyBridge } from "../core/legacy-bridge.js";
 import { theme } from "../core/theme.js";
-import { overlay, closeOutside, closeOverlay, debugOverlayState, openOverlay, toast } from "../core/overlay.js";
+import {
+  overlay,
+  closeOutside,
+  closeOverlay,
+  debugOverlayState,
+  openOverlay,
+  toast,
+} from "../core/overlay.js";
 import { slash } from "../features/slash.js";
 import { skills } from "../features/skills.js";
 import { models } from "../features/models.js";

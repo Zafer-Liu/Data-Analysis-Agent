@@ -33,6 +33,14 @@ New approach (A4):
   - Fall back to the old keyword heuristic if sqlglot is unavailable
     (so the app still works without the optional dependency).
 
+A6 relaxation (writes allowed, memory-only):
+  - Write statements (CREATE TABLE/VIEW, INSERT, UPDATE, DELETE, DROP TABLE/VIEW,
+    ALTER, TRUNCATE, MERGE) now pass validation. The execution layer redirects
+    them to in-memory snapshots so the user's on-disk data is never modified.
+  - System statements stay blocked: PRAGMA / INSTALL / LOAD / ATTACH / DETACH /
+    COPY TO / SET / BEGIN-COMMIT / CREATE-DROP of FUNCTION, MACRO, INDEX,
+    SCHEMA, SEQUENCE, TYPE.
+
 DuckDB connection-level lockdown (second layer, in _utils.py, post-A4):
   SET enable_external_access = false  # 仍禁网络（HTTP/S3 扩展）
   # A4 起：不再 SET disabled_filesystems='LocalFileSystem' —— 改由本模块的
@@ -41,8 +49,14 @@ DuckDB connection-level lockdown (second layer, in _utils.py, post-A4):
 import logging
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Dict, List, Literal, Optional, Tuple, TYPE_CHECKING
+
+
+ASK_USER_EMPTY_OPTIONS = "ASKU-001"
+ASK_USER_OPTION_COUNT = "ASKU-002"
+ASK_USER_INVALID_ARGUMENT = "ASKU-003"
 
 if TYPE_CHECKING:
     from data.workspace import WorkspacePathAuthorization
@@ -51,6 +65,33 @@ log = logging.getLogger(__name__)
 
 # Tool names whose JSON args carry a `sql` field that runs against the data source.
 SQL_TOOLS = {"create_analysis_table", "query_data", "generate_chart", "run_analysis"}
+
+
+@dataclass(frozen=True)
+class SqlValidationResult:
+    """Structured SQL validation outcome for UI badges.
+
+    status:
+      - "passed":   sqlglot AST validation succeeded (full trust).
+      - "degraded": sqlglot was unavailable or could not parse the statement, so
+                    a weaker heuristic check ran and passed. Surfaced as a
+                    "sqlglot 错误" badge with an error code (SQLG-001/002).
+      - "failed":   validation rejected the SQL (AST or heuristic) — blocked.
+    message: human-readable detail (empty when passed).
+    used_heuristic: True when the keyword fallback ran instead of the AST.
+    code: stable error code for degraded/failed outcomes (e.g. "SQLG-001"),
+                    documented in Instruction.md; empty when passed.
+    """
+
+    status: Literal["passed", "failed", "degraded"]
+    message: str
+    used_heuristic: bool = False
+    code: str = ""
+
+
+# sqlglot 环境错误码 —— 原因与解决方法记录在 Instruction.md「错误代码」一节。
+SQLG_NOT_INSTALLED = "SQLG-001"   # sqlglot 未安装
+SQLG_PARSE_FAILED = "SQLG-002"    # sqlglot 无法解析该 SQL（方言差异）
 
 # Functions that must NEVER appear in any SQL we execute, regardless of context.
 # 这些是真正的"危险"函数：扩展管理、外部数据库、网络、写入文件、元命令。
@@ -307,35 +348,22 @@ def _check_single_path(path_str: str, norm_roots: List[Path]) -> Optional[str]:
     return None
 
 
-def _validate_sql_ast(sql: str, allowed_roots: Optional[List[Path]] = None) -> Optional[str]:
-    """AST-level SQL validation using sqlglot.
+def _validate_sql_ast_body(sqlglot_module, statements, exp, allowed_roots: List[Path]) -> Optional[str]:
+    """Run AST-level checks on already-parsed sqlglot statements.
 
-    Returns an error string if the SQL is disallowed, else None.
-    Falls back to a lightweight heuristic when sqlglot is not installed.
+    Returns an error string if the SQL is disallowed, else None. Split out of
+    ``_validate_sql_ast`` so ``validate_sql_structured`` can distinguish a true
+    AST pass from a heuristic fallback.
 
-    Args:
-        sql: SQL string to validate.
-        allowed_roots: List of Path roots that file-read functions (read_csv etc.)
-            are allowed to read from. If None or empty, file reads are rejected
-            entirely (caller should pass uploads/Information as defaults).
+    A6 policy — writes are allowed, execution layer keeps them in memory:
+      Allowed statements: Query (SELECT/WITH/UNION), Create with kind
+      TABLE/VIEW, Insert, Update, Delete, Drop with kind TABLE/VIEW,
+      Alter, TruncateTable, Merge.
+      Still blocked: PRAGMA / Install / Attach / Detach / Copy / Set /
+      Transaction / Command, Create/Drop of FUNCTION, MACRO, INDEX,
+      SCHEMA, SEQUENCE, TYPE — plus multi-statement, banned functions,
+      network URLs and non-whitelisted file-read paths (unchanged).
     """
-    try:
-        import sqlglot
-        import sqlglot.expressions as exp
-    except ImportError:
-        # sqlglot not installed — fall back to conservative heuristic
-        log.debug("[validate] sqlglot not available, using heuristic fallback")
-        return _validate_sql_heuristic(sql)
-
-    # ── Parse ──────────────────────────────────────────────────────────────────
-    try:
-        statements = sqlglot.parse(sql, dialect="duckdb", error_level=sqlglot.ErrorLevel.RAISE)
-    except Exception as exc:
-        # Parse error — could be valid DuckDB but not parseable by sqlglot.
-        # Fall back to heuristic rather than blocking legitimate queries.
-        log.debug("[validate] sqlglot parse error (%s), falling back to heuristic", exc)
-        return _validate_sql_heuristic(sql)
-
     # ── Multi-statement check ──────────────────────────────────────────────────
     if len(statements) > 1:
         return "不允许多语句 SQL（检测到分号分隔的多条语句）。"
@@ -345,13 +373,28 @@ def _validate_sql_ast(sql: str, allowed_roots: Optional[List[Path]] = None) -> O
     stmt = statements[0]
 
     # ── Top-level statement type ───────────────────────────────────────────────
-    # sqlglot represents SELECT ... UNION SELECT ... as exp.Union. All read-only
-    # query expressions inherit from exp.Query, while INSERT/UPDATE/etc. do not.
-    if not isinstance(stmt, exp.Query):
+    if isinstance(stmt, exp.Query):
+        pass  # read-only: SELECT / WITH / UNION / CTE
+    elif isinstance(stmt, exp.Create):
+        kind = str(stmt.args.get("kind") or "").upper()
+        if kind not in ("TABLE", "VIEW"):
+            return (
+                f"只允许 CREATE TABLE / CREATE VIEW，检测到 CREATE {kind or '?'}。"
+                "函数、宏、索引、模式等对象不允许创建。"
+            )
+    elif isinstance(stmt, exp.Drop):
+        kind = str(stmt.args.get("kind") or "").upper()
+        if kind not in ("TABLE", "VIEW"):
+            return f"只允许 DROP TABLE / DROP VIEW，检测到 DROP {kind or '?'}。"
+    elif isinstance(stmt, (exp.Insert, exp.Update, exp.Delete, exp.Alter, exp.TruncateTable, exp.Merge)):
+        pass  # in-memory data mutation — allowed under A6
+    else:
         stmt_type = type(stmt).__name__
         return (
-            f"只允许 SELECT / WITH / UNION 查询，检测到: {stmt_type}。"
-            "请使用 SELECT 语句查询数据。"
+            f"不允许的语句类型: {stmt_type}。"
+            "允许 SELECT/WITH 查询与 CREATE/INSERT/UPDATE/DELETE/DROP/ALTER/"
+            "TRUNCATE/MERGE 数据操作；禁止 PRAGMA/INSTALL/ATTACH/COPY/SET/"
+            "BEGIN 等系统级语句。"
         )
 
     # ── Banned function scan (recursive, 非 file-read 类) ─────────────────────
@@ -377,14 +420,83 @@ def _validate_sql_ast(sql: str, allowed_roots: Optional[List[Path]] = None) -> O
             return "禁止 COPY 操作：不允许将数据写入文件。"
 
     # ── File-read path whitelist (A4) ──────────────────────────────────────────
-    # 默认根目录：即使未挂载 workspace，也允许读 uploads/Information
-    if allowed_roots is None:
-        allowed_roots = _default_allowed_roots()
     err = _validate_file_read_paths(stmt, allowed_roots)
     if err:
         return err
 
     return None  # all good
+
+
+def _validate_sql_ast(sql: str, allowed_roots: Optional[List[Path]] = None) -> Optional[str]:
+    """AST-level SQL validation using sqlglot.
+
+    Returns an error string if the SQL is disallowed, else None.
+    Falls back to a lightweight heuristic when sqlglot is not installed.
+
+    Args:
+        sql: SQL string to validate.
+        allowed_roots: List of Path roots that file-read functions (read_csv etc.)
+            are allowed to read from. If None or empty, file reads are rejected
+            entirely (caller should pass uploads/Information as defaults).
+    """
+    return validate_sql_structured(sql, allowed_roots=allowed_roots).message
+
+
+def validate_sql_structured(
+    sql: str, allowed_roots: Optional[List[Path]] = None
+) -> SqlValidationResult:
+    """AST-level SQL validation with a structured three-state outcome.
+
+    Mirrors ``_validate_sql_ast`` but distinguishes a full AST pass from a
+    heuristic fallback so the UI can show a "sqlglot 错误" badge when the
+    high-trust sqlglot path was unavailable.
+
+    Args:
+        sql: SQL string to validate.
+        allowed_roots: List of Path roots for file-read whitelist. If None,
+            defaults to [uploads/, Information/] (see ``_default_allowed_roots``).
+    """
+    try:
+        import sqlglot
+        import sqlglot.expressions as exp
+    except ImportError:
+        # sqlglot not installed — fall back to conservative heuristic
+        log.debug("[validate] sqlglot not available, using heuristic fallback")
+        err = _validate_sql_heuristic(sql)
+        if err:
+            return SqlValidationResult("failed", err, used_heuristic=True)
+        return SqlValidationResult(
+            "degraded",
+            f"sqlglot 未安装，SQL 仅经过关键字级校验（错误代码：{SQLG_NOT_INSTALLED}）",
+            used_heuristic=True,
+            code=SQLG_NOT_INSTALLED,
+        )
+
+    # ── Parse ──────────────────────────────────────────────────────────────────
+    try:
+        statements = sqlglot.parse(sql, dialect="duckdb", error_level=sqlglot.ErrorLevel.RAISE)
+    except Exception as exc:
+        # Parse error — could be valid DuckDB but not parseable by sqlglot.
+        # Fall back to heuristic rather than blocking legitimate queries.
+        log.debug("[validate] sqlglot parse error (%s), falling back to heuristic", exc)
+        err = _validate_sql_heuristic(sql)
+        if err:
+            return SqlValidationResult("failed", err, used_heuristic=True)
+        return SqlValidationResult(
+            "degraded",
+            f"sqlglot 无法解析该 SQL，仅经过关键字级校验（错误代码：{SQLG_PARSE_FAILED}）",
+            used_heuristic=True,
+            code=SQLG_PARSE_FAILED,
+        )
+
+    # 默认根目录：即使未挂载 workspace，也允许读 uploads/Information
+    if allowed_roots is None:
+        allowed_roots = _default_allowed_roots()
+
+    err = _validate_sql_ast_body(sqlglot, statements, exp, allowed_roots)
+    if err:
+        return SqlValidationResult("failed", err, used_heuristic=False)
+    return SqlValidationResult("passed", "", used_heuristic=False)
 
 
 def _default_allowed_roots() -> List[Path]:
@@ -393,8 +505,8 @@ def _default_allowed_roots() -> List[Path]:
     包含 uploads/ 和 Information/，让 read_csv 能读已上传文件。
     不包含工作目录（未挂载时不存在）。
     """
-    from infrastructure.paths import data_path, resource_path
-    return [data_path("uploads"), resource_path("Information")]
+    from infrastructure.paths import content_data_path, resource_path
+    return [content_data_path("uploads"), resource_path("Information")]
 
 
 def _strip_sql_comments_for_prefix(sql: str) -> str:
@@ -412,6 +524,11 @@ def _validate_sql_heuristic(sql: str) -> Optional[str]:
     names / string literals), but keeps security guarantees when the optional
     dependency is missing.
 
+    A6: write keywords (CREATE/INSERT/UPDATE/DELETE/DROP/ALTER/TRUNCATE/MERGE)
+    are allowed — the execution layer keeps writes in memory. The heuristic
+    cannot distinguish CREATE TABLE from CREATE FUNCTION, so a degraded
+    "sqlglot 错误" (SQLG-002) result is returned for anything that parses only here.
+
     注意：heuristic 模式下无法做路径白名单（拿不到 AST 节点），所以一律拒绝
     file-read 函数（保守策略，回到 A4 之前的行为）。
     """
@@ -428,30 +545,17 @@ def _validate_sql_heuristic(sql: str) -> Optional[str]:
     if ";" in _no_quotes:
         return "不允许多语句 SQL（检测到分号分隔的多条语句）。"
 
-    if not sql_lower.startswith("select") and not sql_lower.startswith("with"):
-        return f"只允许 SELECT/WITH 查询。检测到: {sql_lower[:60]}"
-
-    # ── Write-operation keywords ───────────────────────────────────────────────
-    _WRITE_TOKENS = [
-        r"\bdrop\b", r"\bdelete\b", r"\btruncate\b",
-        r"\binsert\b", r"\bupdate\b", r"\balter\b",
-        r"\bcreate\s+table\b", r"\bcreate\s+index\b",
-    ]
-    for pattern in _WRITE_TOKENS:
-        if re.search(pattern, sql_lower):
-            token = re.sub(r"\\[bsS]|\(.*\)", "", pattern).strip().replace("\\", "")
-            return f"禁止写操作关键字 {token}：只允许 SELECT 查询。"
-
     # ── Banned DuckDB extension/network keywords (heuristic 模式仍禁) ─────────
     _BANNED_TOKENS = [
         r"\binstall\b", r"\bload\b", r"\battach\b", r"\bdetach\b",
-        r"\bcopy\b", r"\bpragma\b",
+        r"\bcopy\b", r"\bpragma\b", r"\bset\b", r"\bbegin\b",
+        r"\bcommit\b", r"\brollback\b",
         r"\bhttp_get\b", r"\bhttp_post\b",
     ]
     for pattern in _BANNED_TOKENS:
         if re.search(pattern, sql_lower):
             token = pattern.replace(r"\b", "").strip()
-            return f"禁止使用 {token}：该操作可访问文件系统写入/网络/扩展。"
+            return f"禁止使用 {token}：该操作可访问文件系统写入/网络/扩展/会话状态。"
 
     # ── File-read 函数：heuristic 模式下一律拒绝（无法做路径白名单）──────────
     _FILE_READ_TOKENS = [
@@ -501,9 +605,9 @@ def validate_tool_args(
         sql = (args.get("sql") or "").strip()
         if not sql:
             return f"'{name}' requires a non-empty 'sql' argument."
-        err = _validate_sql_ast(sql, allowed_roots=allowed_roots)
-        if err:
-            return f"'{name}' SQL validation failed: {err}"
+        validation = validate_sql_structured(sql, allowed_roots=allowed_roots)
+        if validation.status == "failed":
+            return f"'{name}' SQL validation failed: {validation.message}"
 
     if name == "run_analysis":
         if not args.get("analysis_name"):
@@ -512,16 +616,9 @@ def validate_tool_args(
             return "'run_analysis' requires 'target_column'."
 
     if name == "ask_user":
-        question = args.get("question")
-        if not isinstance(question, str) or not question.strip():
-            return "'ask_user' requires a non-empty string 'question'."
-        options = args.get("options")
-        if not isinstance(options, list):
-            return "'ask_user': 'options' must be a list."
-        if not 2 <= len(options) <= 6:
-            return "'ask_user': 'options' must contain 2-6 items."
-        if any(not isinstance(option, str) or not option.strip() for option in options):
-            return "'ask_user': every option must be a non-empty string."
+        ask_user_error = validate_ask_user_args(args)
+        if ask_user_error:
+            return ask_user_error[1]
 
     if name in ("propose_ppt_outline", "generate_ppt"):
         slides = args.get("slides")
@@ -533,20 +630,45 @@ def validate_tool_args(
         if widgets is not None and not isinstance(widgets, list):
             return f"'{name}': 'widgets' must be a list."
 
-    if name == "propose_report_outline":
+    if name in ("propose_report_outline", "export_report"):
         if not str(args.get("title") or "").strip():
-            return "'propose_report_outline' requires a non-empty 'title'."
+            return f"'{name}' requires a non-empty 'title'."
         sections = args.get("sections")
         if not isinstance(sections, list) or not sections:
-            return (
-                "'propose_report_outline' requires a non-empty 'sections' list."
-            )
+            return f"'{name}' requires a non-empty 'sections' list."
         if any(not isinstance(section, dict) for section in sections):
-            return (
-                "'propose_report_outline': every section must be an object."
-            )
+            return f"'{name}': every section must be an object."
+        for index, section in enumerate(sections, 1):
+            if not str(section.get("heading") or "").strip():
+                return f"'{name}': section {index} requires a non-empty 'heading'."
+            content = section.get("content")
+            if not isinstance(content, str) or not content.strip():
+                return f"'{name}': section {index} requires non-empty string 'content'."
 
     return None
+
+
+def normalize_report_outline_args(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Canonicalize common provider aliases for report section fields."""
+    normalized = dict(args or {})
+    raw_sections = normalized.get("sections")
+    if not isinstance(raw_sections, list):
+        return normalized
+
+    sections = []
+    for raw_section in raw_sections:
+        if not isinstance(raw_section, dict):
+            sections.append(raw_section)
+            continue
+        heading = raw_section.get("heading")
+        if not isinstance(heading, str) or not heading.strip():
+            heading = raw_section.get("title")
+        content = raw_section.get("content")
+        if not isinstance(content, str) or not content.strip():
+            content = raw_section.get("body")
+        sections.append({"heading": heading, "content": content})
+    normalized["sections"] = sections
+    return normalized
 
 
 def normalize_ask_user_args(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -585,3 +707,41 @@ def normalize_ask_user_args(args: Dict[str, Any]) -> Dict[str, Any]:
                 break
     normalized["options"] = options
     return normalized
+
+
+def validate_ask_user_args(args: Dict[str, Any]) -> Optional[Tuple[str, str]]:
+    """Return a stable error code and message for an invalid ``ask_user`` call."""
+    question = args.get("question")
+    if not isinstance(question, str) or not question.strip():
+        return (
+            ASK_USER_INVALID_ARGUMENT,
+            "'ask_user' requires a non-empty string 'question' "
+            f"(error code: {ASK_USER_INVALID_ARGUMENT}).",
+        )
+
+    options = args.get("options")
+    if not isinstance(options, list):
+        return (
+            ASK_USER_INVALID_ARGUMENT,
+            "'ask_user': 'options' must be a list "
+            f"(error code: {ASK_USER_INVALID_ARGUMENT}).",
+        )
+    if not options:
+        return (
+            ASK_USER_EMPTY_OPTIONS,
+            "'ask_user': 'options' cannot be empty; provide 2-6 items "
+            f"(error code: {ASK_USER_EMPTY_OPTIONS}).",
+        )
+    if not 2 <= len(options) <= 6:
+        return (
+            ASK_USER_OPTION_COUNT,
+            "'ask_user': 'options' must contain 2-6 items "
+            f"(error code: {ASK_USER_OPTION_COUNT}).",
+        )
+    if any(not isinstance(option, str) or not option.strip() for option in options):
+        return (
+            ASK_USER_INVALID_ARGUMENT,
+            "'ask_user': every option must be a non-empty string "
+            f"(error code: {ASK_USER_INVALID_ARGUMENT}).",
+        )
+    return None

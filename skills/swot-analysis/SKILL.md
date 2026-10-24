@@ -2,7 +2,8 @@
 name: swot-analysis
 description: SWOT 分析，从内部优势/劣势和外部机会/威胁四个维度评估企业或产品的战略态势（strategy 战略分析）
 icon: 🔲
-allowedTools: [display_diagram, edit_diagram, get_diagram, get_shape_library]
+tags: [mode-business, strategy, visualization]
+allowedTools: [display_diagram, edit_diagram, get_diagram]
 ---
 # SWOT 分析
 

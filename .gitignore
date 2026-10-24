@@ -51,10 +51,31 @@ auth.db
 auth.db-wal
 auth.db-shm
 
-# ---- Local-only tests ----
-# Lowercase tests/ is a local regression suite.  The release quality command
-# uses the existing uppercase Test/ package, so keep this exact path separate.
-/tests/
+# ---- Regression tests ----
+# Version the shared runtime regressions; keep unrelated local experiments ignored.
+/tests/*
+!/tests/test_chart_selector.py
+!/tests/chat-bundle.test.mjs
+!/tests/markdown-stream.test.mjs
+!/tests/sse-retry.test.mjs
+!/tests/ui-registry.test.mjs
+!/tests/test_account_menu.py
+!/tests/test_admin_console.py
+!/tests/test_desktop_launcher.py
+!/tests/test_diagram_theme.py
+!/tests/test_feishu_bot.py
+!/tests/test_gpu_analysis_fallback.py
+!/tests/test_heatmap_generation.py
+!/tests/test_hosted_models.py
+!/tests/test_model_api_security.py
+!/tests/test_privacy_boundaries.py
+!/tests/test_developer_api_removed.py
+!/tests/test_quota_model_ledger.py
+!/tests/test_report_export_regressions.py
+!/tests/test_sql_shadow.py
+!/tests/test_table_ingest.py
+!/tests/test_tool_governance.py
+!/tests/test_workspace_artifact_cleanup.py
 
 # Keep the tests already tracked by Git for GitHub Actions, but do not add
 # newly created local tests to the repository.
@@ -102,6 +123,15 @@ docs/*
 !docs/10-ai-team-workflow-optimization-plan.md
 !docs/11-ai-team-workflow-wf0-decisions.md
 !docs/21-edition-boundaries.md
+!docs/02-architecture.md
+!docs/03-conventions.md
+!docs/04-api-reference.md
+!docs/06-analysis-skills.md
+!docs/07-rag-rule.md
+!docs/12-d6-tool-discovery.md
+!docs/23-desktop-packaging.md
+!docs/feature-sync-1.4.md
+!docs/hosted-configuration.md
 test.bat
 01-notes-for-development.md
 
@@ -119,7 +149,6 @@ RAILWAY_DEPLOY.md
 config/hooks.json
 config/hooks-history.json
 config/feishu-bot.json
-frontend/README.md
 package-lock.json
 .claude
 .agents/
@@ -131,9 +160,9 @@ scripts/*
 !scripts/build-chat.mjs
 !scripts/clean-chat-chunks.mjs
 !scripts/verify-chat-bundle.mjs
+!scripts/generate_tool_inventory.py
 # Untracked assets
 Information/assets/LOGO.png
-PRODUCT.md
 
 # Local package cache, runtime secrets, and business-canvas state
 .pnpm-store/
@@ -142,4 +171,13 @@ business_canvas/*.sqlite
 business_canvas/*.sqlite-journal
 *.sqlite-shm
 *.sqlite-wal
+
+# TimesFM optional-service regression tests and implementation plan
+!tests/test_timesfm_integration.py
+!tests/forecast-settings.test.mjs
+!tests/test_local_services.py
+!tests/local-services-settings.test.mjs
+!docs/24-specialist-model-compute-plan.md
+/.zvec-grep
 /docs
+/tests

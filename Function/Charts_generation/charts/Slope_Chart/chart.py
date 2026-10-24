@@ -23,6 +23,16 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from charts.base import ChartResult
 
+try:
+    from charts.color_schemes import get_color_scheme
+except ImportError as e:  # pragma: no cover - 兜底，保证独立调用可用
+    log.debug("[chart] 配色模块加载失败: %s", e)
+    def get_color_scheme(name: str = "mckinsey"):
+        return {"colors": [
+            "#003D7A", "#0084D1", "#00A4EF", "#7FBA00", "#FFB81C",
+            "#F7630C", "#DA3B01", "#A4373A", "#6B2C91", "#00B4EF",
+        ]}
+
 __all__ = ["generate"]
 
 _DATA_FMT = "group列 + start列 + end列"
@@ -38,27 +48,27 @@ def _auto_col(df: pd.DataFrame, *hints: str) -> Optional[str]:
     3. 类型匹配：根据 hint 的语义推断类型
     4. 自动推断：无 hints 时返回第一个合适的列
     """
-    strs = [c for c in df.columns if df[c].dtype == object]
+    strs = [c for c in df.columns if (df[c].dtype == object or pd.api.types.is_string_dtype(df[c]))]
     nums = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-    col_lower = {c.lower(): c for c in df.columns}
+    col_lower = {str(c).lower(): c for c in df.columns}
     
     # 1. 精确匹配 hints
     for h in hints:
-        h_lower = h.lower()
+        h_lower = str(h).lower()
         if h_lower in col_lower:
             return col_lower[h_lower]
     
     # 2. 模糊匹配（包含关系）
     for h in hints:
-        h_lower = h.lower()
+        h_lower = str(h).lower()
         for col in df.columns:
-            col_lower_name = col.lower()
+            col_lower_name = str(col).lower()
             if h_lower in col_lower_name or col_lower_name in h_lower:
                 return col
     
     # 3. 类型匹配：根据 hint 的语义推断应该是什么类型
     if hints:
-        hint = hints[0].lower()
+        hint = str(hints[0]).lower()
         # 字符串类型的 hints
         if any(kw in hint for kw in ["source", "target", "label", "name", "group", "category", "phase", "row", "col", "path", "text", "word", "location", "geo", "item", "start", "end"]):
             if strs:
@@ -159,7 +169,8 @@ def generate(
 
     # Support x/y mapping (LLM typically sends x=group, y=[start,end])
     x_col = mapping.get("x")
-    y_cols = mapping.get("y") or mapping.get("y_cols")
+    y_cols = mapping.get("y")
+    y_cols = y_cols if y_cols is not None else mapping.get("y_cols")
     if isinstance(y_cols, str):
         y_cols = [y_cols]
 
@@ -168,16 +179,20 @@ def generate(
         start_col = y_cols[0]
         end_col = y_cols[1]
     else:
-        group_col = mapping.get("group") or group
-        start_col = mapping.get("start") or start
-        end_col = mapping.get("end") or end
+        group_col = mapping.get("group")
+        group_col = group_col if group_col is not None else group
+        start_col = mapping.get("start")
+        start_col = start_col if start_col is not None else start
+        end_col = mapping.get("end")
+        end_col = end_col if end_col is not None else end
 
     def _resolve(col_name: str, role: str, exclude: set = None) -> Optional[str]:
         exclude = exclude or set()
-        if col_name and col_name in df.columns and col_name not in exclude:
+        # None-safe：整数 0 列名是 falsy，不能用 truthiness 判断
+        if col_name is not None and col_name in df.columns and col_name not in exclude:
             return col_name
         nums = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c]) and c not in exclude]
-        strs = [c for c in df.columns if df[c].dtype == object and c not in exclude]
+        strs = [c for c in df.columns if pd.api.types.is_string_dtype(df[c]) and c not in exclude]
         if role == "group":
             return strs[0] if strs else (nums[0] if nums else None)
         else:
@@ -199,16 +214,31 @@ def generate(
         warnings.append(f"实体数 {len(df)} 超过建议上限 30，图表可能过于拥挤")
 
     fig = go.Figure()
-    
+
+    # 配色方案：优先用 options.color_scheme
+    _scheme = get_color_scheme(options.get("color_scheme", "mckinsey"))
+    _palette = _scheme.get("colors") or _MCKINSEY_COLORS
+    _pos_color = _scheme.get("positive", _palette[3 % len(_palette)] if len(_palette) > 3 else "#7FBA00")
+    _neg_color = _scheme.get("negative", _palette[6 % len(_palette)] if len(_palette) > 6 else "#DA3B01")
+
     # 按变化幅度排序，便于视觉对比
     df_sorted = df.copy()
+    # 数值强制转换：start/end 可能是字符串编码的数字，直接相减会 TypeError。
+    df_sorted[_start] = pd.to_numeric(df_sorted[_start], errors="coerce")
+    df_sorted[_end] = pd.to_numeric(df_sorted[_end], errors="coerce")
+    before = len(df_sorted)
+    df_sorted = df_sorted.dropna(subset=[_start, _end])
+    if before != len(df_sorted):
+        warnings.append(f"已忽略 {before - len(df_sorted)} 行无法解析为数值的 start/end 数据")
+    if df_sorted.empty:
+        return ChartResult(warnings=warnings + ["start/end 列不含可用数值"])
     df_sorted["_change"] = df_sorted[_end] - df_sorted[_start]
     df_sorted = df_sorted.sort_values("_change", ascending=False)
     
     for idx, (_, row) in enumerate(df_sorted.iterrows()):
         change = row[_end] - row[_start]
         # 根据变化方向选择颜色：增长用绿色，下降用红色
-        color = _MCKINSEY_COLORS[3] if change >= 0 else _MCKINSEY_COLORS[6]
+        color = _pos_color if change >= 0 else _neg_color
         
         fig.add_trace(go.Scatter(
             x=[_start, _end],

@@ -8,6 +8,7 @@
 """
 import logging
 log = logging.getLogger(__name__)
+import html as _html
 import os
 import sys
 from pathlib import Path
@@ -36,13 +37,13 @@ def _auto_col(df: pd.DataFrame, *hints: str) -> Optional[str]:
     """根据提示自动查找匹配的列名。"""
     strs = [c for c in df.columns if pd.api.types.is_string_dtype(df[c])]
     nums = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-    col_lower = {c.lower(): c for c in df.columns}
+    col_lower = {str(c).lower(): c for c in df.columns}
 
     # 1. 精确匹配 hints（跳过 None）
     for h in hints:
         if h is None:
             continue
-        h_lower = h.lower()
+        h_lower = str(h).lower()
         if h_lower in col_lower:
             return col_lower[h_lower]
     
@@ -50,9 +51,9 @@ def _auto_col(df: pd.DataFrame, *hints: str) -> Optional[str]:
     for h in hints:
         if h is None:
             continue
-        h_lower = h.lower()
+        h_lower = str(h).lower()
         for col in df.columns:
-            col_lower_name = col.lower()
+            col_lower_name = str(col).lower()
             if h_lower in col_lower_name or col_lower_name in h_lower:
                 return col
 
@@ -107,7 +108,7 @@ def _is_wide_format(df: pd.DataFrame) -> bool:
     
     # 排除已经是长格式的情况
     standard_long_cols = {'group', 'value', 'x', 'y', 'category', 'measure', 'variable', 'sample'}
-    rest_cols_lower = {c.lower() for c in rest_cols}
+    rest_cols_lower = {str(c).lower() for c in rest_cols}
     
     if rest_cols_lower & standard_long_cols:
         return False
@@ -127,9 +128,10 @@ def _wide_to_long(df: pd.DataFrame) -> pd.DataFrame:
 
 def _build_html(title: str, chart_name: str, library: str,
                 data_fmt: str, desc: str, embed: str) -> str:
+    esc = _html.escape
     return f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8">
-<title>{title}</title>
+<title>{esc(title)}</title>
 <style>
 body{{font-family:"Heiti SC","Microsoft YaHei",sans-serif;margin:40px;background:#fafafa}}
 .chart-wrap{{background:white;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.08);padding:24px;margin-bottom:32px}}
@@ -138,11 +140,11 @@ h1{{color:#222;font-size:22px;margin-bottom:6px}}
 .desc{{color:#555;font-size:14px;line-height:1.7;margin-top:20px}}
 </style></head>
 <body><div class="chart-wrap">
-<h1>{title}</h1><div class="subtitle">{chart_name} | {library}</div>
+<h1>{esc(title)}</h1><div class="subtitle">{esc(chart_name)} | {esc(library)}</div>
 {embed}
 </div><div class="desc">
-<strong>数据格式：</strong>{data_fmt}<br>
-<strong>说明：</strong>{desc}
+<strong>数据格式：</strong>{esc(data_fmt)}<br>
+<strong>说明：</strong>{esc(desc)}
 </div></body></html>"""
 
 
@@ -150,11 +152,12 @@ def _compute_density(values: np.ndarray, x_range: np.ndarray) -> np.ndarray:
     """使用 KDE 计算密度曲线。"""
     if len(values) < 2:
         return np.zeros_like(x_range)
-    
+
     try:
         kde = stats.gaussian_kde(values)
         return kde(x_range)
-    except:
+    except np.linalg.LinAlgError:
+        # 奇异协方差（如所有值相同），KDE 不可估
         return np.zeros_like(x_range)
 
 
@@ -191,12 +194,14 @@ def generate(
         warnings.append("检测到宽格式数据，已自动转换为长格式")
     else:
         # 兼容 required_roles 为 group/value 或 x/y 两种写法
-        group_col = mapping.get("group") or mapping.get("x") or group
-        value_col = mapping.get("value") or mapping.get("y") or value
+        group_col = mapping.get("group")
+        group_col = group_col if group_col is not None else (mapping.get("x") if mapping.get("x") is not None else group)
+        value_col = mapping.get("value")
+        value_col = value_col if value_col is not None else (mapping.get("y") if mapping.get("y") is not None else value)
 
     title = options.get("title", title)
 
-    _group = _auto_col(df, group_col, "group", "分组", "类别", "行业", "地区") if group_col else None
+    _group = _auto_col(df, group_col, "group", "分组", "类别", "行业", "地区")
     _value = _auto_col(df, value_col, "value", "数值", "销售额", "薪资", "价格")
 
     if _value is None or _value not in df.columns:
@@ -212,18 +217,6 @@ def generate(
     color_scheme = get_color_scheme(color_scheme_name)
     colors = color_scheme.get("colors", ["#003D7A", "#0084D1", "#00A4EF", "#6E7B8B", "#B9C2CF"])
 
-    # 按分组计算密度曲线
-    groups = df[_group].unique()
-    groups = sorted(groups)  # 按字母顺序排序
-    
-    # 确定 x 轴范围
-    x_min = df[_value].min()
-    x_max = df[_value].max()
-    x_range = np.linspace(x_min, x_max, 200)
-
-    fig = go.Figure()
-
-    # 为每个分组添加密度曲线
     # 按分组计算密度曲线
     groups = df[_group].dropna().unique().tolist()
 
@@ -245,8 +238,6 @@ def generate(
     x_pad = (x_max - x_min) * 0.05 if x_max > x_min else 1
     x_range = np.linspace(x_min - x_pad, x_max + x_pad, 300)
 
-    fig = go.Figure()
-
     # 先计算所有组密度，用于统一缩放
     density_map = {}
     max_density = 0.0
@@ -267,6 +258,8 @@ def generate(
 
     if not groups:
         return ChartResult(warnings=warnings + ["没有足够的数据生成山脊线图"])
+
+    fig = go.Figure()
 
     # ridgeline 参数
     overlap = float(options.get("overlap", 0.6))  # 0~1，越大重叠越明显

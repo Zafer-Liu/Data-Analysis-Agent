@@ -10,7 +10,7 @@ import threading
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
-from infrastructure.paths import data_path
+from infrastructure.paths import content_data_path
 from typing import Any, Dict, List, Mapping, Optional
 
 log = logging.getLogger(__name__)
@@ -120,7 +120,7 @@ class JobsStore:
 
     def __init__(self, db_path: Optional[Path] = None):
         if db_path is None:
-            db_path = data_path("outputs", "jobs", "jobs.db")
+            db_path = content_data_path("outputs", "jobs", "jobs.db")
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._path = db_path
         self._lock = threading.RLock()

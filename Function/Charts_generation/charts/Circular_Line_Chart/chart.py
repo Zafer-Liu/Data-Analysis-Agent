@@ -46,21 +46,20 @@ MCKINSEY_COLORS = [
 
 
 def _get_colors_for_scheme(color_scheme_name: str, count: int = 10) -> List[str]:
-    """获取指定配色方案的颜色列表"""
-    try:
-        scheme = get_color_scheme(color_scheme_name)
-        colors = scheme.get("colors", MCKINSEY_COLORS)
-    except:
-        colors = MCKINSEY_COLORS
-    result = []
-    for i in range(count):
-        result.append(colors[i % len(colors)])
-    return result
+    """获取指定配色方案的颜色列表。
+
+    get_color_scheme 对未知方案名回退到 mckinsey，永不抛异常；因此这里
+    不再 try/except 降级到硬编码列表（否则 bcg/bain/ey 请求会被静默降级
+    为 McKinsey 蓝）。仅在配色模块缺失时才回退。
+    """
+    scheme = get_color_scheme(color_scheme_name)
+    colors = scheme.get("colors", MCKINSEY_COLORS)
+    return [colors[i % len(colors)] for i in range(count)]
 
 
 def _auto_col(df: pd.DataFrame, *hints: str) -> Optional[str]:
     """自动检测列名"""
-    strs = [c for c in df.columns if df[c].dtype == object or str(df[c].dtype) == "string"]
+    strs = [c for c in df.columns if (df[c].dtype == object or pd.api.types.is_string_dtype(df[c]))]
     nums = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
     col_lower = {str(c).lower(): c for c in df.columns}
 
@@ -101,7 +100,7 @@ def _detect_wide_format(df: pd.DataFrame):
     rest_cols = list(df.columns[1:])
 
     first_ok = False
-    if df[id_col].dtype == object or str(df[id_col].dtype) == "string":
+    if df[id_col].dtype == object or pd.api.types.is_string_dtype(df[id_col]):
         first_ok = True
     elif pd.api.types.is_numeric_dtype(df[id_col]):
         s = pd.to_numeric(df[id_col], errors="coerce").dropna()
@@ -165,8 +164,10 @@ def generate(
         else:
             return ChartResult(warnings=["请提供 df 或 excel_path"])
 
-    x_col = mapping.get("x") or x
-    y_cols = mapping.get("y") or y
+    x_col = mapping.get("x")
+    x_col = x_col if x_col is not None else x
+    y_cols = mapping.get("y")
+    y_cols = y_cols if y_cols is not None else y
     title = options.get("title", title)
     color_scheme_name = options.get("color_scheme", "mckinsey")
 

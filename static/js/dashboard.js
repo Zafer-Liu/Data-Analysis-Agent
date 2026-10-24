@@ -139,7 +139,7 @@
   let sessionId = _urlSid || sessionStorage.getItem("baa_session_id") || "";
   if (_urlSid) sessionStorage.setItem("baa_session_id", _urlSid);
 
-  let isDirty = false, isRefreshing = false, pendingRefreshResolve = null;
+  let _isDirty = false, isRefreshing = false, pendingRefreshResolve = null;
 
   /* ── Auto-refresh ────────────────────────────────────────────── */
   let _autoTimer = null, _autoRemaining = 0, _autoInterval = 0, _countdownTimer = null;
@@ -177,7 +177,7 @@
     const s = (id, text) => { const el = $(id); if (el) el.textContent = text; };
     const p = (id, text) => { const el = $(id); if (el) el.placeholder = text; };
     s("btn-back", "←"); $("btn-back").title = T.back;
-    s("nav-brand-label", _lang === "en" ? "Analytics Agent" : "智析Agent");
+    s("nav-brand-label", _lang === "en" ? "SageAgent" : "智析Agent");
     s("opt-manual", T.manual_refresh);
     s("opt-30s", T.seconds_30);
     s("opt-1m", T.minutes_1);
@@ -228,7 +228,7 @@
     if (!resp.ok) { showEmptyState(T.not_found(resp.status)); return; }
     dashboard = await resp.json();
 
-    const brandLabel = _lang === "en" ? "Analytics Agent" : "智析Agent";
+    const brandLabel = _lang === "en" ? "SageAgent" : "智析Agent";
     $("db-name").textContent = dashboard.name || dashboardId;
     document.title = `${dashboard.name || "Dashboard"} — ${brandLabel}`;
 
@@ -383,7 +383,7 @@
     el.style.display = "flex";
   }
   function setDirty(val) {
-    isDirty = val;
+    _isDirty = val;
     const btn = $("btn-save-layout");
     btn.disabled = !val;
     if (val) { btn.classList.add("dirty"); btn.textContent = T.save_layout; }
@@ -474,7 +474,7 @@
   }
 
   /* ── Fullscreen expand ────────────────────────────────────────── */
-  function expandWidget(widgetId, title, chartId) {
+  function expandWidget(_widgetId, title, chartId) {
     if (!chartId) return;
     let fs = $("db-fullscreen");
     if (!fs) {

@@ -54,27 +54,27 @@ def _auto_col(df: pd.DataFrame, *hints: str) -> Optional[str]:
     3. 类型匹配：根据 hint 的语义推断类型
     4. 自动推断：无 hints 时返回第一个合适的列
     """
-    strs = [c for c in df.columns if df[c].dtype == object]
+    strs = [c for c in df.columns if (df[c].dtype == object or pd.api.types.is_string_dtype(df[c]))]
     nums = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-    col_lower = {c.lower(): c for c in df.columns}
+    col_lower = {str(c).lower(): c for c in df.columns}
     
     # 1. 精确匹配 hints
     for h in hints:
-        h_lower = h.lower()
+        h_lower = str(h).lower()
         if h_lower in col_lower:
             return col_lower[h_lower]
     
     # 2. 模糊匹配（包含关系）
     for h in hints:
-        h_lower = h.lower()
+        h_lower = str(h).lower()
         for col in df.columns:
-            col_lower_name = col.lower()
+            col_lower_name = str(col).lower()
             if h_lower in col_lower_name or col_lower_name in h_lower:
                 return col
     
     # 3. 类型匹配：根据 hint 的语义推断应该是什么类型
     if hints:
-        hint = hints[0].lower()
+        hint = str(hints[0]).lower()
         # 字符串类型的 hints
         if any(kw in hint for kw in ["source", "target", "label", "name", "group", "category", "phase", "row", "col", "path", "text", "word", "location", "geo"]):
             if strs:
@@ -156,8 +156,10 @@ def generate(
         else:
             return ChartResult(warnings=["请提供 df 或 excel_path"])
 
-    label_col = mapping.get("label") or label
-    value_col = mapping.get("value") or value
+    label_col = mapping.get("label")
+    label_col = label_col if label_col is not None else label
+    value_col = mapping.get("value")
+    value_col = value_col if value_col is not None else value
     title = options.get("title", title)
     n_cells = options.get("n_cells", n_cells)
     color_scheme_name = options.get("color_scheme", "mckinsey")
@@ -185,18 +187,29 @@ def generate(
     if len(df) > 6:
         warnings.append(f"类别数 {len(df)} > 6，可能影响可读性，建议使用柱状图")
 
-    total = df[_value].astype(float).sum()
+    # 数值强制转换并过滤 NaN：原实现直接 float(row[_value])，遇到 NaN 时
+    # int(round(nan)) 抛 ValueError: cannot convert float NaN to integer。
+    df_plot = df[[_label, _value]].copy()
+    df_plot[_value] = pd.to_numeric(df_plot[_value], errors="coerce")
+    before = len(df_plot)
+    df_plot = df_plot.dropna(subset=[_value])
+    if before != len(df_plot):
+        warnings.append(f"已忽略 {before - len(df_plot)} 行无法解析为数值的数据")
+    if df_plot.empty:
+        return ChartResult(warnings=warnings + ["数值列不含可用数据"])
+
+    total = float(df_plot[_value].sum())
     if total <= 0:
         return ChartResult(warnings=["数值总和为零或负数，无法生成华夫图"])
-    
+
     n_total_cells = n_cells * n_cells  # 10x10 = 100 个单元格
     fig = go.Figure()
-    
+
     # 计算每个类别占用的单元格数
     cell_idx = 0
     legend_traces = []  # 用于生成图例
-    
-    for ri, (_, row) in enumerate(df.iterrows()):
+
+    for ri, (_, row) in enumerate(df_plot.iterrows()):
         category = str(row[_label])
         value = float(row[_value])
         percentage = value / total * 100
@@ -260,7 +273,7 @@ def generate(
 
     meta = {
         "chart_id": "waffle",
-        "n_rows": len(df),
+        "n_rows": len(df_plot),
         "label_col": _label,
         "value_col": _value,
         "color_scheme": color_scheme_name,

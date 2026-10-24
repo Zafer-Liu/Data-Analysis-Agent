@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from agent.hooks.loader import default_settings, load_settings, serialize_settings
-from infrastructure.paths import data_path
+from infrastructure.paths import content_data_path
 
 _HISTORY_LOCK = threading.Lock()
 _HISTORY_LIMIT = 500
@@ -28,11 +28,11 @@ _BUILTIN_HOOK_NAMES = {
 
 
 def hooks_config_path() -> Path:
-    return data_path("config", "hooks.json")
+    return content_data_path("config", "hooks.json")
 
 
 def hooks_history_path() -> Path:
-    return data_path("config", "hooks-history.json")
+    return content_data_path("config", "hooks-history.json")
 
 
 def list_hook_history(limit: int = 100) -> list[dict[str, Any]]:

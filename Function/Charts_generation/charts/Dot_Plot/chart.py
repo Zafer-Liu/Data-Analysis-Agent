@@ -23,6 +23,16 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from charts.base import ChartResult
 
+try:
+    from charts.color_schemes import get_color_scheme
+except ImportError as e:  # pragma: no cover - 兜底，保证独立调用可用
+    log.debug("[chart] 配色模块加载失败: %s", e)
+    def get_color_scheme(name: str = "mckinsey"):
+        return {"colors": [
+            "#003D7A", "#0084D1", "#00A4EF", "#7FBA00", "#FFB81C",
+            "#F7630C", "#DA3B01", "#A4373A", "#6B2C91", "#00B4EF",
+        ]}
+
 __all__ = ["generate"]
 
 _DATA_FMT = "category列 + 两个数值列（起点、终点）"
@@ -49,30 +59,30 @@ COLOR_END = "#0084D1"    # 终点 - 中蓝
 
 def _auto_col(df: pd.DataFrame, *hints: str) -> Optional[str]:
     """根据提示自动查找匹配的列名。"""
-    strs = [c for c in df.columns if df[c].dtype == object]
+    strs = [c for c in df.columns if (df[c].dtype == object or pd.api.types.is_string_dtype(df[c]))]
     nums = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-    col_lower = {c.lower(): c for c in df.columns}
+    col_lower = {str(c).lower(): c for c in df.columns}
     
     # 过滤 None 值
     hints = [h for h in hints if h is not None]
     
     # 1. 精确匹配 hints
     for h in hints:
-        h_lower = h.lower()
+        h_lower = str(h).lower()
         if h_lower in col_lower:
             return col_lower[h_lower]
     
     # 2. 模糊匹配（包含关系）
     for h in hints:
-        h_lower = h.lower()
+        h_lower = str(h).lower()
         for col in df.columns:
-            col_lower_name = col.lower()
+            col_lower_name = str(col).lower()
             if h_lower in col_lower_name or col_lower_name in h_lower:
                 return col
     
     # 3. 类型匹配
     if hints:
-        hint = hints[0].lower()
+        hint = str(hints[0]).lower()
         if any(kw in hint for kw in ["source", "target", "label", "name", "group", "category", "phase", "row", "col", "path", "text", "word", "location", "geo"]):
             if strs:
                 return strs[0]
@@ -112,9 +122,11 @@ def _get_numeric_cols(df: pd.DataFrame, exclude: set = None) -> List[str]:
 
 def _build_html(title: str, chart_name: str, library: str,
                 data_fmt: str, desc: str, embed: str) -> str:
+    import html as _html
+    esc = _html.escape
     return f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8">
-<title>{title}</title>
+<title>{esc(title)}</title>
 <style>
 body{{font-family:"Heiti SC","Microsoft YaHei",sans-serif;margin:40px;background:#fafafa}}
 .chart-wrap{{background:white;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.08);padding:24px;margin-bottom:32px}}
@@ -123,11 +135,11 @@ h1{{color:#222;font-size:22px;margin-bottom:6px}}
 .desc{{color:#555;font-size:14px;line-height:1.7;margin-top:20px}}
 </style></head>
 <body><div class="chart-wrap">
-<h1>{title}</h1><div class="subtitle">{chart_name} | {library}</div>
+<h1>{esc(title)}</h1><div class="subtitle">{esc(chart_name)} | {esc(library)}</div>
 {embed}
 </div><div class="desc">
-<strong>数据格式：</strong>{data_fmt}<br>
-<strong>说明：</strong>{desc}
+<strong>数据格式：</strong>{esc(data_fmt)}<br>
+<strong>说明：</strong>{esc(desc)}
 </div></body></html>"""
 
 
@@ -160,6 +172,11 @@ def generate(
 
     # 参数提取
     title = options.get("title", title)
+    # 配色方案：优先用 options.color_scheme
+    _scheme = get_color_scheme(options.get("color_scheme", "mckinsey"))
+    _palette = _scheme.get("colors") or MCKINSEY_COLORS
+    _color_start = _scheme.get("primary", COLOR_START)
+    _color_end = _scheme.get("secondary", COLOR_END)
     sort_by = options.get("sort_by", None)
     marker_size = options.get("marker_size", 16)  # 默认改为 14
     arrow_width = options.get("arrow_width", 2)
@@ -167,9 +184,12 @@ def generate(
     show_legend = options.get("show_legend", True)
     max_categories = options.get("max_categories", 50)
 
-    # 自动检测列
-    _y = mapping.get("y") or y
-    _y = _auto_col(df, _y, "y", "类别", "产品", "国家", "category", "name", "label")
+    # 自动检测列。注意：本图的 y 是类别轴（哑铃图横排），不能把 "y" 作为
+    # 列提示 —— _auto_col 对 "y" 的类型回退是 nums[0]，会把数值列选成类别，
+    # 导致"需要至少2个数值列"误判
+    _y = mapping.get("y")
+    _y = _y if _y is not None else y
+    _y = _auto_col(df, _y, "category", "类别", "产品", "国家", "name", "label")
     
     if _y is None or _y not in df.columns:
         warnings.append("找不到必填字段 [y/category]")
@@ -183,8 +203,10 @@ def generate(
         return ChartResult(warnings=warnings)
     
     # 自动检测起点和终点列
-    _start = mapping.get("start") or start or num_cols[0]
-    _end = mapping.get("end") or end or num_cols[1]
+    _start = mapping.get("start")
+    _start = _start if _start is not None else (start if start is not None else num_cols[0])
+    _end = mapping.get("end")
+    _end = _end if _end is not None else (end if end is not None else num_cols[1])
     
     if _start not in df.columns:
         warnings.append(f"找不到起点列 [{_start}]")
@@ -217,18 +239,23 @@ def generate(
     
     # 构建图表
     fig = go.Figure()
-    
-    # 添加连接线（黑色实线，细）
-    for idx, (_, row) in enumerate(plot_df.iterrows()):
-        fig.add_trace(go.Scatter(
-            x=[row[_start], row[_end]],
-            y=[row[_y], row[_y]],
-            mode="lines",
-            line=dict(color="#000000", width=1),
-            hoverinfo="skip",
-            showlegend=False,
-            name=""
-        ))
+
+    # 添加连接线（黑色实线，细）——单 trace + None 分段，避免每行一个 trace
+    seg_x: List = []
+    seg_y: List = []
+    for _, row in plot_df.iterrows():
+        seg_x += [row[_start], row[_end], None]
+        seg_y += [row[_y], row[_y], None]
+    fig.add_trace(go.Scatter(
+        x=seg_x,
+        y=seg_y,
+        mode="lines",
+        line=dict(color="#000000", width=1),
+        connectgaps=False,
+        hoverinfo="skip",
+        showlegend=False,
+        name=""
+    ))
     
     # 添加起点圆点（深蓝）
     fig.add_trace(go.Scatter(
@@ -237,7 +264,7 @@ def generate(
         mode="markers",
         marker=dict(
             size=marker_size,
-            color=COLOR_START,
+            color=_color_start,
             opacity=1.0,
             line=dict(width=1.5, color="white")
         ),
@@ -254,7 +281,7 @@ def generate(
         mode="markers",
         marker=dict(
             size=marker_size,
-            color=COLOR_END,
+            color=_color_end,
             opacity=1.0,
             line=dict(width=1.5, color="white")
         ),

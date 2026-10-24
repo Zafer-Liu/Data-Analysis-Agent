@@ -23,6 +23,16 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from charts.base import ChartResult
 
+try:
+    from charts.color_schemes import get_color_scheme
+except ImportError as e:  # pragma: no cover - 兜底，保证独立调用可用
+    log.debug("[chart] 配色模块加载失败: %s", e)
+    def get_color_scheme(name: str = "mckinsey"):
+        return {"colors": [
+            "#003D7A", "#0084D1", "#00A4EF", "#7FBA00", "#FFB81C",
+            "#F7630C", "#DA3B01", "#A4373A", "#6B2C91", "#00B4EF",
+        ]}
+
 __all__ = ["generate"]
 
 _DATA_FMT = "x列(类别) + y列(数值) + Z列(数值)"
@@ -81,9 +91,12 @@ def generate(
     mapping = mapping or {}
 
     # ---- 用户可传显示标签（优先级：mapping > options）----
-    x_label_user = mapping.get("x_label") or options.get("x_label")
-    y_label_user = mapping.get("y_label") or options.get("y_label")
-    group_label_user = mapping.get("group_label") or options.get("group_label")
+    x_label_user = mapping.get("x_label")
+    x_label_user = x_label_user if x_label_user is not None else options.get("x_label")
+    y_label_user = mapping.get("y_label")
+    y_label_user = y_label_user if y_label_user is not None else options.get("y_label")
+    group_label_user = mapping.get("group_label")
+    group_label_user = group_label_user if group_label_user is not None else options.get("group_label")
 
     if df is None:
         if excel_path:
@@ -101,12 +114,14 @@ def generate(
     title = options.get("title", title)
 
     # -------- 1) 识别宽格式 / 长格式 --------
-    # 宽格式：首列是x，其余列全数值（如 年份 + 各品牌）
+    # 宽格式：首列是x，其余列全数值（如 年份 + 各品牌）。
+    # 至少 2 个数值列才可能是宽格式；2 列长格式 [类别, 值] 首列字符串 +
+    # 单个数值列，melt 后只有单一 series，不是有意义的马赛克宽表。
     is_wide_format = False
-    if len(df.columns) > 1:
+    if len(df.columns) > 2:
         first_col = df.columns[0]
         rest_cols = df.columns[1:]
-        if len(rest_cols) > 0 and all(pd.api.types.is_numeric_dtype(df[c]) for c in rest_cols):
+        if len(rest_cols) >= 2 and all(pd.api.types.is_numeric_dtype(df[c]) for c in rest_cols):
             is_wide_format = True
 
     if is_wide_format:
@@ -120,9 +135,12 @@ def generate(
         group_col_actual = "_group"
     else:
         # 长格式：x + y (+ group可选)
-        x_col = mapping.get("x") or x
-        y_col = mapping.get("y") or y
-        group_col = mapping.get("group") or group
+        x_col = mapping.get("x")
+        x_col = x_col if x_col is not None else x
+        y_col = mapping.get("y")
+        y_col = y_col if y_col is not None else y
+        group_col = mapping.get("group")
+        group_col = group_col if group_col is not None else group
 
         if x_col not in df.columns:
             x_col = df.columns[0]
@@ -185,6 +203,10 @@ def generate(
 
     fig = go.Figure()
 
+    # 配色方案：优先用 options.color_scheme，回退到 _MCKINSEY_COLORS
+    _scheme = get_color_scheme(options.get("color_scheme", "mckinsey"))
+    _palette = _scheme.get("colors") or _MCKINSEY_COLORS
+
     # -------- 3) 绘图 --------
     if group_col_actual:
         # 堆积柱 + 变宽（每段高度用绝对值，不做归一化）
@@ -194,7 +216,7 @@ def generate(
             .reset_index()
         )
         group_order = list(dict.fromkeys(gdf[group_col_actual].tolist()))
-        color_map = {g: _MCKINSEY_COLORS[i % len(_MCKINSEY_COLORS)] for i, g in enumerate(group_order)}
+        color_map = {g: _palette[i % len(_palette)] for i, g in enumerate(group_order)}
 
         for g in group_order:
             g_map = gdf[gdf[group_col_actual] == g].set_index(x_col_actual)[y_col_actual].to_dict()
@@ -242,7 +264,7 @@ def generate(
             x=centers,
             y=ys,
             width=widths,
-            marker=dict(color=_MCKINSEY_COLORS[0]),
+            marker=dict(color=_palette[0]),
             customdata=customdata,
             hovertemplate=(
                 f"<b>{label_x}</b>: %{{customdata[0]}}<br>"

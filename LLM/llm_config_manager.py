@@ -22,6 +22,100 @@ DEFAULT_CONTEXT_WINDOW = 1_000_000
 DEFAULT_MAX_OUTPUT_TOKENS = 384_000
 
 
+HOSTED_MODEL_SPECS = (
+    {
+        "id": "builtin-free-v1",
+        "env_prefix": "BAA_HOSTED_FREE",
+        "tier": "free",
+        "quota_source": "daily_gift",
+        "display_name": "免费模型",
+        "public_model_name": "MiniMax-M3",
+        "description": "适合日常分析与基础任务",
+        "quota_multiplier": 1.0,
+        "input_multiplier": 1.0,
+        "output_multiplier": 1.0,
+        "cache_read_multiplier": 1.0,
+        "cache_write_multiplier": 1.0,
+        "requires_paid_balance": False,
+    },
+    {
+        "id": "builtin-standard-deepseek-flash-v1",
+        "env_prefix": "BAA_HOSTED_STANDARD_DEEPSEEK_FLASH",
+        "tier": "standard",
+        "quota_source": "persistent_balance",
+        "display_name": "DeepSeek V4 Flash",
+        "public_model_name": "DeepSeek V4 Flash",
+        "description": "快速响应，适合日常对话、内容创作与基础分析",
+        "quota_multiplier": 0.71,
+        "input_multiplier": 0.71,
+        "output_multiplier": 2.12,
+        "cache_read_multiplier": 0.03,
+        "cache_write_multiplier": 2.12,
+        "requires_paid_balance": True,
+    },
+    {
+        "id": "builtin-standard-glm-5-2-v1",
+        "env_prefix": "BAA_HOSTED_STANDARD_GLM_5_2",
+        "tier": "standard",
+        "quota_source": "persistent_balance",
+        "display_name": "GLM-5.2",
+        "public_model_name": "GLM-5.2",
+        "description": "长文本与代码能力均衡，适合复杂系统任务",
+        "quota_multiplier": 1.89,
+        "input_multiplier": 1.89,
+        "output_multiplier": 6.59,
+        "cache_read_multiplier": 0.48,
+        "cache_write_multiplier": 6.59,
+        "requires_paid_balance": True,
+    },
+    {
+        "id": "builtin-advanced-glm-5-3-v1",
+        "env_prefix": "BAA_HOSTED_ADVANCED_GLM_5_3",
+        "tier": "advanced",
+        "quota_source": "persistent_balance",
+        "display_name": "GLM-5.3",
+        "public_model_name": "GLM-5.3",
+        "description": "适合长周期编码、智能体工程与高阶推理",
+        "quota_multiplier": 1.89,
+        "input_multiplier": 1.89,
+        "output_multiplier": 6.59,
+        "cache_read_multiplier": 0.48,
+        "cache_write_multiplier": 6.59,
+        "requires_paid_balance": True,
+    },
+    {
+        "id": "builtin-advanced-deepseek-v4-pro-v1",
+        "env_prefix": "BAA_HOSTED_ADVANCED_DEEPSEEK_V4_PRO",
+        "tier": "advanced",
+        "quota_source": "persistent_balance",
+        "display_name": "DeepSeek V4 Pro",
+        "public_model_name": "DeepSeek V4 Pro",
+        "description": "适合专业代码、科研任务与复杂推理",
+        "quota_multiplier": 2.12,
+        "input_multiplier": 2.12,
+        "output_multiplier": 6.36,
+        "cache_read_multiplier": 0.08,
+        "cache_write_multiplier": 6.36,
+        "requires_paid_balance": True,
+    },
+    {
+        "id": "builtin-advanced-kimi-k3-v1",
+        "env_prefix": "BAA_HOSTED_ADVANCED_KIMI_K3",
+        "tier": "advanced",
+        "quota_source": "persistent_balance",
+        "display_name": "Kimi-K3",
+        "public_model_name": "Kimi-K3",
+        "description": "原生视觉与百万上下文，适合长程知识工作",
+        "quota_multiplier": 4.71,
+        "input_multiplier": 4.71,
+        "output_multiplier": 23.53,
+        "cache_read_multiplier": 0.48,
+        "cache_write_multiplier": 23.53,
+        "requires_paid_balance": True,
+    },
+)
+
+
 def model_token_limits(config: Any | None) -> tuple[int, int]:
     """Return configured model limits, with generous safe defaults.
 
@@ -113,6 +207,10 @@ class LLMConfig:
     # never credentials, and power the auditable Workflow cost view.
     input_price_per_million: Optional[float] = None
     output_price_per_million: Optional[float] = None
+    # Platform-managed models are loaded from deployment secrets.  They may be
+    # selected like any other provider internally, but must never be returned
+    # by the user-editable model settings API or persisted to llm_config.json.
+    is_hosted: bool = False
 
 
 class LLMConfigManager:
@@ -188,11 +286,13 @@ class LLMConfigManager:
         load_from_env=False: 默认不从环境变量回灌，避免“删了又出现”
         """
         self.configs: Dict[str, LLMConfig] = {}
+        self.hosted_models: Dict[str, Dict[str, Any]] = {}
         self.load_configs(load_from_env=load_from_env)
 
     def load_configs(self, load_from_env: bool = False):
         """从文件加载配置"""
         self.configs = {}
+        self.hosted_models = {}
 
         if LLM_CONFIG_FILE.exists():
             try:
@@ -205,6 +305,223 @@ class LLMConfigManager:
 
         if load_from_env:
             self._load_from_env()
+            self._load_hosted_models_from_env()
+
+    @staticmethod
+    def _env_flag(name: str, default: bool = False) -> bool:
+        raw = os.environ.get(name)
+        if raw is None:
+            return default
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+    def _load_hosted_models_from_env(self):
+        """Load deployment-managed models while keeping upstream data private.
+
+        Stable public IDs and default display metadata live in code. Railway
+        controls every upstream URL, real model ID and credential. Only the
+        explicit public catalog fields below may cross the browser boundary.
+        """
+        def _positive_int_env(name: str, fallback: int) -> int:
+            try:
+                value = int(os.environ.get(name, ""))
+            except (TypeError, ValueError):
+                return fallback
+            return value if value > 0 else fallback
+
+        def _positive_float_env(name: str, fallback: float) -> float:
+            try:
+                value = float(os.environ.get(name, ""))
+            except (TypeError, ValueError):
+                return fallback
+            return value if math.isfinite(value) and value > 0 else fallback
+
+        for spec in HOSTED_MODEL_SPECS:
+            prefix = spec["env_prefix"]
+            if not self._env_flag(f"{prefix}_ENABLED"):
+                continue
+
+            is_paid = spec["quota_source"] == "persistent_balance"
+            shared_paid_base_url = (
+                os.environ.get("BAA_HOSTED_PAID_BASE_URL") or ""
+            ).strip()
+            shared_paid_api_key = (
+                os.environ.get("BAA_HOSTED_PAID_API_KEY") or ""
+            ).strip()
+            base_url = (
+                os.environ.get(f"{prefix}_BASE_URL")
+                or (shared_paid_base_url if is_paid else "")
+            ).strip()
+            upstream_model = (os.environ.get(f"{prefix}_MODEL") or "").strip()
+            api_key = (
+                os.environ.get(f"{prefix}_API_KEY")
+                or (shared_paid_api_key if is_paid else "")
+            ).strip()
+            missing = [
+                name for name, value in (
+                    (f"{prefix}_BASE_URL", base_url),
+                    (f"{prefix}_MODEL", upstream_model),
+                    (f"{prefix}_API_KEY", api_key),
+                ) if not value
+            ]
+            if missing:
+                log.error(
+                    "[hosted-models] %s disabled; missing %s",
+                    spec["id"],
+                    ", ".join(missing),
+                )
+                continue
+
+            display_name = (
+                os.environ.get(f"{prefix}_DISPLAY_NAME") or spec["display_name"]
+            ).strip()
+            public_model_name = (
+                os.environ.get(f"{prefix}_PUBLIC_MODEL_NAME")
+                or spec["public_model_name"]
+            ).strip()
+            description = (
+                os.environ.get(f"{prefix}_DESCRIPTION") or spec["description"]
+            ).strip()
+            model_id = spec["id"]
+
+            self.configs[model_id] = LLMConfig(
+                provider=model_id,
+                api_key=api_key,
+                base_url=base_url,
+                model=upstream_model,
+                name=display_name,
+                enabled=True,
+                is_custom=False,
+                context_window=_positive_int_env(
+                    f"{prefix}_CONTEXT_WINDOW", DEFAULT_CONTEXT_WINDOW
+                ),
+                max_output_tokens=_positive_int_env(
+                    f"{prefix}_MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS
+                ),
+                enable_thinking=self._env_flag(f"{prefix}_ENABLE_THINKING"),
+                thinking_budget=_positive_int_env(f"{prefix}_THINKING_BUDGET", 8000),
+                is_hosted=True,
+            )
+            self.hosted_models[model_id] = {
+                "id": model_id,
+                "display_name": display_name,
+                "public_model_name": public_model_name,
+                "tier": spec["tier"],
+                "description": description,
+                "quota_source": spec["quota_source"],
+                "quota_multiplier": _positive_float_env(
+                    f"{prefix}_QUOTA_MULTIPLIER", spec["quota_multiplier"]
+                ),
+                "input_multiplier": _positive_float_env(
+                    f"{prefix}_INPUT_MULTIPLIER", spec["input_multiplier"]
+                ),
+                "output_multiplier": _positive_float_env(
+                    f"{prefix}_OUTPUT_MULTIPLIER", spec["output_multiplier"]
+                ),
+                "cache_read_multiplier": _positive_float_env(
+                    f"{prefix}_CACHE_READ_MULTIPLIER",
+                    spec["cache_read_multiplier"],
+                ),
+                "cache_write_multiplier": _positive_float_env(
+                    f"{prefix}_CACHE_WRITE_MULTIPLIER",
+                    spec["cache_write_multiplier"],
+                ),
+                "requires_paid_balance": spec["requires_paid_balance"],
+                "available": True,
+            }
+
+    def sync_remote_hosted_models(
+        self,
+        models: list[dict[str, Any]],
+        *,
+        base_url: str,
+        api_key: str,
+    ) -> None:
+        """Register the cloud catalog as in-memory desktop proxy configs.
+
+        The desktop client receives only stable public model IDs and display
+        metadata.  Every actual LLM request is sent to the authenticated cloud
+        gateway, so upstream provider URLs, real model names and credentials
+        never enter the desktop process or browser response.
+        """
+        endpoint = (base_url or "").strip().rstrip("/")
+        token = (api_key or "").strip()
+        if not endpoint or not token:
+            return
+
+        for provider, config in list(self.configs.items()):
+            if config.is_hosted:
+                del self.configs[provider]
+        self.hosted_models = {}
+
+        specs = {str(spec["id"]): spec for spec in HOSTED_MODEL_SPECS}
+
+        def _weight(value: Any, fallback: float) -> float:
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                return fallback
+            return parsed if math.isfinite(parsed) and parsed >= 0 else fallback
+
+        for item in models if isinstance(models, list) else []:
+            if not isinstance(item, dict):
+                continue
+            model_id = str(item.get("id") or "").strip()
+            spec = specs.get(model_id)
+            if not spec or not item.get("available"):
+                continue
+
+            display_name = str(
+                item.get("display_name") or spec["display_name"]
+            ).strip()
+            public_model_name = str(
+                item.get("public_model_name") or spec["public_model_name"]
+            ).strip()
+            self.configs[model_id] = LLMConfig(
+                provider=model_id,
+                api_key=token,
+                base_url=endpoint,
+                model=model_id,
+                name=display_name,
+                enabled=True,
+                is_custom=False,
+                context_window=DEFAULT_CONTEXT_WINDOW,
+                max_output_tokens=DEFAULT_MAX_OUTPUT_TOKENS,
+                is_hosted=True,
+            )
+            self.hosted_models[model_id] = {
+                "id": model_id,
+                "display_name": display_name,
+                "public_model_name": public_model_name,
+                "tier": str(item.get("tier") or spec["tier"]),
+                "description": str(
+                    item.get("description") or spec["description"]
+                ),
+                "quota_source": str(
+                    item.get("quota_source") or spec["quota_source"]
+                ),
+                "quota_multiplier": _weight(
+                    item.get("quota_multiplier"), spec["quota_multiplier"]
+                ),
+                "input_multiplier": _weight(
+                    item.get("input_multiplier"), spec["input_multiplier"]
+                ),
+                "output_multiplier": _weight(
+                    item.get("output_multiplier"), spec["output_multiplier"]
+                ),
+                "cache_read_multiplier": _weight(
+                    item.get("cache_read_multiplier"),
+                    spec["cache_read_multiplier"],
+                ),
+                "cache_write_multiplier": _weight(
+                    item.get("cache_write_multiplier"),
+                    spec["cache_write_multiplier"],
+                ),
+                "requires_paid_balance": bool(
+                    item.get("requires_paid_balance", spec["requires_paid_balance"])
+                ),
+                "available": True,
+                "selectable": item.get("selectable") is not False,
+            }
 
     def _load_from_env(self):
         """从环境变量加载内置提供商配置（仅在显式开启时使用）
@@ -261,6 +578,7 @@ class LLMConfigManager:
             data = {
                 provider: asdict(config)
                 for provider, config in self.configs.items()
+                if not config.is_hosted
             }
             with open(LLM_CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
@@ -486,7 +804,9 @@ class LLMConfigManager:
         ]
 
     def get_default_provider(self) -> Optional[str]:
-        priority = ["deepseek", "minimax", "openai", "atlascloud", "ollama", "claude"]
+        priority = [spec["id"] for spec in HOSTED_MODEL_SPECS] + [
+            "deepseek", "minimax", "openai", "atlascloud", "ollama", "claude",
+        ]
         for provider in priority:
             if provider in self.configs and self.configs[provider].enabled:
                 return provider
@@ -501,6 +821,8 @@ class LLMConfigManager:
         """注意：不返回 api_key 明文"""
         result = {}
         for provider, config in self.configs.items():
+            if config.is_hosted:
+                continue
             result[provider] = {
                 "provider": config.provider,
                 "base_url": config.base_url,
@@ -520,6 +842,17 @@ class LLMConfigManager:
                 "output_price_per_million": config.output_price_per_million,
             }
         return result
+
+    def list_hosted_models(self) -> List[Dict[str, Any]]:
+        """Return the public hosted catalog; connection details never leave here."""
+        return [dict(item) for item in self.hosted_models.values()]
+
+    def get_hosted_model(self, provider: str) -> Optional[Dict[str, Any]]:
+        item = self.hosted_models.get(provider)
+        return dict(item) if item else None
+
+    def is_hosted_provider(self, provider: Optional[str]) -> bool:
+        return bool(provider and provider in self.hosted_models)
 
     @staticmethod
     def _price_pair(
@@ -586,8 +919,14 @@ class LLMConfigManager:
                 return {"success": False, "message": "API Key 不能为空", "provider": provider}
 
         try:
-            from openai import OpenAI
-            client = OpenAI(api_key=effective_key, base_url=effective_url)
+            from openai import OpenAI, Timeout
+            # Explicit connect timeout: the SDK default (5s) is too tight for
+            # proxied networks (e.g. TUN-mode VPN adds ~6s to the handshake).
+            client = OpenAI(
+                api_key=effective_key,
+                base_url=effective_url,
+                timeout=Timeout(600.0, connect=15.0),
+            )
             client.chat.completions.create(
                 model=effective_model,
                 messages=[{"role": "user", "content": "Hello"}],
@@ -626,8 +965,19 @@ def get_llm_client(provider: Optional[str] = None):
     if not config:
         raise ValueError(f"未找到 {provider} 的配置")
 
-    from openai import OpenAI
-    return OpenAI(api_key=config.api_key, base_url=config.base_url)
+    from openai import OpenAI, Timeout
+    # Application-level retry observers account for every hosted-provider
+    # attempt. Disable SDK-transparent retries so provider traffic cannot occur
+    # outside that audit trail.
+    # Explicit connect timeout: the SDK default (5s) is too tight for proxied
+    # networks (TUN-mode VPN handshakes take ~6s). Mirrors the cloud gateway
+    # timeout in api/models.py (httpx.Timeout(600, connect=15)).
+    return OpenAI(
+        api_key=config.api_key,
+        base_url=config.base_url,
+        max_retries=0,
+        timeout=Timeout(600.0, connect=15.0),
+    )
 
 
 def get_llm_client_with_fallback(preferred_provider: Optional[str] = None):
@@ -640,7 +990,7 @@ def get_llm_client_with_fallback(preferred_provider: Optional[str] = None):
     log = logging.getLogger(__name__)
 
     manager = get_config_manager()
-    from openai import OpenAI
+    from openai import OpenAI, Timeout
 
     # Build candidate list: preferred first, then priority order
     candidates: List[str] = []
@@ -663,7 +1013,12 @@ def get_llm_client_with_fallback(preferred_provider: Optional[str] = None):
         if not config or not config.api_key:
             continue
         try:
-            client = OpenAI(api_key=config.api_key, base_url=config.base_url)
+            # Same explicit connect timeout as get_llm_client (see above).
+            client = OpenAI(
+                api_key=config.api_key,
+                base_url=config.base_url,
+                timeout=Timeout(600.0, connect=15.0),
+            )
             # Lightweight probe — just instantiate, don't make a network call
             log.info("[llm] selected provider=%s model=%s", provider, config.model)
             return client, provider, config

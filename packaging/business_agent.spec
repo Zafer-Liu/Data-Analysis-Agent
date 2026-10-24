@@ -97,12 +97,20 @@ hiddenimports = [
     # G2 remote GPU connectivity imports these lazily at runtime.
     "paramiko",
     "keyring",
+    # Imported by the desktop entry point and completed by pywebview's bundled
+    # PyInstaller hook (EdgeChromium on Windows, Cocoa on macOS).
+    "webview",
     # Torch_MLP is loaded by the path-based analysis registry, so its training
     # target selector is invisible to PyInstaller's normal import discovery.
     "infrastructure.training_router",
 ]
 hiddenimports += collect_submodules("charts")
 hiddenimports += collect_submodules("PPT")
+# sqlglot resolves dialect/parser/generator/typing modules dynamically from
+# the requested dialect name.  PyInstaller cannot discover that registry
+# lookup, so a frozen build otherwise contains sqlglot itself but omits the
+# DuckDB implementation used by every query validation call.
+hiddenimports += collect_submodules("sqlglot")
 
 
 a = Analysis(

@@ -31,7 +31,7 @@ import plotly.io as pio
 from typing import List, Tuple
 
 try:
-    from charts.base import ChartResult
+    from charts.base import ChartResult, build_chart_html
 except ImportError as e:
     log.debug("[chart] 图表生成异常: %s", e)
     class ChartResult:
@@ -42,6 +42,14 @@ except ImportError as e:
             self.meta = meta or {}
         def is_valid(self):
             return bool(self.html.strip()) and len(self.html) > 500
+
+    import html as _html
+    def build_chart_html(title, chart_name, library, data_fmt, desc, embed):
+        esc = _html.escape
+        return (f'<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8">'
+                f'<title>{esc(title)}</title></head><body>'
+                f'<h1>{esc(title)}</h1>{embed}'
+                f'<div>{esc(data_fmt)} {esc(desc)}</div></body></html>')
 
 try:
     from charts.color_schemes import get_color_scheme
@@ -71,10 +79,10 @@ def _auto_col_x(df: pd.DataFrame) -> str:
     hints = ["date", "time", "month", "year", "week", "day", "period", "Week_Num", "时间", "日期", "月份", "年份", "周", "周数"]
     col_lower = {str(c).lower(): c for c in df.columns}
     for hint in hints:
-        if hint.lower() in col_lower:
-            return col_lower[hint.lower()]
+        if str(hint).lower() in col_lower:
+            return col_lower[str(hint).lower()]
     for c in df.columns:
-        if df[c].dtype == object:
+        if df[c].dtype == object or pd.api.types.is_string_dtype(df[c]):
             return c
     for c in df.columns:
         if pd.api.types.is_numeric_dtype(df[c]):
@@ -344,15 +352,8 @@ def generate(df: pd.DataFrame, mapping: dict = None, options: dict = None) -> Ch
     )
 
     chart_html = pio.to_html(fig, full_html=False, include_plotlyjs=False)
-    html = f"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <title>{title}</title>
-</head>
-<body>
-    <div>{chart_html}</div>
-</body>
-</html>"""
+    html = build_chart_html(title, "stacked_area_chart", "plotly",
+                            "x列 + y列(多列) 或 x列 + y列 + series列",
+                            "堆叠面积图，展示各部分随时间的累积趋势。", chart_html)
 
     return ChartResult(html=html, warnings=warnings, meta=meta)

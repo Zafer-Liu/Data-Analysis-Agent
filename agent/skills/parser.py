@@ -6,7 +6,7 @@ from pathlib import Path
 
 import yaml
 
-from .models import SkillDef, SkillResource, SkillSource
+from .models import SkillDef, SkillResource, SkillSource, normalize_skill_tags
 
 MAX_SKILL_BYTES = 100_000
 MAX_PROMPT_CHARS = 50_000
@@ -66,8 +66,13 @@ def parse_skill_file(path: Path, *, source: SkillSource = "builtin") -> SkillDef
     icon = str(meta.get("icon", "🧩")).strip() or "🧩"
     prompt = clean[match.end():].strip()
     allowed_tools = meta.get("allowedTools", [])
+    tags = meta.get("tags", [])
     if not isinstance(allowed_tools, list) or not all(isinstance(item, str) for item in allowed_tools):
         raise SkillError("allowedTools must be a list of tool names")
+    try:
+        tags = normalize_skill_tags(tags)
+    except ValueError as exc:
+        raise SkillError(str(exc)) from exc
     if len(description) > MAX_DESCRIPTION_CHARS:
         raise SkillError(f"description exceeds {MAX_DESCRIPTION_CHARS} characters")
     if len(prompt) > MAX_PROMPT_CHARS:
@@ -80,7 +85,7 @@ def parse_skill_file(path: Path, *, source: SkillSource = "builtin") -> SkillDef
     try:
         return SkillDef(
             name=name, description=description, prompt=prompt, path=path,
-            icon=icon, allowed_tools=tuple(allowed_tools), source=source,
+            icon=icon, allowed_tools=tuple(allowed_tools), tags=tags, source=source,
             resources=resources,
         )
     except ValueError as exc:

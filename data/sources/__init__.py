@@ -9,6 +9,7 @@ Public API — import these from `data.sources` (or via the legacy
     SQLDataSource           — any SQLAlchemy-supported DB + DuckDB analysis cache
     GoogleSheetsDataSource  — service-account JSON → all worksheets
     HTTPAPIDataSource       — JSON/CSV REST endpoint → DataFrame
+    ExtractedTableDataSource — web/PDF/JSON extracted grids → multi-table DuckDB
     MAX_DISPLAY_ROWS        — preview row cap surfaced to the LLM
 """
 from .base    import DataSource, MAX_DISPLAY_ROWS
@@ -18,6 +19,7 @@ from .sql     import SQLDataSource
 from .gsheets import GoogleSheetsDataSource
 from .http    import HTTPAPIDataSource
 from .feishu_bitable import FeishuBitableDataSource
+from .extracted import ExtractedTableDataSource
 
 __all__ = [
     "DataSource",
@@ -28,4 +30,5 @@ __all__ = [
     "GoogleSheetsDataSource",
     "HTTPAPIDataSource",
     "FeishuBitableDataSource",
+    "ExtractedTableDataSource",
 ]

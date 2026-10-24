@@ -2,7 +2,8 @@
 name: business-model-canvas
 description: 商业模式画布（BMC）分析，用 9 个模块拆解产品的客户、价值、渠道、收入和成本（business model 商业模式）
 icon: 🗺
-allowedTools: [display_diagram, edit_diagram, get_diagram, get_shape_library]
+tags: [mode-business, strategy]
+allowedTools: [display_diagram, edit_diagram, get_diagram]
 ---
 # 商业模式画布分析
 

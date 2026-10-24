@@ -6,7 +6,8 @@ import re
 import threading
 from pathlib import Path
 from flask import Blueprint, request, jsonify
-from infrastructure.paths import resource_path
+from infrastructure.paths import is_cloud_managed_runtime, resource_path
+from .state import require_local_runtime_config
 
 log = logging.getLogger(__name__)
 
@@ -46,6 +47,91 @@ def _get_managers():
     return get_mcp_config_manager(), get_mcp_manager()
 
 
+# ── Built-in common MCP presets ─────────────────────────────────
+# One-click fill templates for popular stdio MCP servers.
+# All commands must stay within STDIO_ALLOWED_COMMANDS (npx/uvx/...).
+# Placeholders in args/env are replaced by the user after fill.
+_MCP_PRESETS = [
+    {
+        "id": "filesystem", "label": "文件系统 (Filesystem)",
+        "description": "读写指定目录中的文件（npx）",
+        "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "D:\\your\\folder"],
+        "env": {}, "note": "请把最后一个参数改为你允许访问的目录",
+        "needs_input": True,
+    },
+    {
+        "id": "fetch", "label": "网页抓取 (Fetch)",
+        "description": "抓取网页并转为 Markdown（uvx）",
+        "command": "uvx", "args": ["mcp-server-fetch"],
+        "env": {}, "note": "需要已安装 uv",
+        "needs_input": False,
+    },
+    {
+        "id": "memory", "label": "记忆库 (Memory)",
+        "description": "基于知识图谱的持久记忆（npx）",
+        "command": "npx", "args": ["-y", "@modelcontextprotocol/server-memory"],
+        "env": {}, "note": "",
+        "needs_input": False,
+    },
+    {
+        "id": "sequential-thinking", "label": "顺序思考 (Sequential Thinking)",
+        "description": "结构化多步推理工具（npx）",
+        "command": "npx", "args": ["-y", "@modelcontextprotocol/server-sequentialthinking"],
+        "env": {}, "note": "",
+        "needs_input": False,
+    },
+    {
+        "id": "sqlite", "label": "SQLite 数据库",
+        "description": "查询本地 SQLite 数据库（uvx）",
+        "command": "uvx", "args": ["mcp-server-sqlite", "--db-path", "D:\\your\\db.sqlite"],
+        "env": {}, "note": "请把 --db-path 改为你的数据库文件路径",
+        "needs_input": True,
+    },
+    {
+        "id": "git", "label": "Git 仓库",
+        "description": "操作本地 Git 仓库（uvx）",
+        "command": "uvx", "args": ["mcp-server-git", "--repository", "D:\\your\\repo"],
+        "env": {}, "note": "请把 --repository 改为你的仓库路径",
+        "needs_input": True,
+    },
+    {
+        "id": "github", "label": "GitHub",
+        "description": "仓库/Issue/PR/搜索（npx）",
+        "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"],
+        "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "请填入你的GitHub令牌"},
+        "note": "需要 GitHub Personal Access Token",
+        "needs_input": True,
+    },
+    {
+        "id": "brave-search", "label": "Brave 搜索",
+        "description": "网页/本地/新闻搜索（npx）",
+        "command": "npx", "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+        "env": {"BRAVE_API_KEY": "请填入你的BraveAPI密钥"},
+        "note": "需要 Brave Search API Key",
+        "needs_input": True,
+    },
+    {
+        "id": "playwright", "label": "Playwright 浏览器（微软官方）",
+        "description": "自动化浏览器操作/截图/表单填写（npx）",
+        "command": "npx", "args": ["@playwright/mcp@latest"],
+        "env": {}, "note": "微软官方包 @playwright/mcp，首次运行会下载浏览器",
+        "needs_input": False,
+    },
+    {
+        "id": "puppeteer", "label": "Puppeteer 浏览器",
+        "description": "浏览器自动化与网页截图（npx）",
+        "command": "npx", "args": ["-y", "@modelcontextprotocol/server-puppeteer"],
+        "env": {}, "note": "首次运行会下载 Chromium",
+        "needs_input": False,
+    },
+]
+
+
+@bp.get("/api/mcp/presets")
+def list_presets():
+    return jsonify({"presets": [dict(p) for p in _MCP_PRESETS]})
+
+
 @bp.get("/api/mcp/servers")
 def list_servers():
     cfg_mgr, mcp_mgr = _get_managers()
@@ -54,6 +140,9 @@ def list_servers():
     result = []
     for sid, cfg in servers.items():
         entry = dict(cfg)
+        if is_cloud_managed_runtime():
+            entry["env"] = {key: "" for key in (entry.get("env") or {})}
+            entry["headers"] = {key: "" for key in (entry.get("headers") or {})}
         rt = runtime.get(sid, {})
         entry["status"] = rt.get("status", "disconnected")
         entry["last_error"] = rt.get("last_error", "")
@@ -68,6 +157,7 @@ def list_servers():
 
 
 @bp.post("/api/mcp/servers")
+@require_local_runtime_config
 def add_server():
     data = request.get_json(force=True) or {}
     server_id = (data.get("server_id") or "").strip()
@@ -129,6 +219,7 @@ def add_server():
 
 
 @bp.put("/api/mcp/servers/<server_id>")
+@require_local_runtime_config
 def update_server(server_id: str):
     data = request.get_json(force=True) or {}
     cfg_mgr, mcp_mgr = _get_managers()
@@ -178,6 +269,7 @@ def update_server(server_id: str):
 
 
 @bp.delete("/api/mcp/servers/<server_id>")
+@require_local_runtime_config
 def remove_server(server_id: str):
     cfg_mgr, mcp_mgr = _get_managers()
     mcp_mgr.remove_server(server_id)
@@ -188,6 +280,7 @@ def remove_server(server_id: str):
 
 
 @bp.post("/api/mcp/servers/<server_id>/enable")
+@require_local_runtime_config
 def enable_server(server_id: str):
     cfg_mgr, _ = _get_managers()
     ok, msg = cfg_mgr.set_enabled(server_id, True)
@@ -197,6 +290,7 @@ def enable_server(server_id: str):
 
 
 @bp.post("/api/mcp/servers/<server_id>/disable")
+@require_local_runtime_config
 def disable_server(server_id: str):
     cfg_mgr, _ = _get_managers()
     ok, msg = cfg_mgr.set_enabled(server_id, False)
@@ -206,6 +300,7 @@ def disable_server(server_id: str):
 
 
 @bp.post("/api/mcp/servers/<server_id>/connect")
+@require_local_runtime_config
 def connect_server(server_id: str):
     _, mcp_mgr = _get_managers()
 
@@ -329,6 +424,7 @@ def _sanitize_parsed(data: dict) -> tuple[dict, list[str]]:
 
 
 @bp.post("/api/mcp/parse")
+@require_local_runtime_config
 def parse_mcp_config():
     """Use the configured LLM to parse free-form MCP server descriptions."""
     data = request.get_json(force=True) or {}
@@ -579,6 +675,7 @@ def _llm_enrich(pkg: dict, readme: str) -> tuple[str, dict, list, list]:
 
 
 @bp.post("/api/mcp/scan-local")
+@require_local_runtime_config
 def scan_local():
     """Scan a local MCP package directory and infer its stdio configuration."""
     data = request.get_json(force=True) or {}

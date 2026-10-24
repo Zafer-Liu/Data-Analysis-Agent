@@ -1,0 +1,31 @@
+.forecast-service { border-top: 1px solid var(--color-border); padding-top: 18px; min-width: 0; }
+.forecast-service h4 { margin: 0 0 8px; font-size: var(--fs-md); font-weight: 600; color: var(--color-text); }
+.forecast-note, .forecast-message { font-size: var(--fs-sm); line-height: 1.6; color: var(--color-text-soft); margin: 8px 0; overflow-wrap: anywhere; }
+.forecast-content { display: flex; flex-direction: column; gap: 12px; }
+.forecast-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.forecast-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.forecast-field label, .forecast-check { font-size: var(--fs-sm); color: var(--color-text); }
+.forecast-field input, .forecast-field select { box-sizing: border-box; width: 100%; min-width: 0; padding: 9px 10px; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface); color: var(--color-text); font: inherit; font-size: var(--fs-sm); }
+.forecast-service :is(input, select, button, summary, a):focus-visible { outline: 2px solid var(--color-primary); outline-offset: 3px; }
+.forecast-field :is(input, select):disabled { opacity: .6; }
+.forecast-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.forecast-actions button { white-space: normal; min-height: 34px; }
+.forecast-check { display: flex; align-items: center; gap: 8px; line-height: 1.5; }
+.forecast-check input { flex: 0 0 auto; accent-color: var(--color-primary); }
+.forecast-advanced { font-size: var(--fs-sm); }
+.forecast-advanced summary { cursor: pointer; color: var(--color-text); padding: 5px 0; }
+.forecast-advanced[open] summary { margin-bottom: 8px; }
+.forecast-message.is-error { color: var(--color-danger, var(--color-text)); }
+.forecast-model-name { margin: 0; font-size: var(--fs-sm); color: var(--color-text); }
+.forecast-choices { display: flex; flex-wrap: wrap; gap: 12px 24px; margin: 0; padding: 0; border: 0; min-width: 0; }
+.forecast-choices legend { padding: 0; margin-bottom: 8px; font-size: var(--fs-sm); color: var(--color-text); }
+.forecast-choices label { display: flex; align-items: center; gap: 7px; font-size: var(--fs-sm); cursor: pointer; }
+.forecast-choices input { margin: 0; accent-color: var(--color-primary); }
+.forecast-setup .forecast-advanced .forecast-check { margin-top: 12px; }
+@media (max-width: 560px) {
+  .forecast-grid { grid-template-columns: 1fr; }
+  .forecast-actions button { flex: 1 1 160px; }
+  .app-settings-layout:has(.forecast-service) { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); gap: 12px; }
+  .app-settings-layout:has(.forecast-service) > .app-settings-nav { flex-direction: row; flex-wrap: nowrap; gap: 6px; padding: 0 0 8px; border-right: 0; border-bottom: 1px solid var(--color-border); overflow-x: auto; overflow-y: hidden; }
+  .app-settings-layout:has(.forecast-service) .app-settings-nav-item { flex: 0 0 auto; width: auto; white-space: nowrap; }
+}

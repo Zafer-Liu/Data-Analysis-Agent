@@ -11,6 +11,7 @@
 """
 import logging
 log = logging.getLogger(__name__)
+import html as _html
 import sys
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -22,6 +23,15 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from charts.base import ChartResult
+
+try:
+    from charts.color_schemes import get_color_scheme
+except ImportError as e:  # pragma: no cover - 兜底，保证独立调用可用
+    log.debug("[chart] 配色模块加载失败: %s", e)
+    def get_color_scheme(name: str = "mckinsey"):
+        return {"colors": [
+            "#B9D6E8", "#7FB5D5", "#0084D1", "#003D7A", "#001F3F",
+        ]}
 
 __all__ = ["generate"]
 
@@ -67,6 +77,8 @@ def _fuzzy_match_region(name: str) -> str:
         '乌鲁木齐': '乌鲁木齐市',
         '浙江': '浙江省',
         '江苏': '江苏省',
+        '广东': '广东省',
+        '海南': '海南省',
         '山东': '山东省',
         '四川': '四川省',
         '湖北': '湖北省',
@@ -118,7 +130,7 @@ def _detect_value_col(df: pd.DataFrame, exclude: set, hint: str = None) -> Optio
     """识别数值列。"""
     if hint:
         for c in df.columns:
-            if c not in exclude and c.lower() == hint.lower():
+            if c not in exclude and str(c).lower() == str(hint).lower():
                 return c
     for c in df.columns:
         if c not in exclude and pd.api.types.is_numeric_dtype(df[c]):
@@ -162,8 +174,10 @@ def generate(
             return ChartResult(warnings=["请提供 df 或 excel_path"])
 
     # ── 参数解析 ──────────────────────────────────────────
-    lbl_hint = mapping.get("label") or label
-    val_hint = mapping.get("value") or value
+    lbl_hint = mapping.get("label")
+    lbl_hint = lbl_hint if lbl_hint is not None else label
+    val_hint = mapping.get("value")
+    val_hint = val_hint if val_hint is not None else value
     title = options.get("title", title)
     maptype = options.get("maptype", maptype)
 
@@ -173,7 +187,7 @@ def generate(
     # 先检测省市列（用于 maptype）
     _city = None
     for c in df.columns:
-        c_lower = c.lower()
+        c_lower = str(c).lower()
         if _is_string_col(df[c]) and c_lower in ['省市', '城市', '市', 'city', 'province']:
             _city = c
             used.add(_city)
@@ -233,6 +247,10 @@ def generate(
     vmin, vmax = min(vals_only), max(vals_only)
 
     # ── 构建 Map（面量图）────────────────────────────────
+    # 配色方案：优先用 options.color_scheme
+    _scheme = get_color_scheme(options.get("color_scheme", "mckinsey"))
+    _palette = _scheme.get("colors") or ["#B9D6E8", "#7FB5D5", "#0084D1", "#003D7A", "#001F3F"]
+
     map_chart = Map()
     map_chart.add(
         series_name=_value,
@@ -254,7 +272,7 @@ def generate(
             min_=vmin,
             max_=vmax,
             is_piecewise=False,
-            range_color=["#B9D6E8", "#7FB5D5", "#0084D1", "#003D7A", "#001F3F"],
+            range_color=_palette,
             textstyle_opts=opts.TextStyleOpts(color="#333"),
             pos_left="left",
             pos_bottom="20",
@@ -268,12 +286,16 @@ def generate(
     # ── 导出 HTML ─────────────────────────────────────────
     raw_html = map_chart.render_embed()
 
+    # title/列名 用户/LLM 可控，HTML 转义防注入
+    esc_title = _html.escape(str(title))
+    esc_sub = _html.escape(f"共 {len(pairs)} 个地区 · 字段: {_value} · 范围: {vmin:.2f} ~ {vmax:.2f}")
+
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{title}</title>
+<title>{esc_title}</title>
 <style>
 * {{ margin: 0; padding: 0; box-sizing: border-box; }}
 html, body {{ width: 100%; height: 100%;
@@ -291,8 +313,8 @@ html, body {{ width: 100%; height: 100%;
 </head>
 <body>
 <div id="header">
-  <h1>{title}</h1>
-  <div class="sub">共 {len(pairs)} 个地区 · 字段: {_value} · 范围: {vmin:.2f} ~ {vmax:.2f}</div>
+  <h1>{esc_title}</h1>
+  <div class="sub">{esc_sub}</div>
 </div>
 <div id="chart">
 {raw_html}

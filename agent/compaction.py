@@ -606,6 +606,7 @@ def _call_summarizer(
     summary_model: str,
     conversation_text: str,
     focus: str = "",
+    on_attempt=None,
 ) -> tuple[str, Any]:
     """Call the LLM and return summary text plus provider usage."""
     prompt = _COMPACT_PROMPT_TEMPLATE.format(conversation_text=conversation_text)
@@ -617,7 +618,11 @@ def _call_summarizer(
             + "\nPreserve this priority when it is supported by the conversation."
         )
 
-    response = client.chat.completions.create(
+    from agent.retry import call_with_retry
+
+    response = call_with_retry(
+        client.chat.completions.create,
+        on_attempt=on_attempt,
         model=summary_model,
         messages=[
             {"role": "system", "content": _COMPACT_SYSTEM},
@@ -636,6 +641,7 @@ def compact_history(
     model: str,
     summary_model: Optional[str] = None,
     usage_callback: Optional[Callable[[Any], None]] = None,
+    audit_factory: Optional[Callable[[], Any]] = None,
     focus: str = "",
 ) -> Tuple[List[Dict], bool]:
     """
@@ -684,14 +690,20 @@ def compact_history(
     summary_input = stripped
     for attempt in range(3):
         conversation_text = _bounded_summary_text(summary_input)
+        audit = audit_factory() if audit_factory is not None else None
         try:
             summary, usage = _call_summarizer(
                 client, use_model, conversation_text, focus=focus,
+                on_attempt=audit.attempt if audit is not None else None,
             )
+            if audit is not None:
+                audit.succeed(usage)
             if usage is not None and usage_callback is not None:
                 usage_callback(usage)
             break
         except Exception as exc:
+            if audit is not None:
+                audit.fail(exc)
             from agent.retry import is_context_length_error
 
             if not is_context_length_error(exc) or attempt >= 2:

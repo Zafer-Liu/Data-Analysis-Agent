@@ -51,6 +51,7 @@ def build_workflow_skills(store: WorkflowStore) -> dict[str, SkillDef]:
             path=Path("workflow-versions") / f"{version_id}.md",
             icon="🧩",
             allowed_tools=("workflow_start",),
+            tags=("workflow",),
             source="workflow",
             display_name=f"{workflow['name']} · Workflow",
         )

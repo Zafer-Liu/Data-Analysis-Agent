@@ -17,8 +17,11 @@ def is_parallel_safe_tool(name: str) -> bool:
     thread-safe reads. This can be relaxed once a source advertises that
     capability.
     """
+    # MCP tools are external and may mutate remote state. Tool names alone do
+    # not carry trustworthy read-only/idempotency metadata, so they stay
+    # sequential until the connection layer supplies an audited capability.
     if name.startswith("mcp__"):
-        return True
+        return False
     spec = get_tool_spec(name)
     return bool(spec and spec.concurrency_safe)
 

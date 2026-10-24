@@ -70,6 +70,12 @@ class WorkspaceBashService:
         if executable in {"sha256sum", "shasum"} and len(args) == 1:
             return self._result(command, self.files.command("checksum", args[0], timeout=timeout))
 
+        if executable in {"json_validate", "json-validate"} and len(args) == 1:
+            return self._result(command, self.files.command("json_validate", args[0], timeout=timeout))
+
+        if executable == "json" and len(args) == 2 and args[0].lower() == "validate":
+            return self._result(command, self.files.command("json_validate", args[1], timeout=timeout))
+
         if executable == "git" and args:
             subcommand = args[0].lower()
             if subcommand == "status" and len(args) == 1:
@@ -97,5 +103,6 @@ class WorkspaceBashService:
 
         raise WorkspaceToolError(
             "unsupported command; allowed: pwd, ls/dir, cat, rg, sha256sum, "
-            "git status/log/diff, python -m compileall, rm/del, mv/move/ren"
+            "json_validate/json validate, git status/log/diff, python -m compileall, "
+            "rm/del, mv/move/ren"
         )

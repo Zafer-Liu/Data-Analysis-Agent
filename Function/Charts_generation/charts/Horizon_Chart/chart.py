@@ -23,6 +23,16 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from charts.base import ChartResult
 
+try:
+    from charts.color_schemes import get_color_scheme
+except ImportError as e:  # pragma: no cover - 兜底，保证独立调用可用
+    log.debug("[chart] 配色模块加载失败: %s", e)
+    def get_color_scheme(name: str = "mckinsey"):
+        return {"colors": [
+            "#003D7A", "#0084D1", "#00A4EF", "#7FBA00", "#FFB81C",
+            "#F7630C", "#DA3B01", "#A4373A", "#6B2C91", "#00B4EF",
+        ]}
+
 __all__ = ["generate"]
 
 _DATA_FMT = "时间列 + 一个或多个数值列"
@@ -35,23 +45,23 @@ MCKINSEY_COLORS = [
 
 
 def _auto_col(df: pd.DataFrame, *hints: str) -> Optional[str]:
-    strs = [c for c in df.columns if df[c].dtype == object]
+    strs = [c for c in df.columns if (df[c].dtype == object or pd.api.types.is_string_dtype(df[c]))]
     nums = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-    col_lower = {c.lower(): c for c in df.columns}
+    col_lower = {str(c).lower(): c for c in df.columns}
 
     for h in hints:
-        h_lower = h.lower()
+        h_lower = str(h).lower()
         if h_lower in col_lower:
             return col_lower[h_lower]
 
     for h in hints:
-        h_lower = h.lower()
+        h_lower = str(h).lower()
         for col in df.columns:
-            if h_lower in col.lower() or col.lower() in h_lower:
+            if h_lower in str(col).lower() or str(col).lower() in h_lower:
                 return col
 
     if hints:
-        hint = hints[0].lower()
+        hint = str(hints[0]).lower()
         if any(kw in hint for kw in ["source", "target", "label", "name", "group", "category", "phase", "row", "col", "path", "text", "word", "location", "geo"]):
             return strs[0] if strs else (nums[0] if nums else None)
         elif any(kw in hint for kw in ["value", "size", "amount", "count", "frequency", "score", "rank", "actual", "target", "range"]):
@@ -140,30 +150,29 @@ def generate(
     is_wide, id_col, value_cols = _detect_wide_format(df)
 
     if is_wide:
+        # 宽表契约：首列是时间/维度（x 轴），其余数值列各成一个系列。
+        # melt 后 var_name 是原数值列名 → 系列；首列保留 → x 轴。
         df = df.melt(
             id_vars=[id_col],
             value_vars=value_cols,
-            var_name="_x_label",
+            var_name="_series",
             value_name="value"
-        ).rename(columns={id_col: "_series"})
+        )
 
         df["value"] = pd.to_numeric(df["value"], errors="coerce")
+        df = df.dropna(subset=["value"]).sort_values(["_series", id_col])
 
-        # 尝试把列名转为数值（年份场景）；若全部失败则保留列名字符串作为 x 轴标签
-        x_as_num = pd.to_numeric(df["_x_label"], errors="coerce")
-        if x_as_num.notna().mean() > 0.8:
-            df["_x_label"] = x_as_num.round().astype("Int64")
-
-        df = df.dropna(subset=["value"]).sort_values(["_series", "_x_label"])
-
-        x_col = "_x_label"
+        x_col = id_col
         y_cols = ["value"]
         series_col = "_series"
         warnings.append("检测到宽格式数据，已自动转换")
     else:
-        x_col = mapping.get("x") or x
-        y_cols = mapping.get("y") or y
-        series_col = mapping.get("series") or options.get("series")
+        x_col = mapping.get("x")
+        x_col = x_col if x_col is not None else x
+        y_cols = mapping.get("y")
+        y_cols = y_cols if y_cols is not None else y
+        series_col = mapping.get("series")
+        series_col = series_col if series_col is not None else options.get("series")
 
     title = options.get("title", title)
     bands = max(1, int(options.get("bands", bands)))
@@ -271,8 +280,12 @@ def generate(
         h = h.lstrip("#")
         return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
 
-    pr, pg, pb = hex_to_rgb("#003D7A")  # 正值色
-    nr, ng, nb = hex_to_rgb("#8B0000")  # 负值色
+    # 配色方案：优先用 options.color_scheme
+    _scheme = get_color_scheme(options.get("color_scheme", "mckinsey"))
+    _pos_hex = _scheme.get("primary", "#003D7A")  # 正值色
+    _neg_hex = _scheme.get("negative", "#8B0000")  # 负值色
+    pr, pg, pb = hex_to_rgb(_pos_hex)
+    nr, ng, nb = hex_to_rgb(_neg_hex)
     opacities = [0.85] if bands == 1 else np.linspace(0.30, 0.92, bands).tolist()
 
     fig = make_subplots(
@@ -293,8 +306,8 @@ def generate(
         neg = (-v).clip(lower=0)
 
         # 颜色
-        pr, pg, pb = hex_to_rgb("#003D7A")  # 正值蓝
-        nr, ng, nb = hex_to_rgb("#8B0000")  # 负值红
+        pr, pg, pb = hex_to_rgb(_pos_hex)  # 正值蓝
+        nr, ng, nb = hex_to_rgb(_neg_hex)  # 负值红
 
         # 低层浅，高层深（alpha递增）
         opacities = [0.85] if bands == 1 else np.linspace(0.25, 0.90, bands).tolist()
@@ -416,9 +429,9 @@ def generate(
         coloraxis=dict(
             cmin=legend_min, cmax=legend_max,
             colorscale=[
-                [0.0, "#8B0000"],
+                [0.0, _neg_hex],
                 [0.5, "#F7F7F7"],
-                [1.0, "#003D7A"],
+                [1.0, _pos_hex],
             ]
         )
     )

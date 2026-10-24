@@ -91,8 +91,9 @@ def start_long_connection(app) -> bool:
     """Start the listener, or surface when a process restart is required.
 
     The upstream SDK owns a process-wide event loop and does not expose a safe
-    stop API. Replacing a live client in place can leave two clients consuming
-    the same events, so credential or transport changes are made explicit.
+    stop API.  Replacing a live client in place can leave two clients consuming
+    the same events, so credential or transport changes are deliberately made
+    explicit instead of silently claiming they took effect.
     """
     config = load_config()
     if not config["enabled"] or config["inbound_transport"] != "long_connection":

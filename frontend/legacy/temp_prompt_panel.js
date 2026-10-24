@@ -9,6 +9,8 @@
  * API routes:  /api/session/<sid>/temp-prompt*      (api/knowledge.py)
  */
 
+import { eventBus } from "../core/event-bus.js";
+
 // ── State ─────────────────────────────────────────────────────────────────────
 
 const _tp = {
@@ -168,15 +170,26 @@ function tpClear() {
 
 // ── Init: load state when the modal opens ─────────────────────────────────────
 
-const _tpOrigOpenOverlay = window.openOverlay;
-window.openOverlay = function (id, ...rest) {
-  if (id === "ov-temp-prompt") tpLoad();
-  if (_tpOrigOpenOverlay) _tpOrigOpenOverlay(id, ...rest);
-};
+// F3 mid-term: subscribe to the overlay:open event instead of monkey-patching
+// window.openOverlay. core/overlay.js emits after the overlay is open; tpLoad()
+// fills the textarea asynchronously, which is fine since the modal is visible.
+// _tpSuppressOpenLoad guards tpOpenWithText(): it pre-loads and injects text
+// itself, so the event-triggered load must not run (it would race the manual
+// ta.value assignment and overwrite it with stale server state).
+let _tpSuppressOpenLoad = false;
+
+eventBus.on("overlay:open", ({ id }) => {
+  if (id === "ov-temp-prompt" && !_tpSuppressOpenLoad) tpLoad();
+});
 
 async function tpOpenWithText(text = "") {
   await tpLoad();
-  if (_tpOrigOpenOverlay) _tpOrigOpenOverlay("ov-temp-prompt");
+  _tpSuppressOpenLoad = true;
+  try {
+    await window.openOverlay("ov-temp-prompt");
+  } finally {
+    _tpSuppressOpenLoad = false;
+  }
   const ta = document.getElementById("tp-textarea");
   if (ta && text) ta.value = text;
   tpUpdateCount();

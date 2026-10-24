@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#10182a">
+  <title>智析Agent · 运营台</title>
+  <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}">
+  <script src="{{ url_for('static', filename='js/theme_bootstrap.js', v='fe0') }}"></script>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/parts/tokens.css', v='v1.4.0-polish-2') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/admin.css', v='v1.4.0-polish-2') }}">
+  <script defer src="{{ url_for('static', filename='js/admin.js', v='20260902-3') }}"></script>
+</head>
+<body>
+  <header class="ops-header">
+    <a class="ops-brand" href="/" aria-label="返回智析Agent">
+      <img src="/static/Images/icon-sm.png" alt="" width="34" height="34">
+      <span><strong>智析Agent</strong><small>OPERATIONS LEDGER</small></span>
+    </a>
+    <div class="ops-header-meta">
+      <span class="live-mark"><i></i>Railway production</span>
+      <span class="admin-identity">{{ admin_email }}</span>
+      <a class="back-link" href="/">返回工作台</a>
+    </div>
+  </header>
+
+  <main class="ops-shell">
+    <section class="ops-intro" aria-labelledby="page-title">
+      <div>
+        <h1 id="page-title">运营账本</h1>
+        <p class="intro-copy">注册、活跃与额度消耗，按上海时区统一核算。</p>
+      </div>
+      <div class="as-of">
+        <span>数据截至</span>
+        <strong id="as-of-time">—</strong>
+        <button id="refresh-btn" type="button">刷新数据</button>
+      </div>
+    </section>
+
+    <section class="today-ledger" aria-labelledby="today-title">
+      <div class="section-label">
+        <span id="today-date">TODAY</span>
+        <h2 id="today-title">今日运行情况</h2>
+      </div>
+      <div class="metric-ledger" id="metric-ledger" aria-live="polite">
+        <article><span>累计注册</span><strong id="m-total-users">—</strong><small>全部有效账户</small></article>
+        <article><span>今日注册</span><strong id="m-new-users">—</strong><small>上海自然日</small></article>
+        <article><span>今日活跃</span><strong id="m-active-users">—</strong><small id="m-active-note">登录或模型使用</small></article>
+        <article><span>模型请求</span><strong id="m-calls">—</strong><small id="m-calls-note">桌面与网页</small></article>
+        <article><span>原始 Token</span><strong id="m-raw-tokens">—</strong><small>模型实际报告</small></article>
+        <article><span>扣减额度</span><strong id="m-charged-units">—</strong><small id="m-quota-note">免费与持久额度</small></article>
+      </div>
+    </section>
+
+    <section class="ops-grid">
+      <article class="panel trend-panel">
+        <div class="panel-head">
+          <div><h2>活跃与消耗轨迹</h2></div>
+          <div class="chart-legend" aria-label="图例"><span class="legend-active">活跃用户</span><span class="legend-usage">扣减额度</span></div>
+        </div>
+        <div class="timeline-scale"><span id="scale-max">—</span><span>0</span></div>
+        <div class="timeline-chart" id="timeline-chart" role="img" aria-label="最近三十天活跃用户与额度消耗趋势"></div>
+        <div class="timeline-caption"><span id="timeline-start">—</span><span>每天 00:00（Asia/Shanghai）</span><span id="timeline-end">—</span></div>
+      </article>
+
+      <article class="panel quota-panel">
+        <div class="panel-head"><div><h2>额度构成</h2></div></div>
+        <dl class="quota-breakdown">
+          <div><dt>每日免费额度</dt><dd id="q-free">—</dd></div>
+          <div><dt>持久额度</dt><dd id="q-persistent">—</dd></div>
+          <div><dt>登录活跃</dt><dd id="q-login-users">—</dd></div>
+          <div><dt>失败登录</dt><dd id="q-failed-logins">—</dd></div>
+        </dl>
+        <p class="definition-note">活跃用户为当日成功登录、注册或产生模型用量的去重账户。当前未启用页面心跳。</p>
+      </article>
+    </section>
+
+    <section class="panel provider-panel" aria-labelledby="provider-title">
+      <div class="panel-head provider-panel-head">
+        <div><h2 id="provider-title">供应商调用核对</h2></div>
+        <div class="provider-summary">
+          <span><b id="p-upstream">—</b><small>实际请求</small></span>
+          <span><b id="p-user">—</b><small>用户计费</small></span>
+          <span><b id="p-platform">—</b><small>平台辅助</small></span>
+          <span><b id="p-observed">—</b><small>观测 Token</small></span>
+          <span><b id="p-failed">—</b><small>失败</small></span>
+          <span><b id="p-missing">—</b><small>缺少 Usage</small></span>
+          <span><b id="p-unsettled">—</b><small>未结算</small></span>
+        </div>
+      </div>
+      <div class="provider-operation-list" id="provider-operation-list"><p class="empty-copy">正在读取供应商调用流水…</p></div>
+      <p class="model-definition">“模型请求”是已进入用户额度账本的用量事件；“实际请求”按 SDK 上游尝试次数统计。记忆、建议、压缩等目前归入平台辅助开销，不扣用户额度。</p>
+    </section>
+
+    <section class="panel user-panel" aria-labelledby="users-title">
+      <div class="panel-head user-panel-head">
+        <div><h2 id="users-title">注册用户</h2></div>
+        <div class="user-tools">
+          <label class="search-box">
+            <span class="sr-only">搜索邮箱</span>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg>
+            <input id="user-search" type="search" placeholder="按邮箱前缀搜索" autocomplete="off">
+          </label>
+          <select id="user-sort" aria-label="用户排序">
+            <option value="created_desc">最近注册</option>
+            <option value="active_desc">最近活跃</option>
+            <option value="usage_desc">近 30 天用量</option>
+            <option value="email_asc">邮箱 A–Z</option>
+          </select>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>账户</th><th>注册时间</th><th>最近活跃</th><th class="num">今日原始 Token</th><th class="num">近 30 天 Token</th><th class="num">持久额度余额</th><th></th></tr></thead>
+          <tbody id="users-body"><tr><td colspan="7" class="loading-cell">正在读取账户账本…</td></tr></tbody>
+        </table>
+      </div>
+      <div class="table-footer">
+        <span id="users-count">—</span>
+        <div class="pager"><button id="prev-page" type="button">上一页</button><span id="page-state">—</span><button id="next-page" type="button">下一页</button></div>
+      </div>
+    </section>
+
+    <section class="panel model-panel" aria-labelledby="models-title">
+      <div class="panel-head model-panel-head">
+        <div><h2 id="models-title">模型用量</h2></div>
+        <div class="source-summary" aria-label="近三十天模型请求来源">
+          <span><b id="source-desktop">—</b><small>桌面版</small></span>
+          <span><b id="source-web">—</b><small>网页版</small></span>
+        </div>
+      </div>
+      <div class="model-list" id="model-list"><p class="empty-copy">正在汇总模型用量…</p></div>
+      <p class="model-definition">这里统计模型请求次数；一次用户任务可能因工具调用、重试或上下文整理产生多次模型请求。</p>
+    </section>
+  </main>
+
+  <dialog class="user-dialog" id="user-dialog" aria-labelledby="detail-title">
+    <div class="dialog-head"><div><h2 id="detail-title">用户详情</h2></div><button id="detail-close" type="button" aria-label="关闭">×</button></div>
+    <div id="detail-body" class="dialog-body"></div>
+  </dialog>
+
+  <div class="ops-toast" id="ops-toast" role="status" aria-live="polite"></div>
+</body>
+</html>

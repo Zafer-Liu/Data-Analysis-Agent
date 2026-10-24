@@ -11,7 +11,7 @@ from datetime import datetime
 import uuid
 
 from data.workspace import workspace_manager
-from infrastructure.paths import data_path
+from infrastructure.paths import content_data_path
 
 _BAD_NAME_RE = re.compile(r"[\x00-\x1f\x7f/\\]")
 _LOCK = threading.RLock()
@@ -34,7 +34,7 @@ class WorkspaceTeamError(ValueError):
 class WorkspaceTeamStore:
     def __init__(self, session_id: str, *, workspace_id: str | None = None) -> None:
         safe_session = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(session_id or "default"))[:120]
-        self._path = data_path("outputs", "teams", safe_session, "agent_teams.json")
+        self._path = content_data_path("outputs", "teams", safe_session, "agent_teams.json")
         self.scope = "session"
         fixed_id = (
             str(workspace_manager.workspace_id_for_session(session_id) or "")

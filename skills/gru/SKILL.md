@@ -2,6 +2,7 @@
 name: gru
 description: 使用 GRU 对足量时间序列进行预测（forecast deep learning）
 icon: 🧠
+tags: [mode-ml, forecasting, modeling]
 allowedTools: [get_schema, query_data, run_analysis, generate_chart]
 ---
 # GRU 预测

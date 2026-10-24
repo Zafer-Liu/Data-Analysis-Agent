@@ -2,6 +2,7 @@
 name: export
 description: 规划并确认 Excel 数据导出（export 导出）
 icon: 📥
+tags: [mode-business, mode-ml, mode-empirical, export]
 allowedTools: [get_schema, query_data, propose_excel_export]
 ---
 # Excel 导出

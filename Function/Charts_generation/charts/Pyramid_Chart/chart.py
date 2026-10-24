@@ -31,27 +31,27 @@ _DESC = "人口金字塔图，左右分别展示男性和女性数据，适合�
 
 def _auto_col(df: pd.DataFrame, *hints: str) -> Optional[str]:
     """根据提示自动查找匹配的列名。"""
-    strs = [c for c in df.columns if df[c].dtype == object]
+    strs = [c for c in df.columns if (df[c].dtype == object or pd.api.types.is_string_dtype(df[c]))]
     nums = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-    col_lower = {c.lower(): c for c in df.columns}
+    col_lower = {str(c).lower(): c for c in df.columns}
     
     # 1. 精确匹配 hints
     for h in hints:
-        h_lower = h.lower()
+        h_lower = str(h).lower()
         if h_lower in col_lower:
             return col_lower[h_lower]
     
     # 2. 模糊匹配（包含关系）
     for h in hints:
-        h_lower = h.lower()
+        h_lower = str(h).lower()
         for col in df.columns:
-            col_lower_name = col.lower()
+            col_lower_name = str(col).lower()
             if h_lower in col_lower_name or col_lower_name in h_lower:
                 return col
     
     # 3. 类型匹配
     if hints:
-        hint = hints[0].lower()
+        hint = str(hints[0]).lower()
         if any(kw in hint for kw in ["source", "target", "label", "name", "group", "category", "phase", "row", "col", "path", "text", "word", "location", "geo"]):
             if strs:
                 return strs[0]
@@ -130,9 +130,12 @@ def generate(
         else:
             return ChartResult(warnings=["请提供 df 或 excel_path"])
 
-    age_col = mapping.get("age") or age
-    male_col = mapping.get("male") or male
-    female_col = mapping.get("female") or female
+    age_col = mapping.get("age")
+    age_col = age_col if age_col is not None else age
+    male_col = mapping.get("male")
+    male_col = male_col if male_col is not None else male
+    female_col = mapping.get("female")
+    female_col = female_col if female_col is not None else female
     title = options.get("title", title)
 
     # 获取配色方案
@@ -158,28 +161,40 @@ def generate(
     if _age not in df.columns or _male not in df.columns or _female not in df.columns:
         return ChartResult(warnings=warnings)
 
+    # 数值强制转换：男/女列可能是字符串编码的数字（如 "1,234"），用
+    # pd.to_numeric 而非 .astype(float) 以安全处理非数字（避免 ValueError 崩溃）。
+    df_plot = df[[_age, _male, _female]].copy()
+    df_plot[_male] = pd.to_numeric(df_plot[_male], errors="coerce")
+    df_plot[_female] = pd.to_numeric(df_plot[_female], errors="coerce")
+    before = len(df_plot)
+    df_plot = df_plot.dropna(subset=[_male, _female])
+    if before != len(df_plot):
+        warnings.append(f"已忽略 {before - len(df_plot)} 行无法解析为数值的男/女人口数据")
+    if df_plot.empty:
+        return ChartResult(warnings=warnings + ["男/女列不含可用数值"])
+
     fig = go.Figure()
-    
+
     # 添加男性柱子（左侧，负值）
     fig.add_trace(go.Bar(
-        y=df[_age],
-        x=-df[_male].astype(float),
+        y=df_plot[_age],
+        x=-df_plot[_male],
         orientation="h",
         name="男性",
         marker=dict(color=male_color),
-        customdata=df[_male].astype(float),  # 存储绝对值
+        customdata=df_plot[_male],  # 存储绝对值
         hovertemplate="<b>%{y}</b><br>男性: %{customdata:,.0f}<extra></extra>",
         **kwargs
     ))
-    
+
     # 添加女性柱子（右侧，正值）
     fig.add_trace(go.Bar(
-        y=df[_age],
-        x=df[_female].astype(float),
+        y=df_plot[_age],
+        x=df_plot[_female],
         orientation="h",
         name="女性",
         marker=dict(color=female_color),
-        customdata=df[_female].astype(float),  # 存储绝对值
+        customdata=df_plot[_female],  # 存储绝对值
         hovertemplate="<b>%{y}</b><br>女性: %{customdata:,.0f}<extra></extra>",
         **kwargs
     ))
@@ -215,7 +230,9 @@ def generate(
     )
     
     # 自定义 x 轴刻度，显示为绝对值
-    x_max = max(df[_male].max(), df[_female].max())
+    x_max = max(float(df_plot[_male].max()), float(df_plot[_female].max()))
+    if not (x_max > 0):  # 全 0 或负值时退化为占位刻度，避免 NaN/0 比例破坏坐标轴
+        x_max = 1.0
     tick_range = [0, x_max * 0.25, x_max * 0.5, x_max * 0.75, x_max]
     tick_labels = [f"{int(v):,}" for v in tick_range]
     

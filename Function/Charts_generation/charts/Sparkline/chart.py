@@ -8,6 +8,7 @@
 """
 import logging
 log = logging.getLogger(__name__)
+import html as _html
 import os
 import sys
 from pathlib import Path
@@ -22,6 +23,16 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from charts.base import ChartResult
+
+try:
+    from charts.color_schemes import get_color_scheme
+except ImportError as e:  # pragma: no cover - 兜底，保证独立调用可用
+    log.debug("[chart] 配色模块加载失败: %s", e)
+    def get_color_scheme(name: str = "mckinsey"):
+        return {"colors": [
+            "#003D7A", "#0084D1", "#00A4EF", "#7FBA00", "#FFB81C",
+            "#F7630C", "#DA3B01", "#A4373A", "#6B2C91", "#00B4EF",
+        ]}
 
 __all__ = ["generate"]
 
@@ -45,27 +56,27 @@ _MCKINSEY_COLORS = [
 
 def _auto_col(df: pd.DataFrame, *hints: str) -> Optional[str]:
     """根据提示自动查找匹配的列名。"""
-    strs = [c for c in df.columns if df[c].dtype == object]
+    strs = [c for c in df.columns if (df[c].dtype == object or pd.api.types.is_string_dtype(df[c]))]
     nums = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-    col_lower = {c.lower(): c for c in df.columns}
+    col_lower = {str(c).lower(): c for c in df.columns}
     
     # 1. 精确匹配 hints
     for h in hints:
-        h_lower = h.lower()
+        h_lower = str(h).lower()
         if h_lower in col_lower:
             return col_lower[h_lower]
     
     # 2. 模糊匹配（包含关系）
     for h in hints:
-        h_lower = h.lower()
+        h_lower = str(h).lower()
         for col in df.columns:
-            col_lower_name = col.lower()
+            col_lower_name = str(col).lower()
             if h_lower in col_lower_name or col_lower_name in h_lower:
                 return col
     
     # 3. 类型匹配
     if hints:
-        hint = hints[0].lower()
+        hint = str(hints[0]).lower()
         if any(kw in hint for kw in ["source", "target", "label", "name", "group", "category", "phase", "row", "col", "path", "text", "word", "location", "geo"]):
             if strs:
                 return strs[0]
@@ -97,9 +108,9 @@ def _auto_col(df: pd.DataFrame, *hints: str) -> Optional[str]:
     return None
 
 
-def _build_sparkline_html(label: str, y_vals: list, trend_up: bool) -> str:
+def _build_sparkline_html(label: str, y_vals: list, trend_up: bool, up_color: str = None, down_color: str = None) -> str:
     """为单行数据生成迷你图 HTML"""
-    line_color = _MCKINSEY_COLORS[3] if trend_up else _MCKINSEY_COLORS[6]
+    line_color = (up_color or _MCKINSEY_COLORS[3]) if trend_up else (down_color or _MCKINSEY_COLORS[6])
     
     # 转换 hex 颜色为 rgba
     r = int(line_color[1:3], 16)
@@ -136,9 +147,10 @@ def _build_sparkline_html(label: str, y_vals: list, trend_up: bool) -> str:
 
 def _build_html(title: str, chart_name: str, library: str,
                 data_fmt: str, desc: str, table_html: str) -> str:
+    esc = _html.escape
     return f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8">
-<title>{title}</title>
+<title>{esc(title)}</title>
 <style>
 body{{font-family:"Heiti SC","Microsoft YaHei",sans-serif;margin:40px;background:#fafafa}}
 .chart-wrap{{background:white;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.08);padding:24px;margin-bottom:32px}}
@@ -152,11 +164,11 @@ td{{color:#666}}
 .desc{{color:#555;font-size:14px;line-height:1.7;margin-top:20px}}
 </style></head>
 <body><div class="chart-wrap">
-<h1>{title}</h1><div class="subtitle">{chart_name} | {library}</div>
+<h1>{esc(title)}</h1><div class="subtitle">{esc(chart_name)} | {esc(library)}</div>
 {table_html}
 </div><div class="desc">
-<strong>数据格式：</strong>{data_fmt}<br>
-<strong>说明：</strong>{desc}
+<strong>数据格式：</strong>{esc(data_fmt)}<br>
+<strong>说明：</strong>{esc(desc)}
 </div></body></html>"""
 
 
@@ -185,9 +197,16 @@ def generate(
             return ChartResult(warnings=["请提供 df 或 excel_path"])
 
     title = options.get("title", title)
-    
+
+    # 配色方案：优先用 options.color_scheme
+    _scheme = get_color_scheme(options.get("color_scheme", "mckinsey"))
+    _palette = _scheme.get("colors") or _MCKINSEY_COLORS
+    _up_color = _scheme.get("positive", _palette[3 % len(_palette)] if len(_palette) > 3 else "#7FBA00")
+    _down_color = _scheme.get("negative", _palette[6 % len(_palette)] if len(_palette) > 6 else "#DA3B01")
+
     # 自动检测标签列（首列通常是标签）
-    label_col = mapping.get("label") or label or df.columns[0]
+    label_col = mapping.get("label")
+    label_col = label_col if label_col is not None else (label if label is not None else df.columns[0])
     if label_col not in df.columns:
         label_col = df.columns[0]
     
@@ -198,14 +217,25 @@ def generate(
         warnings.append("找不到数值列")
         return ChartResult(warnings=warnings)
     
-    # 生成表格 HTML
+    # 数值列 coerce（处理对象 dtype 的字符串数字/缺失值），含 NaN 的行跳过
+    work = df.copy()
+    for c in numeric_cols:
+        work[c] = pd.to_numeric(work[c], errors="coerce")
+    n_nan = int(work[numeric_cols].isna().any(axis=1).sum())
+    if n_nan:
+        warnings.append(f"检测到 {n_nan} 行含非数值/缺失单元格，已跳过")
+        work = work.dropna(subset=numeric_cols)
+    if work.empty:
+        return ChartResult(warnings=warnings + ["无有效数据行"])
+
+    # 生成表格 HTML（列名/标签值均转义，防注入）
     table_html = "<table><thead><tr><th>标签</th>"
     for col in numeric_cols:
-        table_html += f"<th>{col}</th>"
+        table_html += f"<th>{_html.escape(str(col))}</th>"
     table_html += "<th class='sparkline-cell'>趋势</th></tr></thead><tbody>"
-    
+
     sparklines = []
-    for idx, row in df.iterrows():
+    for idx, row in work.iterrows():
         label_val = str(row[label_col])
         y_vals = [float(row[col]) for col in numeric_cols]
         
@@ -214,7 +244,7 @@ def generate(
         change = y_vals[-1] - y_vals[0]
         
         # 生成迷你图
-        sparkline_html = _build_sparkline_html(label_val, y_vals, trend_up)
+        sparkline_html = _build_sparkline_html(label_val, y_vals, trend_up, _up_color, _down_color)
         sparklines.append({
             "label": label_val,
             "html": sparkline_html,
@@ -225,7 +255,8 @@ def generate(
         })
         
         # 添加表格行
-        table_html += f"<tr><td><strong>{label_val}</strong></td>"
+        esc_label = _html.escape(label_val)
+        table_html += f"<tr><td><strong>{esc_label}</strong></td>"
         for col in numeric_cols:
             table_html += f"<td>{row[col]:.1f}</td>"
         table_html += f"<td class='sparkline-cell'>{sparkline_html}</td></tr>"
@@ -236,7 +267,7 @@ def generate(
 
     meta = {
         "chart_id": "sparkline",
-        "n_rows": len(df),
+        "n_rows": len(work),
         "label_col": label_col,
         "numeric_cols": numeric_cols,
         "sparklines": sparklines,

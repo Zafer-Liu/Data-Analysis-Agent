@@ -2,7 +2,8 @@
 name: value-proposition
 description: Ad-Lib 价值主张速写，用一句填空句式把价值主张拆成六个可验证的组成部分（value prop 价值主张）
 icon: 💡
-allowedTools: [display_diagram, edit_diagram, get_diagram, get_shape_library]
+tags: [mode-business, strategy]
+allowedTools: [display_diagram, edit_diagram, get_diagram]
 ---
 # Ad-Lib 价值主张速写
 

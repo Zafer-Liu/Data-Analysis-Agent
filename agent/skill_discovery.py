@@ -99,11 +99,13 @@ def build_skill_catalog(
         if not name:
             continue
         description = str(skill.get("description") or "")
-        text = f"{name} {description}"
+        tags = [str(tag) for tag in (skill.get("tags") or []) if str(tag)]
+        text = f"{name} {description} {' '.join(tags)}"
         content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
         entries.append({
             "name": name,
             "description": description[:200],
+            "tags": tags,
             "text": text,
             "content_hash": content_hash,
         })

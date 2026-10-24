@@ -1,0 +1,15 @@
+services:
+  timesfm:
+    image: sage-timesfm:3.0.2-cu126
+    build:
+      args:
+        TORCH_INDEX_URL: https://download.pytorch.org/whl/cu126
+    environment:
+      TIMESFM_DEVICE: cuda
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

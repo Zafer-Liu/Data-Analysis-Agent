@@ -70,7 +70,13 @@
 
 # 📝 Changelog
 
-> **Current development version [`v1.3.0 LTS`](https://github.com/Zafer-Liu/Data-Analysis-Agent/releases/latest)** · August 21, 2026 · Until a release installer is published, use the source version and changelog as the reference.
+> **Current source version `v1.4.0`** · October 16, 2026 · Check [Releases](https://github.com/Zafer-Liu/Data-Analysis-Agent/releases/latest) for published installers.
+
+The public source now includes the existing private-edition features: the read-only administration console, desktop cloud authentication and model gateways, referral and quota ledgers, browser/table ingestion, browser-local persistence, PyTorch GRU/LSTM, chart themes and PNG export, in-memory SQL transformations and numeric provenance checks, canvas save recovery, Skill tags, and SSE reliability improvements.
+
+Running `python app.py` directly still requires no cloud login. Hosted and desktop services require their corresponding configuration. See the [sync inventory](./docs/feature-sync-1.4.md) and [hosted configuration](./docs/hosted-configuration.md).
+
+### v1.3.0 history
 
 v1.3.0 enters the Feishu AI Skills Hackathon, adds a Feishu bot and built-in Bitable analysis, and delivers targeted feature improvements:
 

@@ -14,7 +14,7 @@ from typing import Any
 
 import yaml
 
-from infrastructure.paths import data_path
+from infrastructure.paths import content_data_path
 
 log = logging.getLogger(__name__)
 
@@ -56,7 +56,7 @@ def normalize_user_id(user_id: str | None) -> str:
 def _scope_root(scope: str, *, user_id: str = "", workspace_id: str = "") -> Path:
     if scope == "user":
         owner = normalize_user_id(user_id)
-        root = data_path("memory")
+        root = content_data_path("memory")
         if owner != "local-default":
             root = root / "users" / hashlib.sha256(owner.encode("utf-8")).hexdigest()[:24]
         return root.resolve(strict=False)
@@ -304,7 +304,7 @@ def update_record(name: str, payload: dict[str, Any], *, user_id: str = "", work
 
 
 def _memory_trash_root() -> Path:
-    return data_path("outputs", ".trash", "memories")
+    return content_data_path("outputs", ".trash", "memories")
 
 
 def archive_record(name: str, *, user_id: str = "", workspace_id: str = "", actor: str = "user") -> bool:
@@ -401,7 +401,7 @@ def restore_memory_trash(trash_id: str) -> dict[str, Any]:
         raise ValueError("记忆回收站项目无效")
     source_root = Path(str(manifest.get("source_root") or "")).resolve(strict=False)
     # Memory roots always end in a directory literally named "memory"
-    # (data_path("memory")… / <workspace>/.zhixi/memory); this keeps a
+    # (content_data_path("memory")… / <workspace>/.zhixi/memory); this keeps a
     # tampered manifest from redirecting the restore anywhere else.
     if not source_root.is_dir() or source_root.name != "memory":
         raise ValueError("记忆回收站项目源目录无效")

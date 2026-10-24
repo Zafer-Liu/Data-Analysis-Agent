@@ -25,6 +25,8 @@ _REGISTRY_MAP: Dict[str, str] = {
     "Regression":            "Regression",
     "Sklearn_Model":         "Sklearn_Model",
     "Torch_MLP":             "Torch_MLP",
+    "Torch_RNN":             "Torch_RNN",
+    "Time_Series_TimesFM3":   "Time_Series_TimesFM3",
     "Univariate_Screening":  "Univariate_Screening",
     "Time_Series_ARIMA":     "Time_Series_ARIMA",
     "Time_Series_SARIMA":    "Time_Series_SARIMA",
@@ -66,6 +68,7 @@ def get_all() -> Dict[str, Dict[str, Any]]:
                 "required":      getattr(mod, "REQUIRED_PARAMS", []),
                 "optional":      getattr(mod, "OPTIONAL_PARAMS", []),
                 "output_tables": getattr(mod, "OUTPUT_TABLES",   []),
+                "accepts_analysis_options": getattr(mod, "ACCEPTS_ANALYSIS_OPTIONS", False),
                 "run":           mod.run,
             }
         except Exception as exc:

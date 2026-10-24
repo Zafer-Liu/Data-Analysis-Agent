@@ -1,0 +1,25 @@
+services:
+  timesfm:
+    image: sage-timesfm:3.0.2-cpu
+    build:
+      context: ../../Function/Analyze/Time_Series_TimesFM3
+      dockerfile: ../../../deploy/timesfm/Dockerfile
+      args:
+        TORCH_INDEX_URL: https://download.pytorch.org/whl/cpu
+    ports:
+      - "127.0.0.1:${TIMESFM_HOST_PORT:-8787}:8787"
+    volumes:
+      - type: bind
+        source: ${TIMESFM_MODEL_DIR:?Set TIMESFM_MODEL_DIR to an existing model directory}
+        target: /model
+        read_only: true
+    environment:
+      TIMESFM_DEVICE: cpu
+      TIMESFM_API_TOKEN: ${TIMESFM_API_TOKEN:-}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,os,urllib.request; t=os.environ.get('TIMESFM_API_TOKEN'); r=urllib.request.Request('http://127.0.0.1:8787/health',headers={'Authorization':'Bearer '+t} if t else {}); assert json.load(urllib.request.urlopen(r,timeout=5))['ready']"]
+      interval: 15s
+      timeout: 8s
+      retries: 12
+      start_period: 30s
+    restart: "no"

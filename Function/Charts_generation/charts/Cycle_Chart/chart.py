@@ -25,6 +25,16 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from charts.base import ChartResult
 
+try:
+    from charts.color_schemes import get_color_scheme
+except ImportError as e:  # pragma: no cover - 兜底，保证独立调用可用
+    log.debug("[chart] 配色模块加载失败: %s", e)
+    def get_color_scheme(name: str = "mckinsey"):
+        return {"colors": [
+            "#005B9A", "#2F7EBB", "#4C9FD6", "#7FB8E6", "#A9CDEB",
+            "#5B6770", "#7D8790", "#9AA3AA", "#B8BFC5", "#D0D5D9",
+        ]}
+
 __all__ = ["generate"]
 
 _DATA_FMT = "宽格式: 行=周期(年份), 列=时间相位(月份) | 长格式: time列 + value列 + group列"
@@ -51,10 +61,22 @@ h1{{color:#222;font-size:22px;margin-bottom:6px}}
 </div></body></html>"""
 
 def _clean_numeric_like(df: pd.DataFrame) -> pd.DataFrame:
+    """清洗 object/string 列：仅对“去逗号后能解析为数值”的列做千分位逗号剔除，
+    避免误伤含合法逗号的文本/标签列（如 "1,000 units"、"北京,上海"）。"""
     d = df.copy()
     for c in d.columns:
-        if d[c].dtype == "object":
-            d[c] = d[c].astype(str).str.strip().str.replace(",", "", regex=False)
+        # 兼容 object 与 StringDtype（新版 pandas 全字符串列会是 string dtype）
+        if not (d[c].dtype == "object" or pd.api.types.is_string_dtype(d[c])):
+            continue
+        s = d[c].astype(str).str.strip()
+        stripped = s.str.replace(",", "", regex=False)
+        # 去逗号后若多数能解析为数值，才认为是千分位格式数值列
+        coerced = pd.to_numeric(stripped, errors="coerce")
+        if coerced.notna().mean() > 0.5:
+            d[c] = stripped
+        else:
+            # 保留原始文本，仅去首尾空白
+            d[c] = s
     return d
 
 def _detect_format(df: pd.DataFrame) -> str:
@@ -107,13 +129,20 @@ def generate(
     title = options.get("title", title)
     fmt = _detect_format(df)
 
+    # 配色方案：优先用 options.color_scheme
+    _scheme = get_color_scheme(options.get("color_scheme", "mckinsey"))
+    _palette = _scheme.get("colors") or [
+        "#005B9A", "#2F7EBB", "#4C9FD6", "#7FB8E6", "#A9CDEB",
+        "#5B6770", "#7D8790", "#9AA3AA", "#B8BFC5", "#D0D5D9",
+    ]
+
     if fmt == "wide":
-        return _generate_wide_format(df, title, warnings)
+        return _generate_wide_format(df, title, warnings, _palette)
     else:
-        return _generate_long_format(df, mapping, title, warnings)
+        return _generate_long_format(df, mapping, title, warnings, _palette)
 
 
-def _generate_wide_format(df: pd.DataFrame, title: str, warnings: list) -> ChartResult:
+def _generate_wide_format(df: pd.DataFrame, title: str, warnings: list, palette: list = None) -> ChartResult:
     years = df.iloc[:, 0].astype(str).tolist()
     phases = df.columns[1:].tolist()
 
@@ -140,7 +169,7 @@ def _generate_wide_format(df: pd.DataFrame, title: str, warnings: list) -> Chart
     # - 首条线用 McKinsey 蓝，突出主序列
     # - 其他线用不同深浅蓝 + 灰，保证专业克制
     # - 均值线用强调橙（常见咨询报告的重点色）
-    mck_palette = [
+    mck_palette = palette or [
         "#005B9A",  # McKinsey Blue（主色）
         "#2F7EBB",
         "#4C9FD6",
@@ -256,7 +285,7 @@ def _generate_wide_format(df: pd.DataFrame, title: str, warnings: list) -> Chart
 
 
 
-def _generate_long_format(df: pd.DataFrame, mapping: Dict[str, str], title: str, warnings: list) -> ChartResult:
+def _generate_long_format(df: pd.DataFrame, mapping: Dict[str, str], title: str, warnings: list, palette: list = None) -> ChartResult:
     # 优先用 mapping
     time_col = mapping.get("time")
     value_col = mapping.get("value")
@@ -286,7 +315,7 @@ def _generate_long_format(df: pd.DataFrame, mapping: Dict[str, str], title: str,
         pivot = pivot.reindex(columns=month_order)
         pivot = pivot.reset_index().rename(columns={"_year": "year"})
         pivot.columns = ["year"] + [f"{m}月" for m in month_order]
-        return _generate_wide_format(pivot, title, warnings)
+        return _generate_wide_format(pivot, title, warnings, palette)
 
     # 若 time 本身是月份，group 是年份，也可 pivot
     if group_col in d.columns:
@@ -295,16 +324,17 @@ def _generate_long_format(df: pd.DataFrame, mapping: Dict[str, str], title: str,
         pivot = tmp.pivot_table(index=group_col, columns=time_col, values=value_col, aggfunc="mean")
         if pivot.shape[1] >= 6:  # 至少有较完整相位，认为是周期图
             pivot = pivot.reset_index()
-            return _generate_wide_format(pivot, title, warnings)
+            return _generate_wide_format(pivot, title, warnings, palette)
 
     # 兜底：单线图（不再默认小倍数，避免碎图）
+    _fallback_palette = palette or ["#005B9A"]
     d_sorted = d.sort_values(time_col)
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=d_sorted[time_col].astype(str),
         y=d_sorted[value_col],
         mode='lines+markers',
-        line=dict(color='#005B9A', width=2),
+        line=dict(color=_fallback_palette[0], width=2),
         marker=dict(size=6)
     ))
     fig.update_layout(title=title, xaxis_title='时间', yaxis_title='数值', height=500)

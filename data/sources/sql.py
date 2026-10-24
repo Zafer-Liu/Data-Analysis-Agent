@@ -19,12 +19,16 @@ This gives the best of both worlds:
 import logging
 import os
 import re
+import threading
 from typing import List, Optional, Set, Tuple
 
 import duckdb
 import pandas as pd
 
-from ._utils import _new_conn, _preview_table_dict, _query, _register, _table_schema_str
+from ._utils import (
+    _new_conn, _preview_table_dict, _query, _register, _table_schema_str,
+    is_write_sql,
+)
 from .base import DataSource
 
 log = logging.getLogger(__name__)
@@ -67,6 +71,12 @@ class SQLDataSource(DataSource):
 
         # Single DuckDB connection for ALL cached data (source tables + analysis tables)
         self._duck: duckdb.DuckDBPyConnection = _new_conn()
+        # DuckDB connections are not safe for concurrent use across Flask
+        # worker threads (PRAGMA threads=4 only parallelises within a single
+        # query). Serialize every access to self._duck with this lock so that
+        # a frontend preview request and an agent query on the same session
+        # can't corrupt each other.
+        self._duck_lock = threading.RLock()
         # Tables already loaded into DuckDB from the remote DB
         self._loaded: Set[str] = set()
         # Tables that exceeded _LAZY_LOAD_ROW_LIMIT — queries are routed to remote DB
@@ -77,6 +87,27 @@ class SQLDataSource(DataSource):
         # exposes metadata to the preview UI, but exposes no source table to the
         # agent until the user explicitly selects an analysis scope.
         self._analysis_tables: Set[str] = set()
+
+    def close(self) -> None:
+        """Release the DuckDB cache and the SQLAlchemy engine connection pool.
+
+        SQLDataSource is the only source backed by a remote engine pool, so
+        without this the remote DB connections leak until process GC. Called
+        by session._close_data_source_object() on session teardown.
+        """
+        with self._duck_lock:
+            try:
+                if self._duck is not None:
+                    self._duck.close()
+                    self._duck = None
+            except Exception:
+                log.debug("[SQLDataSource] duck close error", exc_info=True)
+        try:
+            if getattr(self, "_engine", None) is not None:
+                self._engine.dispose()
+                self._engine = None
+        except Exception:
+            log.debug("[SQLDataSource] engine dispose error", exc_info=True)
 
     # ── Schema helpers ────────────────────────────────────────────────────────
 
@@ -204,12 +235,16 @@ class SQLDataSource(DataSource):
                 df = pd.read_sql(_text(f"SELECT * FROM {q}"), conn)
             # Register directly without _sanitize_df — SQL types are already correct
             # and _sanitize_df's float→datetime heuristic is for Excel files only.
-            self._duck.register("_tmp_sql_", df)
-            self._duck.execute(
-                f'CREATE OR REPLACE TABLE "{table_name}" AS SELECT * FROM _tmp_sql_'
-            )
-            self._duck.unregister("_tmp_sql_")
-            self._loaded.add(table_name)
+            # The shared "_tmp_sql_" view name makes concurrent loads of different
+            # tables race — hold the lock across register→execute→unregister so
+            # table A's data can't be picked up by table B's CREATE.
+            with self._duck_lock:
+                self._duck.register("_tmp_sql_", df)
+                self._duck.execute(
+                    f'CREATE OR REPLACE TABLE "{table_name}" AS SELECT * FROM _tmp_sql_'
+                )
+                self._duck.unregister("_tmp_sql_")
+                self._loaded.add(table_name)
             log.info("[SQLDataSource] loaded %r → %d rows into DuckDB", table_name, len(df))
             return True
         except Exception as exc:
@@ -293,8 +328,10 @@ class SQLDataSource(DataSource):
         # Analysis cache tables always shown in full
         for t in sorted(self._cache_tables):
             try:
-                rows = self._duck.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]
-                parts.append(_table_schema_str(self._duck, t, rows))
+                with self._duck_lock:
+                    rows = self._duck.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]
+                    schema = _table_schema_str(self._duck, t, rows)
+                parts.append(schema)
             except Exception:
                 parts.append(f"Table: {t}  (analysis cache)")
 
@@ -313,9 +350,10 @@ class SQLDataSource(DataSource):
         row_hint = ""
         if table_name in self._loaded:
             try:
-                total = self._duck.execute(
-                    f'SELECT COUNT(*) FROM "{table_name}"'
-                ).fetchone()[0]
+                with self._duck_lock:
+                    total = self._duck.execute(
+                        f'SELECT COUNT(*) FROM "{table_name}"'
+                    ).fetchone()[0]
                 row_hint = f"  ({total:,} rows — cached in DuckDB)"
             except Exception:
                 pass
@@ -342,12 +380,34 @@ class SQLDataSource(DataSource):
         too big to pull into DuckDB, the query is sent to the remote DB instead.
         The result is then registered as a temporary view in DuckDB so that
         subsequent analysis tables can JOIN against it.
+
+        A6: write SQL never touches the remote DB — it executes only against
+        the local in-memory DuckDB cache (副 sheet semantics).
+
+        Unlike ExcelDataSource / WorkspacePersistentSource, SQLDataSource does
+        NOT build a separate shadow snapshot.  Those sources protect an on-disk
+        *original* (the .duckdb file) by copying it into a throwaway :memory:
+        connection and redirecting writes there.  SQLDataSource has no on-disk
+        original to protect — the remote DB is read-only by construction (the
+        "write never falls back to remote" rule below) and self._duck is already
+        a session-scoped :memory: cache.  So write SQL mutates the cache in
+        place: an UPDATE on a cached source table changes what subsequent reads
+        see.  This is intended as ephemeral analytical transformation, and each
+        session gets its own _new_conn() so there is no cross-session leakage.
+
+        Note: queries on a SQLDataSource always run on the request thread —
+        they never go through the background Job path.  _query_data_job_connection_info()
+        requires _db_path + _db_lock (file-backed DuckDB only); a remote engine
+        can't be cheaply probed for row estimates, so large read queries may
+        block without a progress UI.
         """
         # Identify which known tables this SQL references
         try:
             referenced = self._assert_analysis_scope(sql)
         except PermissionError as exc:
             return pd.DataFrame(), str(exc)
+
+        writing = is_write_sql(sql)
 
         # Separate large tables (remote-only) from small ones (pull into DuckDB)
         large_refs = [t for t in referenced if t in self._large_tables]
@@ -357,6 +417,12 @@ class SQLDataSource(DataSource):
 
         # If any large table is involved, run the whole query on the remote DB
         if large_refs:
+            if writing:
+                return pd.DataFrame(), (
+                    "写操作不能在远程大表上执行（大表未缓存到本地）。"
+                    "请先用 query_data 把需要的子集拉成本地分析表"
+                    "（CREATE TABLE ... AS SELECT ... WHERE ...），再对副本执行写操作。"
+                )
             log.info(
                 "[SQLDataSource] large table(s) %s in query — routing to remote DB",
                 large_refs,
@@ -365,19 +431,26 @@ class SQLDataSource(DataSource):
                 from sqlalchemy import text as _text
                 with self._engine.connect() as conn:
                     df = pd.read_sql(_text(sql), conn)
-                # Register result as a temporary view so downstream analysis can use it
+                # Register result as a temporary view so downstream analysis can use it.
+                # The shared view name "_large_query_result_" needs the lock to avoid
+                # two concurrent large-table queries clobbering each other's result.
                 _view_name = "_large_query_result_"
-                self._duck.register(_view_name, df)
+                with self._duck_lock:
+                    self._duck.register(_view_name, df)
                 return df, ""
             except Exception as exc:
                 return pd.DataFrame(), str(exc)
 
-        # All referenced tables are in DuckDB — run locally
-        df, err = _query(self._duck, sql)
+        # All referenced tables are in DuckDB — run locally. A6: writes stay
+        # here and never fall back to the remote engine.
+        with self._duck_lock:
+            df, err = _query(self._duck, sql)
         if not err:
             return df, ""
+        if writing:
+            return df, err
 
-        # DuckDB failed — fall back to remote DB for safety
+        # DuckDB failed — fall back to remote DB for safety (reads only)
         log.warning("[SQLDataSource] DuckDB query failed (%s), trying remote DB", err)
         try:
             from sqlalchemy import text as _text
@@ -391,7 +464,9 @@ class SQLDataSource(DataSource):
                               _df=None) -> str:
         """Create a derived/analysis table in DuckDB."""
         if _df is not None:
-            _register(self._duck, table_name, _df)
+            with self._duck_lock:
+                _register(self._duck, table_name, _df)
+                schema_str = _table_schema_str(self._duck, table_name, len(_df))
             rows = len(_df)
         else:
             # Ensure source tables in this SQL are loaded first
@@ -401,17 +476,19 @@ class SQLDataSource(DataSource):
                 return f"Error building analysis table: {exc}"
             self._ensure_sql_tables_loaded(sql)
             try:
-                self._duck.execute(
-                    f'CREATE OR REPLACE TABLE "{table_name}" AS ({sql})'
-                )
-                rows = self._duck.execute(
-                    f'SELECT COUNT(*) FROM "{table_name}"'
-                ).fetchone()[0]
+                with self._duck_lock:
+                    self._duck.execute(
+                        f'CREATE OR REPLACE TABLE "{table_name}" AS ({sql})'
+                    )
+                    rows = self._duck.execute(
+                        f'SELECT COUNT(*) FROM "{table_name}"'
+                    ).fetchone()[0]
+                    schema_str = _table_schema_str(self._duck, table_name, rows)
             except Exception as exc:
                 return f"Error building analysis table: {exc}"
 
         self._cache_tables.add(table_name)
-        return _table_schema_str(self._duck, table_name, rows)
+        return schema_str
 
     def list_tables(self) -> List[str]:
         """Agent-visible selected source tables + analysis cache tables."""
@@ -427,8 +504,9 @@ class SQLDataSource(DataSource):
         # Analysis cache tables (DuckDB)
         for t in sorted(self._cache_tables):
             try:
-                cols  = [r[0] for r in self._duck.execute(f'DESCRIBE "{t}"').fetchall()]
-                total = self._duck.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]
+                with self._duck_lock:
+                    cols  = [r[0] for r in self._duck.execute(f'DESCRIBE "{t}"').fetchall()]
+                    total = self._duck.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]
                 result.append({"name": f"[分析表] {t}", "columns": cols, "total_rows": total})
             except Exception:
                 continue
@@ -438,8 +516,9 @@ class SQLDataSource(DataSource):
         for t in self._all_table_names():
             if t in self._loaded:
                 try:
-                    cols  = [r[0] for r in self._duck.execute(f'DESCRIBE "{t}"').fetchall()]
-                    total = self._duck.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]
+                    with self._duck_lock:
+                        cols  = [r[0] for r in self._duck.execute(f'DESCRIBE "{t}"').fetchall()]
+                        total = self._duck.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]
                     result.append({"name": t, "columns": cols, "total_rows": total})
                 except Exception:
                     result.append({"name": t, "columns": [], "total_rows": None})
@@ -456,7 +535,8 @@ class SQLDataSource(DataSource):
         # Analysis cache
         if table_name.startswith("[分析表] "):
             real = table_name[len("[分析表] "):]
-            return _preview_table_dict(self._duck, real, table_name, max_rows)
+            with self._duck_lock:
+                return _preview_table_dict(self._duck, real, table_name, max_rows)
 
         # Source-table preview is always a bounded remote query.  In particular,
         # it must not call _ensure_loaded(): asking to see 100 rows should never

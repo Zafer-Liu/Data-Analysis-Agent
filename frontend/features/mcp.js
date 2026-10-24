@@ -3,14 +3,19 @@ import { getUiIsland } from "../core/ui-registry.js";
 import { ensureUiIsland } from "./vue-app.js";
 import { toast } from "../core/overlay.js";
 
-let _mcpActiveTab = "local"; // "local" | "paste" — smart-fill 区用
+let _mcpActiveTab = "local"; // "local" | "paste" | "presets" — smart-fill 区用
+let _mcpPresets = null;      // cached /api/mcp/presets result
+
+const _MCP_TABS = ["local", "paste", "presets"];
 
 function switchMcpTab(tab) {
+  if (!_MCP_TABS.includes(tab)) return;
   _mcpActiveTab = tab;
-  document.getElementById("mcp-panel-local").classList.toggle('hidden', tab !== "local");
-  document.getElementById("mcp-panel-paste").classList.toggle('hidden', tab !== "paste");
-  document.getElementById("mcp-tab-local").classList.toggle("active", tab === "local");
-  document.getElementById("mcp-tab-paste").classList.toggle("active", tab === "paste");
+  for (const t of _MCP_TABS) {
+    document.getElementById(`mcp-panel-${t}`)?.classList.toggle('hidden', t !== tab);
+    document.getElementById(`mcp-tab-${t}`)?.classList.toggle("active", t === tab);
+  }
+  if (tab === "presets") ensureMcpPresets();
 }
 
 let _openMcpInFlight = false;
@@ -282,6 +287,8 @@ function _clearSmartFillDom() {
   if (si) si.value = "";
   const ss = document.getElementById("mcp-smart-status");
   if (ss) { ss.textContent = ""; ss.style.color = ""; }
+  const ps = document.getElementById("mcp-preset-status");
+  if (ps) { ps.textContent = ""; ps.style.color = ""; }
   const sw = document.getElementById("mcp-smart-warnings");
   if (sw) sw.classList.add('hidden');
   const sh = document.getElementById("mcp-smart-llm-hint");
@@ -294,6 +301,133 @@ function _clearSmartFillDom() {
 
 function updateMcpCmdPreview() {
   // Vue 路径下命令预览由 _renderForm computed 自动渲染，此函数保留为空壳防 HTML data-action 引用
+}
+
+/* ── built-in presets ─────────────────────────────────────────── */
+
+async function ensureMcpPresets() {
+  if (_mcpPresets) { renderMcpPresets(); return _mcpPresets; }
+  const listEl = document.getElementById("mcp-preset-list");
+  try {
+    const res  = await fetch("/api/mcp/presets");
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "加载失败");
+    _mcpPresets = data.presets || [];
+  } catch (e) {
+    if (listEl) listEl.innerHTML = `<div style="font-size:11px;color:#ef4444">预设加载失败: ${_esc(e.message)}</div>`;
+    return [];
+  }
+  renderMcpPresets();
+  return _mcpPresets;
+}
+
+function renderMcpPresets() {
+  const listEl = document.getElementById("mcp-preset-list");
+  if (!listEl || !_mcpPresets) return;
+  if (!_mcpPresets.length) {
+    listEl.innerHTML = `<div style="font-size:11px;color:var(--color-text-dim)">暂无可用预设</div>`;
+    return;
+  }
+  listEl.innerHTML = _mcpPresets.map(p => {
+    const needKey = Object.keys(p.env || {}).length > 0;
+    const badge = needKey ? `<span class="mcp-preset-badge">需 API Key</span>` : "";
+    const note = p.note ? `<div class="mcp-preset-note">${_esc(p.note)}</div>` : "";
+    return `
+      <div class="mcp-preset-item">
+        <div class="mcp-preset-info">
+          <div class="mcp-preset-name">${_esc(p.label)} ${badge}</div>
+          <div class="mcp-preset-desc">${_esc(p.description)}</div>
+          ${note}
+        </div>
+        <button class="btn-sm btn-sm-primary" data-action="applyMcpPreset:${_esc(p.id)}">${p.needs_input ? "填充" : "一键安装"}</button>
+      </div>`;
+  }).join("");
+}
+
+async function applyMcpPreset(presetId) {
+  const statusEl = document.getElementById("mcp-preset-status");
+  if (!_mcpPresets) await ensureMcpPresets();
+  const p = (_mcpPresets || []).find(x => x.id === presetId);
+  if (!p) return;
+  // Presets that need user input (API keys, paths) → fill the form for editing
+  if (p.needs_input) {
+    if (!window.BAA || !getUiIsland("mcp")) return;
+    const vueMcp = getUiIsland("mcp");
+    if (!vueMcp.getFormState().open) vueMcp.openForm({ mode: "add" });
+    _applyMcpConfig({
+      transport: "stdio",
+      server_id: p.id,
+      label: p.label,
+      description: p.description,
+      command: p.command,
+      args: p.args,
+      env: p.env,
+    }, { overwriteLabel: true });
+    if (statusEl) {
+      const needKey = Object.keys(p.env || {}).length > 0;
+      statusEl.textContent = needKey
+        ? "✓ 已填充，请在下方补全 API Key 后保存"
+        : "✓ 已填充，请检查目录路径等参数后保存";
+      statusEl.style.color = "#10b981";
+    }
+    document.getElementById("mcp-label")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    return;
+  }
+
+  // Presets that don't need input → directly add + connect (auto-download via npx/uvx)
+  if (statusEl) {
+    statusEl.textContent = "正在添加并下载…";
+    statusEl.style.color = "#64748b";
+  }
+  try {
+    const res = await fetch("/api/mcp/servers", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({
+        server_id:   p.id,
+        label:       p.label,
+        description:  p.description,
+        transport:   "stdio",
+        command:     p.command,
+        args:        p.args,
+        env:         p.env,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      // Server already exists → offer to connect instead
+      if (data.error && data.error.includes("已存在")) {
+        await fetch(`/api/mcp/servers/${encodeURIComponent(p.id)}/connect`, { method: "POST" });
+        if (statusEl) {
+          statusEl.textContent = "该服务器已存在，正在重新连接…";
+          statusEl.style.color = "#10b981";
+        }
+      } else {
+        if (statusEl) {
+          statusEl.textContent = data.error || "添加失败";
+          statusEl.style.color = "#ef4444";
+        }
+        return;
+      }
+    } else {
+      if (statusEl) {
+        statusEl.textContent = "✓ 已添加，正在下载并连接…（首次可能需要 1-3 分钟）";
+        statusEl.style.color = "#10b981";
+      }
+    }
+    // Switch to server list tab so user can see progress
+    switchMcpTab("local");
+    loadMcpServers();
+    // Poll for status updates (download + connect can take a while)
+    setTimeout(loadMcpServers, 5000);
+    setTimeout(loadMcpServers, 15000);
+    setTimeout(loadMcpServers, 30000);
+  } catch (e) {
+    if (statusEl) {
+      statusEl.textContent = "请求失败: " + e.message;
+      statusEl.style.color = "#ef4444";
+    }
+  }
 }
 
 /* ── local scan ───────────────────────────────────────────────── */
@@ -512,4 +646,6 @@ export const mcp = Object.freeze({
   updateMcpCmdPreview,
   scanLocalMcp,
   parseMcpConfig,
+  applyMcpPreset,
+  ensureMcpPresets,
 });

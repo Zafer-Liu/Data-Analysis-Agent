@@ -265,6 +265,97 @@ def _register(conn: duckdb.DuckDBPyConnection, table: str, df: pd.DataFrame):
             pass
 
 
+# ── Write-SQL detection (A6: writes allowed, but only into memory) ────────────
+
+# Fallback keyword heuristic when sqlglot is unavailable or fails to parse.
+_WRITE_KEYWORD_RE = re.compile(
+    r"\b(create|insert|update|delete|drop|alter|truncate|merge)\b",
+    re.IGNORECASE,
+)
+
+_write_sql_cache: "dict[str, bool]" = {}
+
+
+def is_write_sql(sql: str) -> bool:
+    """True when *sql* mutates data (CREATE/INSERT/UPDATE/DELETE/DROP/…).
+
+    Uses sqlglot's AST when available (SELECT/WITH → False, write nodes →
+    True, PRAGMA/INSTALL/ATTACH/… → True conservatively: they are not
+    read-only). Falls back to a keyword heuristic. Results are cached —
+    the LLM tends to re-send identical statements across turns.
+    """
+    key = str(sql or "")
+    if not key.strip():
+        return False
+    cached = _write_sql_cache.get(key)
+    if cached is not None:
+        return cached
+
+    result = _detect_write_sql(key)
+    # Bounded cache: never let a long session grow it without limit.
+    if len(_write_sql_cache) >= 512:
+        _write_sql_cache.clear()
+    _write_sql_cache[key] = result
+    return result
+
+
+def _detect_write_sql(sql: str) -> bool:
+    try:
+        import sqlglot
+        import sqlglot.expressions as exp
+    except ImportError:
+        return bool(_WRITE_KEYWORD_RE.search(sql))
+
+    try:
+        statements = sqlglot.parse(sql, dialect="duckdb")
+    except Exception:
+        # Unparseable → treat any write keyword as a write (conservative).
+        return bool(_WRITE_KEYWORD_RE.search(sql))
+
+    for stmt in statements:
+        if stmt is None:
+            continue
+        if isinstance(stmt, exp.Query):
+            continue  # read-only branch
+        # Any other statement type — CREATE/INSERT/UPDATE/… as well as
+        # PRAGMA/INSTALL/ATTACH/COPY/SET/Transaction — is mutating or
+        # session-altering, so route through the shadow decision path.
+        # (Validation blocks the dangerous ones before execution.)
+        return True
+    return False
+
+
+def snapshot_tables_to_memory(conn: duckdb.DuckDBPyConnection) -> duckdb.DuckDBPyConnection:
+    """Copy every base table of *conn* into a fresh ``:memory:`` connection.
+
+    This is the "副 sheet" (secondary sheet): the caller keeps its on-disk
+    connection untouched and redirects all subsequent reads/writes to the
+    returned in-memory snapshot. Uses pandas round-trips (pyarrow is not a
+    dependency); DECIMAL→float64 narrowing is acceptable for analysis work.
+    """
+    shadow = _new_conn()
+    for table in _list_tables(conn):
+        try:
+            df = conn.execute(f'SELECT * FROM "{table}"').df()
+        except Exception as exc:
+            log.warning("[shadow] snapshot of table %r failed: %s", table, exc)
+            continue
+        if df is None or df.empty:
+            # Preserve empty tables so DDL referencing them still binds.
+            try:
+                cols = conn.execute(f'DESCRIBE "{table}"').fetchall()
+                shadow.execute(
+                    f'CREATE TABLE "{table}" ('
+                    + ", ".join(f'"{c[0]}" {c[1]}' for c in cols)
+                    + ")"
+                )
+            except Exception as exc:
+                log.warning("[shadow] empty-table DDL for %r failed: %s", table, exc)
+            continue
+        _register(shadow, table, df)
+    return shadow
+
+
 # ── DuckDB query / introspection ─────────────────────────────────────────────
 
 def _table_schema_str(conn: duckdb.DuckDBPyConnection, table: str, row_count: int) -> str:

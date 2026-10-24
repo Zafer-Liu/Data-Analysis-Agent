@@ -129,7 +129,8 @@ def generate(
     df.columns = [str(c).strip() for c in df.columns]
 
     # 获取维度列
-    dims = mapping.get("dimensions") or dimensions
+    dims = mapping.get("dimensions")
+    dims = dims if dims is not None else dimensions
     if not dims:
         dims = _auto_detect_dimensions(df)
     
@@ -142,7 +143,8 @@ def generate(
         return ChartResult(warnings=["至少需要2个有效的数值维度"])
 
     # 获取分组列
-    color_col_name = mapping.get("color") or color_col
+    color_col_name = mapping.get("color")
+    color_col_name = color_col_name if color_col_name is not None else color_col
     _color = None
     if color_col_name and color_col_name in df.columns:
         _color = color_col_name

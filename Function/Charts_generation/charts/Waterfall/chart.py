@@ -17,6 +17,17 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from charts.base import ChartResult
 
+try:
+    from charts.color_schemes import get_color_scheme
+except ImportError as e:  # pragma: no cover - 兜底，保证独立调用可用
+    log.debug("[chart] 配色模块加载失败: %s", e)
+    def get_color_scheme(name: str = "mckinsey"):
+        return {"colors": [
+            "#003D7A", "#0084D1", "#00A4EF", "#7FBA00",
+            "#FFB81C", "#F7630C", "#DA3B01", "#A4373A",
+            "#6B2C91", "#00B4EF",
+        ]}
+
 __all__ = ["generate"]
 
 _DATA_FMT = "x列(阶段名称) + y列(数值) + 可选type列(initial/increase/decrease/total)"
@@ -31,9 +42,9 @@ MCKINSEY_COLORS = {
 
 def _auto_col(df: pd.DataFrame, role: str, exclude: set = None) -> Optional[str]:
     exclude = exclude or set()
-    strs = [c for c in df.columns if df[c].dtype == object and c not in exclude]
+    strs = [c for c in df.columns if (df[c].dtype == object or pd.api.types.is_string_dtype(df[c])) and c not in exclude]
     nums = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c]) and c not in exclude]
-    col_lower = {c.lower(): c for c in df.columns if c not in exclude}
+    col_lower = {str(c).lower(): c for c in df.columns if c not in exclude}
 
     if role == "x":
         for hint in ["x", "label", "stage", "category", "阶段", "类别", "名称", "标签"]:
@@ -86,9 +97,12 @@ def generate(
         else:
             return ChartResult(warnings=["请提供 df 或 excel_path"])
 
-    x_col = mapping.get("x") or x
-    y_col = mapping.get("y") or y
-    type_col_name = mapping.get("type") or type_col
+    x_col = mapping.get("x")
+    x_col = x_col if x_col is not None else x
+    y_col = mapping.get("y")
+    y_col = y_col if y_col is not None else y
+    type_col_name = mapping.get("type")
+    type_col_name = type_col_name if type_col_name is not None else type_col
     title = options.get("title", title)
 
     exclude_set = set()
@@ -113,6 +127,12 @@ def generate(
         cols_to_use = [_x, _y]
         if _type:
             cols_to_use.append(_type)
+
+        # 配色方案：优先用 options.color_scheme
+        _scheme = get_color_scheme(options.get("color_scheme", "mckinsey"))
+        _increase_color = _scheme.get("positive", MCKINSEY_COLORS["increase"])
+        _decrease_color = _scheme.get("negative", MCKINSEY_COLORS["decrease"])
+        _total_color = _scheme.get("primary", MCKINSEY_COLORS["total"])
 
         df_plot = df[cols_to_use].copy()
         df_plot[_y] = pd.to_numeric(df_plot[_y], errors="coerce")
@@ -170,9 +190,9 @@ def generate(
             text=text_vals,
             textposition="outside",   # 显示当前累计值
             cliponaxis=False,
-            increasing=dict(marker=dict(color=MCKINSEY_COLORS["increase"], line=dict(color="white", width=1))),
-            decreasing=dict(marker=dict(color=MCKINSEY_COLORS["decrease"], line=dict(color="white", width=1))),
-            totals=dict(marker=dict(color=MCKINSEY_COLORS["total"], line=dict(color="white", width=1))),
+            increasing=dict(marker=dict(color=_increase_color, line=dict(color="white", width=1))),
+            decreasing=dict(marker=dict(color=_decrease_color, line=dict(color="white", width=1))),
+            totals=dict(marker=dict(color=_total_color, line=dict(color="white", width=1))),
             connector=dict(visible=True, line=dict(color="#cccccc", width=1)),
             customdata=customdata,
             hovertemplate="<b>%{x}</b><br>变动: %{customdata[0]:,.0f}<br>当前: %{customdata[1]:,.0f}<extra></extra>",

@@ -53,27 +53,27 @@ def _auto_col(df: pd.DataFrame, *hints: str) -> Optional[str]:
     3. 类型匹配：根据 hint 的语义推断类型
     4. 自动推断：无 hints 时返回第一个合适的列
     """
-    strs = [c for c in df.columns if df[c].dtype == object]
+    strs = [c for c in df.columns if (df[c].dtype == object or pd.api.types.is_string_dtype(df[c]))]
     nums = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-    col_lower = {c.lower(): c for c in df.columns}
+    col_lower = {str(c).lower(): c for c in df.columns}
     
     # 1. 精确匹配 hints
     for h in hints:
-        h_lower = h.lower()
+        h_lower = str(h).lower()
         if h_lower in col_lower:
             return col_lower[h_lower]
     
     # 2. 模糊匹配（包含关系）
     for h in hints:
-        h_lower = h.lower()
+        h_lower = str(h).lower()
         for col in df.columns:
-            col_lower_name = col.lower()
+            col_lower_name = str(col).lower()
             if h_lower in col_lower_name or col_lower_name in h_lower:
                 return col
     
     # 3. 类型匹配：根据 hint 的语义推断应该是什么类型
     if hints:
-        hint = hints[0].lower()
+        hint = str(hints[0]).lower()
         # 字符串类型的 hints
         if any(kw in hint for kw in ["source", "target", "label", "name", "group", "category", "phase", "row", "col", "path", "text", "word", "location", "geo"]):
             if strs:
@@ -154,30 +154,38 @@ def generate(
         else:
             return ChartResult(warnings=["请提供 df 或 excel_path"])
 
-    x_col = mapping.get("x") or x
-    y_col = mapping.get("y") or y
+    x_col = mapping.get("x")
+    x_col = x_col if x_col is not None else x
+    y_col = mapping.get("y")
+    y_col = y_col if y_col is not None else y
     title = options.get("title", title)
     color_scheme_name = options.get("color_scheme", "mckinsey")
 
-    # 检测宽格式数据
+    # 检测宽格式数据（仅在用户未显式指定 x/y 映射时才自动检测，
+    # 避免 melt 覆盖用户意图）
     # 宽格式：第一列为分类，其余列为数值
     is_wide_format = False
     first_col = df.columns[0]
     numeric_cols = [c for c in df.columns[1:] if pd.api.types.is_numeric_dtype(df[c])]
-    
-    if len(numeric_cols) > 1 and pd.api.types.is_string_dtype(df[first_col]):
+    user_mapping = any(v is not None for v in (x_col, y_col)) or bool(mapping)
+
+    if (
+        not user_mapping
+        and len(numeric_cols) > 1
+        and pd.api.types.is_string_dtype(df[first_col])
+    ):
         # 这是宽格式数据
         is_wide_format = True
         _x = first_col
         # 将宽格式转换为长格式
-        df_melted = df.melt(id_vars=[first_col], value_vars=numeric_cols, 
+        df_melted = df.melt(id_vars=[first_col], value_vars=numeric_cols,
                             var_name="sample", value_name="value")
         df_melted = df_melted.dropna(subset=["value"])
         _y = "value"
         plot_df = df_melted
     else:
         # 长格式数据
-        _x = _auto_col(df, x_col, "x", "区域", "类别", "group") if x_col else None
+        _x = _auto_col(df, x_col, "x", "区域", "类别", "group")
         _y = _auto_col(df, y_col, "y", "价格", "销售额", "value", "num")
         plot_df = df
 

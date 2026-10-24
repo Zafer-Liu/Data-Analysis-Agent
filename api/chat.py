@@ -6,6 +6,9 @@ import re
 import time
 import uuid
 from ast import literal_eval
+from datetime import datetime, timezone
+from queue import Empty, Full, Queue
+from threading import Event, Thread
 
 from flask import Blueprint, g, request, Response, jsonify
 
@@ -13,6 +16,7 @@ from .state import session_manager, config_manager, chart_store, check_session_o
 from agent.activation import ActivationContext, INTERNAL_ACTIONS
 from agent.agent import BusinessAgent
 from agent.commands import CommandLoader, CommandType
+from agent.model_call_audit import audit_model_call
 try:
     from agent.memory import (
         maybe_schedule_consolidation as _maybe_schedule_memory_consolidation,
@@ -30,6 +34,8 @@ from infrastructure.artifact_lifecycle import register_artifact
 log = logging.getLogger(__name__)
 bp = Blueprint("chat", __name__)
 
+_STREAM_END = object()
+
 
 def _feishu_delivery_enabled(session) -> bool:
     """Require both the session link and the application-level send switch."""
@@ -43,6 +49,46 @@ def _feishu_delivery_enabled(session) -> bool:
     except Exception:
         log.warning("[feishu] skip delivery because connection status is unavailable")
         return False
+
+
+def _background_sse_relay(iterator):
+    """Drain a chat generator even after the browser closes its response."""
+    output: Queue = Queue(maxsize=128)
+    downstream_closed = Event()
+
+    def enqueue(item: object) -> bool:
+        while not downstream_closed.is_set():
+            try:
+                output.put(item, timeout=0.25)
+                return True
+            except Full:
+                continue
+        return False
+
+    def consume() -> None:
+        try:
+            for item in iterator:
+                enqueue(item)
+        except Exception:
+            log.exception("[chat] background stream failed")
+        finally:
+            enqueue(_STREAM_END)
+
+    producer = Thread(target=consume, name="web-chat-stream", daemon=True)
+    producer.start()
+    try:
+        while True:
+            try:
+                item = output.get(timeout=1.0)
+            except Empty:
+                if not producer.is_alive():
+                    break
+                continue
+            if item is _STREAM_END:
+                break
+            yield item
+    finally:
+        downstream_closed.set()
 
 
 _PROMPT_SUGGESTION_DIRECTIVE = """You are a prompt suggestion engine.
@@ -287,17 +333,18 @@ class ActivationRequestError(ValueError):
         self.code = code
 
 
-def _resolve_activation(sess, payload: dict):
+def _resolve_activation(sess, payload: dict, *, allow_session_skill: bool = False):
     """Resolve untrusted request names into server-owned typed definitions."""
     skill_name = str(payload.get("skill") or "").strip()
     command_name = str(payload.get("command") or "").strip().lstrip("/").lower()
     internal_action = str(payload.get("internal_action") or "").strip().lower()
-    # Fallback: if the LLM auto-loaded a skill via load_analysis_skill in a
-    # previous turn (e.g. dashboard), keep it active for subsequent turns
-    # so guard/nudge logic works (e.g. after ask_user user-reply).
-    if not skill_name and not command_name and not internal_action:
+    # Headless Feishu replies cannot carry the Web client's active-turn payload.
+    # Permit one server-side continuation token there, and consume it exactly
+    # once. Browser/desktop requests must always declare their own activation.
+    if allow_session_skill:
         auto = getattr(sess, "auto_loaded_skill", "") or ""
-        if auto:
+        sess.auto_loaded_skill = ""
+        if auto and not skill_name and not command_name and not internal_action:
             skill_name = auto
 
     # Compatibility window for S3: current confirmation cards still send
@@ -451,6 +498,10 @@ def _build_agent(
     provider = sess.model_provider or config_manager.get_default_provider()
     if not provider:
         raise ValueError("未配置任何 LLM 模型，请先在「模型设置」中添加模型。")
+    if not sess.model_provider:
+        # Persist the resolved default so usage accounting and saved sessions
+        # refer to the same stable catalog id used for the actual request.
+        sess.model_provider = provider
     from LLM.llm_config_manager import get_llm_client
     client = get_llm_client(provider)
     cfg = config_manager.get_config(provider)
@@ -697,6 +748,78 @@ def serve_chart(chart_id: str):
     return Response(html, mimetype="text/html")
 
 
+def _charts_theme():
+    """导入 charts.theme，路径未引导时兜底补 sys.path。
+
+    正常流程 agent.prompts 已把 Function/Charts_generation 放进 sys.path；
+    兜底分支服务"重启后直接导出存量图表"的冷启动场景。
+    """
+    try:
+        from charts import theme
+        return theme
+    except ImportError:
+        import sys as _sys
+        from infrastructure.paths import resource_root
+        _p = str(resource_root()) + os.sep + os.path.join("Function", "Charts_generation")
+        if _p not in _sys.path:
+            _sys.path.insert(0, _p)
+        from charts import theme
+        return theme
+
+
+def _spec_png_size(chart_id: str):
+    """从 spec 边车读尺寸预设（无 spec / 非预设取值返回 None）。"""
+    try:
+        theme = _charts_theme()
+        preset = theme.SIZE_PRESETS.get(
+            str((chart_store.get_spec(chart_id) or {}).get("size") or "").strip().lower()
+        )
+        return preset or None
+    except Exception:
+        return None
+
+
+@bp.get("/api/chart/<chart_id>/png")
+def export_chart_png(chart_id: str):
+    """服务端 PNG 导出：按存储 HTML 里的 plotly figure 静态渲染（WYSIWYG）。
+
+    尺寸优先级：?w/&h= 显式参数 > spec 边车里的 size 预设 > 默认 1280x720；
+    ?scale=1-3 控制倍率（默认 2）；?download=1 以附件下载。
+    kaleido 未安装返回 501（可选依赖）；echarts/d3 图表返回 415。
+    """
+    html = chart_store.get(chart_id)
+    if not html:
+        log.warning("[chart] png export not found  chart_id=%s", chart_id)
+        return jsonify({"error": "Chart not found", "code": "not_found"}), 404
+
+    width = request.args.get("w", type=int) or 0
+    height = request.args.get("h", type=int) or 0
+    if not width or not height:
+        preset = _spec_png_size(chart_id)
+        if preset:
+            width = width or preset["width"]
+            height = height or preset["height"]
+    width = width or 1280
+    height = height or 720
+    scale = min(max(request.args.get("scale", 2, type=int) or 2, 1), 3)
+
+    try:
+        theme = _charts_theme()
+        png = theme.render_png_bytes(html, width=width, height=height, scale=scale)
+    except ImportError as exc:
+        return jsonify({"error": str(exc), "code": "kaleido_missing"}), 501
+    except ValueError as exc:
+        return jsonify({"error": str(exc), "code": "unsupported"}), 415
+    except Exception as exc:
+        log.warning("[chart] png export failed  chart_id=%s  error=%s", chart_id, exc)
+        return jsonify({"error": f"PNG export failed: {exc}", "code": "render_error"}), 500
+
+    disposition = "attachment" if request.args.get("download") else "inline"
+    resp = Response(png, mimetype="image/png")
+    resp.headers["Content-Disposition"] = f'{disposition}; filename="chart-{chart_id[:8]}.png"'
+    return resp
+
+
 # ── Stop ───────────────────────────────────────────────────────────────────
 
 @bp.post("/api/session/<sid>/stop")
@@ -756,13 +879,20 @@ def prompt_suggestion(sid: str):
         from LLM.llm_config_manager import get_llm_client
         client = get_llm_client(provider)
         budget = _prompt_suggestion_token_budget(cfg)
+        audit = audit_model_call(
+            user_id=_uid or "", session_id=sid, source="web",
+            purpose="prompt_suggestion", billing_scope="platform",
+            provider=provider, model=cfg.model,
+        )
         response = _call_with_retry(
             client.chat.completions.create,
+            on_attempt=audit.attempt,
             model=cfg.model,
             messages=messages,
             temperature=0.25,
             max_tokens=budget,
         )
+        audit.succeed(response)
         message = response.choices[0].message if response.choices else None
         raw = _final_prompt_suggestion_content(message) if message is not None else ""
         log.debug(
@@ -770,12 +900,14 @@ def prompt_suggestion(sid: str):
             sid, context_budget, output_budget, len(raw), bool(raw),
         )
         suggestion = _sanitize_prompt_suggestion(raw)
-        log.debug("[prompt-suggestion] sanitized sid=%s suggestion=%r", sid, suggestion[:200] if suggestion else "")
+        log.debug("[prompt-suggestion] sanitized sid=%s chars=%d", sid, len(suggestion or ""))
     except Exception as exc:
+        if "audit" in locals():
+            audit.fail(exc)
         log.warning("[prompt-suggestion] LLM call failed sid=%s error=%s", sid, exc)
         return jsonify({"ok": False, "suggestion": ""})
 
-    log.info("[prompt-suggestion] result sid=%s ok=%s suggestion=%r", sid, bool(suggestion), suggestion[:100] if suggestion else "")
+    log.info("[prompt-suggestion] result sid=%s ok=%s chars=%d", sid, bool(suggestion), len(suggestion or ""))
     return jsonify({"ok": bool(suggestion), "suggestion": suggestion})
 
 
@@ -806,10 +938,14 @@ def chat_stream(sid: str):
         or d.get("user_id")
         or "local-default"
     ).strip()[:200]
-    # Cloud mode: use authenticated user and enforce token quota
-    if bool(os.environ.get("RAILWAY_PROJECT_ID")) or os.environ.get("VERCEL") == "1":
+    selected_provider = sess.model_provider or config_manager.get_default_provider()
+    hosted_model = config_manager.get_hosted_model(selected_provider or "")
+    # Cloud / desktop modes: use authenticated user and enforce token quota
+    from .auth import run_mode as _run_mode
+    mode = _run_mode()
+    if mode in ("cloud", "desktop"):
         from .auth import current_user
-        from data.auth_store import check_quota
+        from data.auth_store import check_quota, get_bonus_balance
         auth_user = current_user()
         if not auth_user and not is_internal_feishu:
             return jsonify({"error": "请先登录", "needs_auth": True}), 401
@@ -825,23 +961,46 @@ def chat_stream(sid: str):
             return jsonify({"error": "无权访问此会话", "code": "forbidden"}), 403
         if not owner:
             sess.owner_user_id = user_id
-        quota = check_quota(user_id)
-        if quota["exceeded"]:
-            return jsonify({
-                "error": "今日免费额度已用尽（{} tokens）。您可以在设置中配置自己的 API Key 继续使用，"
-                         "或明天再试。已用 {}/{}".format(
-                             quota["limit"], quota["used"], quota["limit"]),
-                "code": "quota_exceeded",
-                "quota": quota,
-            }), 403
+        # Railway owns the authoritative quota ledger.  Desktop-hosted model
+        # calls are checked and charged by the cloud LLM gateway instead of
+        # consulting the desktop's local SQLite copy.
+        if hosted_model and mode == "cloud":
+            if (
+                hosted_model.get("requires_paid_balance")
+                and get_bonus_balance(user_id) <= 0
+            ):
+                return jsonify({
+                    "error": "该模型需要可用额度，请先获取或购买额度。",
+                    "code": "paid_quota_required",
+                }), 402
+            quota = check_quota(user_id)
+            if not hosted_model.get("requires_paid_balance") and quota["exceeded"]:
+                quota["model"] = {
+                    "id": hosted_model["id"],
+                    "display_name": hosted_model["display_name"],
+                    "public_model_name": hosted_model.get("public_model_name", ""),
+                    "tier": hosted_model["tier"],
+                }
+                return jsonify({
+                    "error": "今日赠送额度已用尽。可以改用自己的模型，或在额度重置后继续使用。",
+                    "code": "quota_exceeded",
+                    "quota": quota,
+                }), 403
     try:
-        activation, active_skill, active_command = _resolve_activation(sess, d)
+        activation, active_skill, active_command = _resolve_activation(
+            sess,
+            d,
+            allow_session_skill=is_internal_feishu,
+        )
     except ActivationRequestError as exc:
         return jsonify({"error": str(exc), "code": exc.code}), 400
-    if activation.kind == "none":
-        added_tools = sess.record_discovered_tools(message)
-        if added_tools:
-            log.info("[tools] discovered sid=%s tools=%s", sid, added_tools)
+    # Every user turn advances the three-turn built-in discovery TTL. Explicit
+    # commands/Skills use their audited declarations instead of language
+    # discovery, so they record an empty discovery turn.
+    discovery_message = message if activation.kind == "none" else ""
+    added_tools = sess.record_discovered_tools(discovery_message)
+    if added_tools:
+        log.info("[tools] discovered sid=%s tools=%s", sid, added_tools)
     sess.cancel_requested = False
     _command_usage_before = (
         sess.total_input_tokens,
@@ -968,10 +1127,14 @@ def chat_stream(sid: str):
             )
         except ValueError as exc:
             log.error("[chat] build_agent failed  sid=%s  error=%s", sid, exc)
-            runner.fail_tracked(conversation_job_id, str(exc))
+            public_message = (
+                "模型服务暂时不可用，请稍后重试。"
+                if hosted_model else str(exc)
+            )
+            runner.fail_tracked(conversation_job_id, public_message)
             source_snapshot.release()
             _record_prompt_command_metric("error", "agent_build_failed")
-            yield _sse({"type": "error", "message": str(exc)})
+            yield _sse({"type": "error", "message": public_message})
             yield _sse({"type": "done"})
             return
 
@@ -998,7 +1161,7 @@ def chat_stream(sid: str):
             })
 
         def _collect_downloads(content: str) -> None:
-            for name, url in re.findall(r"\[([^\]]+)\]\((/api/output/[^)]+)\)", content or ""):
+            for name, url in re.findall(r"\[([^\]]+)\]\((/api/(?:export|output)/[^)]+)\)", content or ""):
                 _append_parent_artifact({
                     "type": "file", "name": name.replace("📥", "").strip(), "url": url,
                 })
@@ -1015,7 +1178,7 @@ def chat_stream(sid: str):
                 "export_excel", "export_report", "generate_ppt", "generate_dashboard",
                 "workspace_read_file", "workspace_write_file", "workspace_edit_file",
                 "workspace_delete_file", "workspace_move_file", "workspace_bash",
-                "workspace_command", "task_create", "task_update", "team_create",
+                "task_create", "task_update", "team_create",
                 "team_delete", "team_list", "team_status", "send_message", "agent_delegate",
                 "workflow_create", "workflow_list", "workflow_start", "workflow_status",
             }
@@ -1134,9 +1297,11 @@ def chat_stream(sid: str):
 
         conversation_scope = runner.conversation_scope(conversation_job_id)
         conversation_scope.__enter__()
+        ui_lang = "en" if str(d.get("lang") or "zh").lower() == "en" else "zh"
+        feishu_followup_skill = ""
         try:
             for event in agent.run(
-                message, list(sess.history), activation=activation,
+                message, list(sess.history), activation=activation, lang=ui_lang,
                 active_skill=active_skill, active_command=active_command,
                 last_reasoning=getattr(sess, "last_reasoning", ""),
                 last_prompt_tokens=getattr(sess, "last_prompt_tokens", 0),
@@ -1151,7 +1316,7 @@ def chat_stream(sid: str):
                 teams_enabled=teams_enabled,
                 auto_match_skill=auto_match_skill,
                 memory_enabled=memory_enabled,
-                discovered_tools=frozenset(getattr(sess, "discovered_tools", []) or []),
+                discovered_tools=list(getattr(sess, "discovered_tools", []) or []),
                 discovered_mcp_tools=list(
                     getattr(sess, "discovered_mcp_tools", []) or []
                 ),
@@ -1190,14 +1355,30 @@ def chat_stream(sid: str):
                 elif etype == "artifact_created" and event.get("artifact"):
                     _append_parent_artifact(event["artifact"])
                 elif etype == "skill_activated":
-                    sess.auto_loaded_skill = event.get("name", "")
+                    if is_internal_feishu:
+                        feishu_followup_skill = str(event.get("name") or "").strip()
                 elif etype == "error":
-                    stream_error = str(event.get("message") or "Conversation failed")
+                    raw_stream_error = str(
+                        event.get("message") or "Conversation failed"
+                    )
+                    if hosted_model:
+                        log.warning(
+                            "[hosted-models] upstream stream failed sid=%s provider=%s",
+                            sid,
+                            hosted_model["id"],
+                        )
+                        event = {
+                            "type": "error",
+                            "message": "模型服务暂时不可用，请稍后重试。",
+                            "code": "hosted_model_error",
+                        }
+                    stream_error = str(event.get("message") or raw_stream_error)
                 elif etype == "ask_user" and is_internal_feishu:
                     # The Web client renders a selectable card for this event.
                     # Feishu has no such card in this integration, so turn it
                     # into an ordinary replyable message instead of ending the
                     # mobile turn with an empty bot message.
+                    sess.auto_loaded_skill = feishu_followup_skill
                     event = {
                         "type": "text",
                         "content": format_feishu_ask_user(event),
@@ -1232,6 +1413,18 @@ def chat_stream(sid: str):
                         chart_store.path_for(cid),
                         artifact_type="chart", session_id=sid, artifact_id=f"chart:{cid}",
                     )
+                    # spec 边车：可复现生成参数与 HTML 同落盘。失败绝不影响出图。
+                    spec = event.get("spec")
+                    if isinstance(spec, dict):
+                        try:
+                            spec = {**spec, "session_id": sid}
+                            spec.setdefault(
+                                "created_at",
+                                datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                            )
+                            chart_store.save_spec(cid, spec)
+                        except Exception as exc:
+                            log.debug("[chat] chart spec sidecar skipped  cid=%s  err=%s", cid, exc)
                     if not hasattr(sess, "chart_ids"):
                         sess.chart_ids = []
                     sess.chart_ids.append(cid)
@@ -1266,19 +1459,53 @@ def chat_stream(sid: str):
                         cached_input_tokens=event.get("cached_input_tokens", 0),
                         cache_write_tokens=event.get("cache_write_tokens", 0),
                     )
-                    # Cloud mode: record per-user daily token usage
-                    if bool(os.environ.get("RAILWAY_PROJECT_ID")) or os.environ.get("VERCEL") == "1":
-                        from data.auth_store import add_usage
-                        _total = (event.get("prompt_tokens", 0) or 0) + (event.get("completion_tokens", 0) or 0)
-                        if _total > 0:
-                            add_usage(user_id, _total)
-                    cfg = config_manager.get_config(sess.model_provider)
+                    # Only platform-hosted models consume the daily gifted
+                    # quota. User-provided API keys remain outside this wallet.
+                    effective_provider = (
+                        sess.model_provider or config_manager.get_default_provider() or ""
+                    )
+                    usage_hosted_model = config_manager.get_hosted_model(
+                        effective_provider
+                    )
+                    if mode == "cloud" and usage_hosted_model:
+                        from data.auth_store import record_usage_event
+                        record_usage_event(
+                            user_id,
+                            prompt_tokens=event.get("prompt_tokens", 0),
+                            completion_tokens=event.get("completion_tokens", 0),
+                            cached_input_tokens=event.get("cached_input_tokens", 0),
+                            cache_write_tokens=event.get("cache_write_tokens", 0),
+                            model=str(event.get("model") or ""),
+                            model_id=usage_hosted_model["id"],
+                            tier=usage_hosted_model["tier"],
+                            quota_source=usage_hosted_model["quota_source"],
+                            multiplier=usage_hosted_model["quota_multiplier"],
+                            input_multiplier=usage_hosted_model["input_multiplier"],
+                            output_multiplier=usage_hosted_model["output_multiplier"],
+                            cache_read_multiplier=usage_hosted_model[
+                                "cache_read_multiplier"
+                            ],
+                            cache_write_multiplier=usage_hosted_model[
+                                "cache_write_multiplier"
+                            ],
+                            session_id=sid,
+                            model_call_id=str(event.get("model_call_id") or ""),
+                        )
+                    cfg = config_manager.get_config(effective_provider)
                     enriched = {
                         **event,
                         "max_output_tokens": cfg.max_output_tokens if cfg else None,
                         "session_total_input":  sess.total_input_tokens,
                         "session_total_output": sess.total_output_tokens,
                     }
+                    if usage_hosted_model:
+                        # Upstream model IDs are deployment secrets. Usage SSE
+                        # contains only the public label and stable catalog ID.
+                        enriched["model"] = (
+                            usage_hosted_model.get("public_model_name")
+                            or usage_hosted_model["display_name"]
+                        )
+                        enriched["model_id"] = usage_hosted_model["id"]
                     if not enriched.get("context_window"):
                         enriched["context_window"] = cfg.context_window if cfg else None
                     yield _sse(enriched)
@@ -1293,7 +1520,7 @@ def chat_stream(sid: str):
 
                 if etype == "text":
                     collected.append(event.get("content", ""))
-                elif etype == "reasoning":
+                elif etype in {"reasoning", "reasoning_delta"}:
                     collected_reasoning.append(event.get("content", ""))
                 elif etype == "tool_history":
                     msgs = event.get("messages", [])
@@ -1337,11 +1564,11 @@ def chat_stream(sid: str):
             if _feishu_delivery_enabled(sess):
                 yield _sse({"type": "feishu_sync", "status": "sending"})
                 try:
-                    from data.feishu_bot_service import send_conversation_turn, send_text
+                    from data.feishu_bot_service import send_conversation_turn, send_markdown
 
                     if is_internal_feishu:
-                        send_text(
-                            "🤖 智析 Agent\n" + final_answer,
+                        send_markdown(
+                            "**🤖 智析 Agent**\n" + final_answer,
                             receive_id=sess.feishu_chat_id,
                             receive_id_type="chat_id",
                         )
@@ -1418,12 +1645,20 @@ def chat_stream(sid: str):
 
         except Exception as exc:
             log.exception("[chat] unhandled agent error  sid=%s", sid)
-            runner.fail_tracked(conversation_job_id, f"{type(exc).__name__}: {exc}")
+            public_message = (
+                "模型服务暂时不可用，请稍后重试。"
+                if hosted_model else f"内部错误：{exc}"
+            )
+            runner.fail_tracked(conversation_job_id, public_message)
             if hook_engine and hook_context:
-                error_context = hook_context.child(event_name="error", error=str(exc))
+                hook_error = (
+                    "模型服务暂时不可用，请稍后重试。"
+                    if hosted_model else str(exc)
+                )
+                error_context = hook_context.child(event_name="error", error=hook_error)
                 for notification in hook_engine.run_hooks("error", error_context):
                     yield _sse(notification.to_event())
-            yield _sse({"type": "error", "message": f"内部错误：{exc}"})
+            yield _sse({"type": "error", "message": public_message})
 
         finally:
             conversation_scope.__exit__(None, None, None)
@@ -1453,7 +1688,7 @@ def chat_stream(sid: str):
             yield _sse({"type": "done"})
 
     return Response(
-        generate(),
+        _background_sse_relay(generate()),
         mimetype="text/event-stream",
         headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
     )

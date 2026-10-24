@@ -23,6 +23,17 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from charts.base import ChartResult
 
+try:
+    from charts.color_schemes import get_color_scheme
+except ImportError as e:  # pragma: no cover - 兜底，保证独立调用可用
+    log.debug("[chart] 配色模块加载失败: %s", e)
+    def get_color_scheme(name: str = "mckinsey"):
+        return {"colors": [
+            "#1A2B4C", "#2C5F8A", "#3A7CA5", "#4A90B4", "#D4A843",
+            "#C65D3B", "#5D8C6B", "#7A8A9A", "#E8EDF2", "#2E4057",
+            "#C2A144", "#A3B5C8", "#8B5E3C", "#4A6B8A", "#D9E2EC",
+        ]}
+
 __all__ = ["generate"]
 
 _DATA_FMT = "source列 + target列 + value列"
@@ -53,25 +64,25 @@ def _auto_col(df: pd.DataFrame, *hints: str) -> Optional[str]:
     if not hints or not df.columns.size:
         return None
 
-    col_lower = {c.lower(): c for c in df.columns}
+    col_lower = {str(c).lower(): c for c in df.columns}
 
     # 1. 精确匹配
     for h in hints:
-        h_lower = h.lower()
+        h_lower = str(h).lower()
         if h_lower in col_lower:
             return col_lower[h_lower]
 
     # 2. 模糊匹配（包含关系）
     for h in hints:
-        h_lower = h.lower()
+        h_lower = str(h).lower()
         for col in df.columns:
-            col_lower_name = col.lower()
+            col_lower_name = str(col).lower()
             if h_lower in col_lower_name or col_lower_name in h_lower:
                 return col
 
     # 3. 类型匹配
-    hint = hints[0].lower() if hints else ""
-    strs = [c for c in df.columns if df[c].dtype == object]
+    hint = str(hints[0]).lower() if hints else ""
+    strs = [c for c in df.columns if (df[c].dtype == object or pd.api.types.is_string_dtype(df[c]))]
     nums = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
 
     if any(
@@ -193,7 +204,11 @@ def _build_node_order(d: pd.DataFrame, src_col: str, tgt_col: str, val_col: str)
     """
     out_sum = d.groupby(src_col)[val_col].sum().to_dict()
     in_sum = d.groupby(tgt_col)[val_col].sum().to_dict()
-    all_nodes = list(pd.Index(d[src_col]).append(pd.Index(d[tgt_col]).unique()))
+    # 去重：源列可含重复值（A→B, A→C 很常见）。若不去重，node_map 会把
+    # 同名节点映射到多个索引，产生孤儿节点并破坏拓扑排序的 indegree 计数。
+    all_nodes = list(dict.fromkeys(
+        list(pd.Index(d[src_col]).append(pd.Index(d[tgt_col])))
+    ))
 
     indegree = {n: 0 for n in all_nodes}
     adj = {n: [] for n in all_nodes}
@@ -261,9 +276,12 @@ def generate(
         else:
             return ChartResult(warnings=["请提供 df 或 excel_path"])
 
-    src_col = mapping.get("source") or source
-    tgt_col = mapping.get("target") or target
-    val_col = mapping.get("value") or value
+    src_col = mapping.get("source")
+    src_col = src_col if src_col is not None else source
+    tgt_col = mapping.get("target")
+    tgt_col = tgt_col if tgt_col is not None else target
+    val_col = mapping.get("value")
+    val_col = val_col if val_col is not None else value
     title = options.get("title", title)
 
     _src = _auto_col(df, src_col, "source", "起点", "from", "origin")
@@ -301,7 +319,10 @@ def generate(
     in_sum = d.groupby(_tgt)[_val].sum().to_dict()
 
     # 节点颜色：为每个节点分配唯一颜色
-    node_color_map = _assign_unique_colors(all_nodes, _DISTINCT_COLORS)
+    # 配色方案：优先用 options.color_scheme，回退到 _DISTINCT_COLORS
+    _scheme = get_color_scheme(options.get("color_scheme", "mckinsey"))
+    _palette = _scheme.get("colors") or _DISTINCT_COLORS
+    node_color_map = _assign_unique_colors(all_nodes, _palette)
     node_color: List[str] = [node_color_map[n] for n in all_nodes]
 
     # 连线颜色：继承 source 节点色，降低透明度避免喧宾夺主

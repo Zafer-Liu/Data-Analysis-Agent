@@ -1,8 +1,9 @@
-"""Frozen desktop entry point for Windows and macOS.
+"""Frozen native desktop entry point for Windows and macOS.
 
-Starts the local Waitress server, waits for the minimal health endpoint, then
-opens the user's default browser. The launcher never installs dependencies or
-touches source-checkout uploads/outputs.
+Starts the local Waitress server and hosts the existing web application in a
+native pywebview window (WebView2 on Windows, WKWebView on macOS). A browser
+mode remains available as an explicit fallback for diagnostics. The launcher
+never installs Python dependencies or touches source-checkout uploads/outputs.
 """
 
 from __future__ import annotations
@@ -21,16 +22,58 @@ import urllib.request
 import webbrowser
 from collections.abc import Callable
 from pathlib import Path
+from urllib.parse import urljoin, urlsplit
 
 
 log = logging.getLogger("desktop_launcher")
 SERVICE_ID = "business-analytics-agent"
+APP_TITLE = "Business Analytics Agent"
+DEFAULT_CLOUD_AUTH_URL = "https://app.sage-agent.online"
+
+_DESKTOP_BRIDGE_SCRIPT = r"""
+(function () {
+  "use strict";
+  if (window.__baaDesktopShellInstalled) return;
+  window.__baaDesktopShellInstalled = true;
+
+  function openNativeChild(rawUrl) {
+    try {
+      const resolved = new URL(rawUrl, window.location.href);
+      if (resolved.origin !== window.location.origin) return false;
+      window.pywebview.api.open_window(resolved.href).catch(function () {});
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  const originalOpen = window.open.bind(window);
+  window.open = function (url, target, features) {
+    if (target === "_blank" && url && openNativeChild(url)) return null;
+    return originalOpen(url, target, features);
+  };
+
+  document.addEventListener("click", function (event) {
+    const link = event.target && event.target.closest
+      ? event.target.closest("a[href]")
+      : null;
+    if (!link || link.target !== "_blank") return;
+    if (openNativeChild(link.href)) event.preventDefault();
+  }, true);
+}());
+"""
 
 
 def _normalize_windows_environment() -> None:
     """Supply a standard Windows variable omitted by some CI launch shells."""
     if os.name == "nt" and not os.environ.get("WINDIR"):
         os.environ["WINDIR"] = os.environ.get("SystemRoot", r"C:\Windows")
+
+
+def _configure_cloud_auth_url() -> None:
+    """Set the packaged client's cloud auth endpoint unless explicitly overridden."""
+    configured = (os.environ.get("BAA_CLOUD_AUTH_URL") or "").strip().rstrip("/")
+    os.environ["BAA_CLOUD_AUTH_URL"] = configured or DEFAULT_CLOUD_AUTH_URL
 
 
 def _health_url(host: str, port: int) -> str:
@@ -72,20 +115,128 @@ def wait_for_health(
     return False
 
 
-def _open_browser_when_ready(health_url: str, app_url: str) -> None:
-    if wait_for_health(health_url):
-        if os.environ.get("BAA_NO_BROWSER") != "1":
-            webbrowser.open(app_url, new=1, autoraise=True)
-    else:
-        log.error("desktop server did not become healthy: %s", health_url)
-
-
 def _positive_float_env(name: str, default: float) -> float:
     try:
         value = float(os.environ.get(name, default))
     except (TypeError, ValueError):
         return default
     return value if value > 0 else default
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    try:
+        value = int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+def _env_enabled(name: str, default: bool = False) -> bool:
+    raw = str(os.environ.get(name, "")).strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _same_origin(left: str, right: str) -> bool:
+    try:
+        left_url = urlsplit(left)
+        right_url = urlsplit(right)
+        return (
+            left_url.scheme.lower() in {"http", "https"}
+            and left_url.scheme.lower() == right_url.scheme.lower()
+            and left_url.hostname == right_url.hostname
+            and left_url.port == right_url.port
+        )
+    except ValueError:
+        return False
+
+
+def _webview_storage_path() -> Path:
+    from infrastructure.paths import data_path
+
+    path = data_path("webview")
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _webview_backend() -> str | None:
+    override = str(os.environ.get("BAA_DESKTOP_GUI") or "").strip().lower()
+    if override:
+        return override
+    if sys.platform == "win32":
+        return "edgechromium"
+    if sys.platform == "darwin":
+        return "cocoa"
+    return None
+
+
+class DesktopApi:
+    """Minimal JS bridge used only to create same-origin native child windows."""
+
+    def __init__(self, webview_module, app_url: str):
+        self._webview = webview_module
+        self._app_url = app_url
+
+    def _attach_bridge(self, window) -> None:
+        # pywebview injects the window only when the parameter is literally
+        # named ``window`` (see webview.event.Event.set).
+        def install_bridge(window) -> None:
+            window.run_js(_DESKTOP_BRIDGE_SCRIPT)
+
+        window.events.loaded += install_bridge
+
+    def open_window(self, raw_url: str) -> bool:
+        candidate = urljoin(f"{self._app_url}/", str(raw_url or ""))
+        if not _same_origin(candidate, self._app_url):
+            return False
+        child = self._webview.create_window(
+            APP_TITLE,
+            candidate,
+            js_api=self,
+            width=_positive_int_env("BAA_DESKTOP_CHILD_WIDTH", 1100),
+            height=_positive_int_env("BAA_DESKTOP_CHILD_HEIGHT", 760),
+            min_size=(720, 480),
+            background_color="#F7F9FC",
+            text_select=True,
+            zoomable=True,
+        )
+        self._attach_bridge(child)
+        return True
+
+
+def _run_native_window(app_url: str) -> None:
+    """Run the platform GUI loop on the main thread until all windows close."""
+    import webview
+
+    webview.settings["ALLOW_DOWNLOADS"] = True
+    webview.settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] = True
+    webview.settings["OPEN_DEVTOOLS_IN_DEBUG"] = True
+
+    desktop_api = DesktopApi(webview, app_url)
+    window = webview.create_window(
+        APP_TITLE,
+        app_url,
+        js_api=desktop_api,
+        width=_positive_int_env("BAA_DESKTOP_WIDTH", 1360),
+        height=_positive_int_env("BAA_DESKTOP_HEIGHT", 860),
+        min_size=(960, 640),
+        maximized=_env_enabled("BAA_DESKTOP_MAXIMIZED"),
+        background_color="#F7F9FC",
+        text_select=True,
+        zoomable=True,
+    )
+    desktop_api._attach_bridge(window)
+    webview.start(
+        gui=_webview_backend(),
+        debug=_env_enabled("BAA_DESKTOP_DEBUG"),
+        private_mode=False,
+        storage_path=str(_webview_storage_path()),
+    )
+
+
+def _open_browser(app_url: str) -> None:
+    webbrowser.open(app_url, new=1, autoraise=True)
 
 
 def _monitor_desktop_clients(registry, shutdown_event, close_server) -> None:
@@ -111,9 +262,27 @@ def _monitor_desktop_clients(registry, shutdown_event, close_server) -> None:
 def main() -> int:
     multiprocessing.freeze_support()
     _normalize_windows_environment()
+    _configure_cloud_auth_url()
     if not getattr(sys, "frozen", False):
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    # Frozen builds run with console=False: basicConfig writes to a lost stderr.
+    # Mirror everything to a log file so native-window failures are diagnosable
+    # on end-user machines (otherwise the browser fallback is silent).
+    try:
+        from infrastructure.paths import data_path
+
+        launcher_log = data_path("logs")
+        launcher_log.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(
+            launcher_log / "desktop-launcher.log", encoding="utf-8"
+        )
+        file_handler.setFormatter(
+            logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+        )
+        logging.getLogger().addHandler(file_handler)
+    except Exception:
+        log.exception("failed to attach launcher file log")
 
     if os.environ.get("BAA_ONEDIR_SELF_TEST") == "1":
         from frozen_smoke import run_frozen_smoke
@@ -122,7 +291,7 @@ def main() -> int:
 
     host = os.environ.get("BAA_DESKTOP_HOST", "127.0.0.1")
     try:
-        port = int(os.environ.get("BAA_DESKTOP_PORT") or os.environ.get("AGENT_PORT") or 5001)
+        port = int(os.environ.get("BAA_DESKTOP_PORT") or os.environ.get("AGENT_PORT") or 0)
     except ValueError:
         log.error("BAA_DESKTOP_PORT/AGENT_PORT must be an integer")
         return 2
@@ -133,8 +302,16 @@ def main() -> int:
     health_url = _health_url(host, port)
     app_url = _app_url(host, port)
     if port and probe_health(health_url):
-        if os.environ.get("BAA_NO_BROWSER") != "1":
-            webbrowser.open(app_url, new=1, autoraise=True)
+        if os.environ.get("BAA_NO_BROWSER") == "1":
+            return 0
+        if _env_enabled("BAA_DESKTOP_BROWSER"):
+            _open_browser(app_url)
+            return 0
+        try:
+            _run_native_window(app_url)
+        except Exception as exc:
+            log.exception("native desktop window failed; opening browser fallback: %s", exc)
+            _open_browser(app_url)
         return 0
 
     previous_lifecycle = os.environ.get("BAA_DESKTOP_LIFECYCLE")
@@ -168,6 +345,13 @@ def main() -> int:
     app_url = _app_url(host, effective_port)
     closed = False
     shutdown_event = threading.Event()
+    server_errors: list[Exception] = []
+
+    def restore_lifecycle_environment() -> None:
+        if previous_lifecycle is None:
+            os.environ.pop("BAA_DESKTOP_LIFECYCLE", None)
+        else:
+            os.environ["BAA_DESKTOP_LIFECYCLE"] = previous_lifecycle
 
     def close_server(*_args) -> None:
         nonlocal closed
@@ -183,30 +367,58 @@ def main() -> int:
         except (OSError, ValueError):
             pass
 
-    threading.Thread(
-        target=_open_browser_when_ready,
-        args=(health_url, app_url),
+    def run_server() -> None:
+        try:
+            server.run()
+        except Exception as exc:
+            server_errors.append(exc)
+            log.exception("desktop server stopped unexpectedly: %s", exc)
+        finally:
+            shutdown_event.set()
+
+    server_thread = threading.Thread(
+        target=run_server,
         daemon=True,
-        name="desktop-browser-opener",
-    ).start()
-    threading.Thread(
-        target=_monitor_desktop_clients,
-        args=(desktop_clients, shutdown_event, close_server),
-        daemon=True,
-        name="desktop-client-monitor",
-    ).start()
+        name="desktop-waitress-server",
+    )
+    server_thread.start()
     log.info("Business Analytics Agent desktop -> %s", app_url)
+
+    if not wait_for_health(health_url):
+        log.error("desktop server did not become healthy: %s", health_url)
+        close_server()
+        server_thread.join(timeout=5.0)
+        restore_lifecycle_environment()
+        return 1
+
+    def run_browser_mode() -> None:
+        threading.Thread(
+            target=_monitor_desktop_clients,
+            args=(desktop_clients, shutdown_event, close_server),
+            daemon=True,
+            name="desktop-client-monitor",
+        ).start()
+        _open_browser(app_url)
+        server_thread.join()
+
     try:
-        server.run()
+        if os.environ.get("BAA_NO_BROWSER") == "1":
+            server_thread.join()
+        elif _env_enabled("BAA_DESKTOP_BROWSER"):
+            run_browser_mode()
+        else:
+            try:
+                _run_native_window(app_url)
+            except Exception as exc:
+                log.exception("native desktop window failed; opening browser fallback: %s", exc)
+                run_browser_mode()
     except KeyboardInterrupt:
         pass
     finally:
         close_server()
-        if previous_lifecycle is None:
-            os.environ.pop("BAA_DESKTOP_LIFECYCLE", None)
-        else:
-            os.environ["BAA_DESKTOP_LIFECYCLE"] = previous_lifecycle
-    return 0
+        server_thread.join(timeout=5.0)
+        restore_lifecycle_environment()
+    return 1 if server_errors else 0
 
 
 if __name__ == "__main__":

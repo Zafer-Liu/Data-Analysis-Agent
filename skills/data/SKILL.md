@@ -2,6 +2,7 @@
 name: data
 description: 查看数据结构、质量和可分析性（schema 数据概览 profiling）
 icon: 🔍
+tags: [mode-business, mode-ml, mode-empirical, data-preparation, profiling]
 allowedTools: [get_schema, get_table_detail, query_data, profile_data, generate_chart]
 ---
 # 数据诊断

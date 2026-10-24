@@ -2,6 +2,7 @@
 name: screening
 description: 进行单变量筛选并形成候选解释变量清单（feature selection 特征筛选）
 icon: 🔎
+tags: [mode-ml, mode-empirical, modeling, inference]
 allowedTools: [get_schema, query_data, run_analysis, generate_chart]
 ---
 # 单变量筛选

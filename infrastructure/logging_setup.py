@@ -4,7 +4,7 @@ Call setup_logging() once at startup (app.py).  Every module that does
   import logging; log = logging.getLogger(__name__)
 will automatically write to both the console and the daily rotating file.
 
-Log directory: <data_root>/outputs/Log/
+Log directory: <content_data_root>/outputs/Log/
 File pattern:  baa_YYYY-MM-DD.log   (one file per day, kept 30 days)
 Active file is always named after today's date — no plain "baa.log".
 """
@@ -13,7 +13,7 @@ import logging
 import logging.handlers
 import os
 from pathlib import Path
-from infrastructure.paths import data_path
+from infrastructure.paths import content_data_path
 
 class _DailyFileHandler(logging.handlers.TimedRotatingFileHandler):
     """TimedRotatingFileHandler variant with daily file named baa_YYYY-MM-DD.log"""
@@ -44,7 +44,7 @@ class _DailyFileHandler(logging.handlers.TimedRotatingFileHandler):
 
 def setup_logging(level: int = logging.INFO) -> None:
     log_dir_path = os.environ.get("LOG_DIR")
-    log_dir = Path(log_dir_path) if log_dir_path else data_path("outputs", "Log")
+    log_dir = Path(log_dir_path) if log_dir_path else content_data_path("outputs", "Log")
 
     try:
         log_dir.mkdir(parents=True, exist_ok=True)

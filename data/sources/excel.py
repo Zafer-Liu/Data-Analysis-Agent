@@ -13,7 +13,7 @@ import pandas as pd
 from ._utils import (
     _clean_identifier, _dedup_columns, _detect_header_row,
     _list_tables, _new_conn, _preview_table_dict, _query, _register,
-    _table_schema_str,
+    _table_schema_str, is_write_sql, snapshot_tables_to_memory,
 )
 from .base import DataSource
 
@@ -330,6 +330,9 @@ class ExcelDataSource(DataSource):
         self.file_path = file_path
         self._conn = _new_conn()
         self._tables: List[str] = []
+        # A6: only from_database instances (job-parsed .duckdb files) are
+        # file-backed and need the in-memory shadow for agent writes.
+        self._shadow_conn = None
         self._load(file_path)
 
     @classmethod
@@ -340,11 +343,28 @@ class ExcelDataSource(DataSource):
         obj.file_path = file_path
         obj._db_path = Path(db_path)
         obj._conn = duckdb.connect(str(obj._db_path))
+        obj._shadow_conn = None
         obj._tables = _list_tables(obj._conn)
         if not obj._tables:
             obj._conn.close()
             raise ValueError("解析数据库中没有可用工作表。")
         return obj
+
+    # ── A6 shadow (副 sheet) support — only for from_database instances ─────
+
+    def _file_backed(self) -> bool:
+        return hasattr(self, "_db_path")
+
+    def writable_conn(self):
+        if not self._file_backed():
+            return self._conn  # already :memory:
+        if self._shadow_conn is None:
+            self._shadow_conn = snapshot_tables_to_memory(self._conn)
+            log.info("[ExcelDS] shadow snapshot built  tables=%d", len(self._tables))
+        return self._shadow_conn
+
+    def _active_conn(self):
+        return self._shadow_conn if self._shadow_conn is not None else self._conn
 
     def _load(self, path: str):
         engine, sheet_names = _excel_engine(path)
@@ -365,24 +385,33 @@ class ExcelDataSource(DataSource):
 
     def get_schema(self) -> str:
         parts: List[str] = []
-        for table in self._tables:
-            rows = self._conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
-            parts.append(_table_schema_str(self._conn, table, rows))
-        return "\n\n".join(parts)
+        conn = self._active_conn()
+        for table in self.list_tables():
+            rows = conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+            parts.append(_table_schema_str(conn, table, rows))
+        return "\n\n".join(parts) if parts else "No tables."
 
     def execute_query(self, sql: str) -> Tuple[pd.DataFrame, str]:
-        return _query(self._conn, sql)
+        # A6: writes on file-backed (from_database) instances go to the
+        # in-memory shadow; :memory: instances write directly.
+        if self._file_backed() and is_write_sql(sql):
+            return _query(self.writable_conn(), sql)
+        return _query(self._active_conn(), sql)
 
     def create_analysis_table(self, sql: str, table_name: str = "analysis_data", _df=None) -> str:
+        use_shadow = self._file_backed() and (
+            self._shadow_conn is not None or is_write_sql(sql or "") or _df is not None
+        )
+        conn = self.writable_conn() if use_shadow else self._conn
         if _df is not None:
-            _register(self._conn, table_name, _df)
+            _register(conn, table_name, _df)
             rows = len(_df)
         else:
             try:
-                self._conn.execute(
+                conn.execute(
                     f'CREATE OR REPLACE TABLE "{table_name}" AS ({sql})'
                 )
-                rows = self._conn.execute(
+                rows = conn.execute(
                     f'SELECT COUNT(*) FROM "{table_name}"'
                 ).fetchone()[0]
             except Exception as exc:
@@ -390,22 +419,31 @@ class ExcelDataSource(DataSource):
         # Track the new table so get_schema / list_tables include it.
         if table_name not in self._tables:
             self._tables.append(table_name)
-        return _table_schema_str(self._conn, table_name, rows)
+        return _table_schema_str(conn, table_name, rows)
+
+    def close(self) -> None:
+        for conn in (getattr(self, "_conn", None), getattr(self, "_shadow_conn", None)):
+            try:
+                if conn is not None:
+                    conn.close()
+            except Exception:
+                pass
 
     def list_tables(self) -> List[str]:
-        return _list_tables(self._conn)
+        return _list_tables(self._active_conn())
 
     def get_preview(self) -> List[dict]:
         """Return table metadata only — fast even for 50+ sheet workbooks."""
+        conn = self._active_conn()
         result = []
-        for t in self._tables:
+        for t in self.list_tables():
             try:
-                cols = [r[0] for r in self._conn.execute(f'DESCRIBE "{t}"').fetchall()]
-                total = self._conn.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]
+                cols = [r[0] for r in conn.execute(f'DESCRIBE "{t}"').fetchall()]
+                total = conn.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]
                 result.append({"name": t, "columns": cols, "total_rows": total})
             except Exception:
                 continue
         return result
 
     def get_preview_table(self, table_name: str, max_rows: int = 100) -> dict:
-        return _preview_table_dict(self._conn, table_name, table_name, max_rows)
+        return _preview_table_dict(self._active_conn(), table_name, table_name, max_rows)

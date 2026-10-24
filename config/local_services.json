@@ -1,0 +1,20 @@
+{
+  "ea237c18f0ad4f9a8a6e316b3e434a20": {
+    "name": "TimesFM-3（本机）",
+    "transport": "http",
+    "protocol": "timesfm",
+    "base_url": "http://127.0.0.1:8787",
+    "health_path": "/health",
+    "request_path": "/forecast",
+    "method": "POST",
+    "request_body": {},
+    "timeout": 180,
+    "credential_ref": "",
+    "id": "ea237c18f0ad4f9a8a6e316b3e434a20",
+    "last_check": {
+      "checked_at": "2026-10-23T12:48:27.087583+00:00",
+      "status": "online",
+      "elapsed_ms": 533
+    }
+  }
+}

@@ -13,6 +13,7 @@
 """
 import logging
 log = logging.getLogger(__name__)
+import html as _html
 import sys
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -24,6 +25,15 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from charts.base import ChartResult
+
+try:
+    from charts.color_schemes import get_color_scheme
+except ImportError as e:  # pragma: no cover - 兜底，保证独立调用可用
+    log.debug("[chart] 配色模块加载失败: %s", e)
+    def get_color_scheme(name: str = "mckinsey"):
+        return {"colors": [
+            "#B9D6E8", "#7FB5D5", "#0084D1", "#003D7A", "#001F3F",
+        ]}
 
 __all__ = ["generate"]
 
@@ -76,7 +86,7 @@ def _detect_value_col(df: pd.DataFrame, exclude: set, hint: str = None) -> Optio
     """识别数值列。"""
     if hint:
         for c in df.columns:
-            if c not in exclude and c.lower() == hint.lower():
+            if c not in exclude and str(c).lower() == str(hint).lower():
                 return c
     for c in df.columns:
         if c not in exclude and pd.api.types.is_numeric_dtype(df[c]):
@@ -139,9 +149,12 @@ def generate(
         else:
             return ChartResult(warnings=["请提供 df 或 excel_path"])
 
-    city_hint = mapping.get("city") or city
-    lbl_hint = mapping.get("label") or label
-    val_hint = mapping.get("value") or value
+    city_hint = mapping.get("city")
+    city_hint = city_hint if city_hint is not None else city
+    lbl_hint = mapping.get("label")
+    lbl_hint = lbl_hint if lbl_hint is not None else label
+    val_hint = mapping.get("value")
+    val_hint = val_hint if val_hint is not None else value
     title = options.get("title", title)
 
     # ── 列识别 ────────────────────────────────────────────
@@ -154,7 +167,7 @@ def generate(
         _city = city_hint
     else:
         for c in df.columns:
-            c_lower = c.lower()
+            c_lower = str(c).lower()
             if any(kw in c_lower for kw in _city_keywords):
                 _city = c
                 break
@@ -239,6 +252,10 @@ def generate(
     vmin1, vmax1 = min(val1_list), max(val1_list)
 
     # ── 构建 Geo + Scatter ────────────────────────────────
+    # 配色方案：优先用 options.color_scheme
+    _scheme = get_color_scheme(options.get("color_scheme", "mckinsey"))
+    _palette = _scheme.get("colors") or ["#B9D6E8", "#7FB5D5", "#0084D1", "#003D7A", "#001F3F"]
+
     geo = Geo()
     geo.add_schema(maptype=maptype)
 
@@ -267,7 +284,7 @@ def generate(
             min_=vmin1,
             max_=vmax1,
             is_piecewise=False,
-            range_color=["#B9D6E8", "#7FB5D5", "#0084D1", "#003D7A", "#001F3F"],
+            range_color=_palette,
             textstyle_opts=opts.TextStyleOpts(color="#333"),
             pos_left="left",
             pos_bottom="20",
@@ -275,19 +292,23 @@ def generate(
         tooltip_opts=opts.TooltipOpts(trigger="item", formatter="{b}"),
     )
 
-    raw_html = geo.render_embed()
-
     sub_parts = [f"共 {len(scatter_data)} 个地区（maptype: {maptype}）"]
     sub_parts.append(f"字段: {_value1} · 范围: {vmin1:.2f} ~ {vmax1:.2f}")
     if _value2:
         sub_parts.append(f"附加: {_value2}")
+
+    raw_html = geo.render_embed()
+
+    # title/列名 用户/LLM 可控，HTML 转义防注入
+    esc_title = _html.escape(str(title))
+    esc_sub = _html.escape(" · ".join(sub_parts))
 
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{title}</title>
+<title>{esc_title}</title>
 <style>
 * {{ margin: 0; padding: 0; box-sizing: border-box; }}
 html, body {{ width: 100%; height: 100%;
@@ -305,8 +326,8 @@ html, body {{ width: 100%; height: 100%;
 </head>
 <body>
 <div id="header">
-  <h1>{title}</h1>
-  <div class="sub">{" · ".join(sub_parts)}</div>
+  <h1>{esc_title}</h1>
+  <div class="sub">{esc_sub}</div>
 </div>
 <div id="chart">
 {raw_html}

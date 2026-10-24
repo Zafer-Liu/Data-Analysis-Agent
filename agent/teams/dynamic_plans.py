@@ -2,7 +2,7 @@
 from __future__ import annotations
 import json, os, re, threading, time, uuid
 from datetime import datetime
-from infrastructure.paths import data_path
+from infrastructure.paths import content_data_path
 from data.workspace import workspace_manager
 from agent.tools.workspace.teams import WorkspaceTeamError
 from agent.workflows.service import WorkflowService
@@ -14,7 +14,7 @@ class DynamicTeamPlanStore:
     def __init__(self, session_id, workspace_id=None):
         self.session_id=str(session_id or "")
         safe=re.sub(r"[^A-Za-z0-9_.-]+","_",self.session_id or "default")[:120]
-        self.path=data_path("outputs","teams",safe,"dynamic_plans.json")
+        self.path=content_data_path("outputs","teams",safe,"dynamic_plans.json")
         self.workspace_id=str(workspace_id if workspace_id is not None else workspace_manager.workspace_id_for_session(self.session_id) or "")
 
     def _now(self): return datetime.now().isoformat(timespec="seconds")

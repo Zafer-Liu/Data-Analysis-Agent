@@ -32,7 +32,7 @@ from typing import Dict, Optional, List
 
 from .system_workspace import SystemWorkspace
 from .workspace_metadata import WorkspaceMetadataStore, workspace_metadata_store
-from infrastructure.paths import data_path, data_root, resource_path, resource_root
+from infrastructure.paths import content_data_path, content_data_root, resource_path, resource_root
 
 log = logging.getLogger(__name__)
 
@@ -58,8 +58,11 @@ def _detect_blocked_system_dirs() -> List[Path]:
     # 用户目录下的敏感子目录
     for sub in (".ssh", ".gnupg", ".aws", ".config"):
         p = home / sub
-        if p.exists():
-            dirs.append(p)
+        try:
+            if p.exists():
+                dirs.append(p)
+        except (PermissionError, OSError):
+            pass
     # Windows 系统目录
     for env_var in ("SystemRoot", "windir"):
         val = os.environ.get(env_var)
@@ -455,14 +458,14 @@ class WorkspaceManager:
         self.remember_mounts_by_default = bool(remember_mounts_by_default)
         # 默认额外根目录（uploads/knowledge，项目级）
         self._default_extra_roots: List[Path] = [
-            data_path("uploads"),
+            content_data_path("uploads"),
             resource_path("Information"),   # knowledge 文件
         ]
         # Always-available logical roots. These paths are not moved and are
         # exposed through workspace:// aliases with per-root policies.
         self.system_workspace = SystemWorkspace(
             resource_root(),
-            data_root_path=data_root(),
+            data_root_path=content_data_root(),
             resource_root_path=resource_root(),
         )
 
@@ -661,7 +664,7 @@ class WorkspaceManager:
             existing = self._runtimes_by_workspace.get(workspace_id)
             if existing is not None:
                 return existing
-            workdir = data_path("outputs", "workflow_sessions", workspace_id)
+            workdir = content_data_path("outputs", "workflow_sessions", workspace_id)
             runtime = WorkspaceRuntime(
                 workspace_id=workspace_id,
                 workdir=workdir,

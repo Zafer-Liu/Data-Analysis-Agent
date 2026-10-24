@@ -20,7 +20,7 @@ from data.feishu_bot_service import (
 )
 from data.feishu_bot_store import save_config
 from infrastructure.credential_store import CredentialStoreError
-from .state import require_session_ownership, session_manager
+from .state import require_local_runtime_config, require_session_ownership, session_manager
 
 
 bp = Blueprint("feishu_bot", __name__)
@@ -31,11 +31,13 @@ _MAX_RECENT_EVENT_IDS = 2_000
 
 
 @bp.get("/api/feishu-bot")
+@require_local_runtime_config
 def get_feishu_bot():
     return jsonify({"ok": True, "connection": get_status().to_dict()})
 
 
 @bp.put("/api/feishu-bot")
+@require_local_runtime_config
 def put_feishu_bot():
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
@@ -91,6 +93,7 @@ def put_feishu_bot():
 
 
 @bp.get("/api/feishu-bot/chats")
+@require_local_runtime_config
 def list_feishu_bot_chats():
     try:
         chats = list_joined_chats()
@@ -100,6 +103,7 @@ def list_feishu_bot_chats():
 
 
 @bp.post("/api/feishu-bot/test")
+@require_local_runtime_config
 def test_feishu_bot():
     try:
         send_test_message()
@@ -268,7 +272,7 @@ def dispatch_inbound_event(
         return False
     if source not in {"webhook", "long_connection"} or connection.inbound_transport != source:
         return False
-    # A live SDK client cannot be safely replaced in-process. Once its
+    # A live SDK client cannot be safely replaced in-process.  Once its
     # credentials differ from the saved configuration, keep it inert until a
     # restart creates a single listener with the new credentials.
     if source == "long_connection" and getattr(connection, "inbound_status", "connected") != "connected":

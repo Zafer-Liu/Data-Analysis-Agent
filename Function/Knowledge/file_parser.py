@@ -232,32 +232,50 @@ def _parse_raw_to_records(raw: str) -> list[dict]:
     return records
 
 
-def _llm_call_once(chunk: str, client, model: str) -> list[dict]:
+def _llm_call_once(
+    chunk: str, client, model: str, audit_factory=None, include_usage: bool = False,
+) -> list[dict]:
     """Call LLM for a single text chunk using streaming to avoid read timeouts."""
     prompt = _EXTRACT_PROMPT.replace("{text}", chunk)
     log.info("[file_parser] LLM call model=%s chunk_len=%d", model, len(chunk))
+    audit = audit_factory() if audit_factory is not None else None
     try:
-        stream = client.with_options(max_retries=0, timeout=120).chat.completions.create(
+        if audit is not None:
+            audit.attempt()
+        call_kwargs = dict(
             model=model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=131072,
             stream=True,
         )
+        if include_usage:
+            call_kwargs["stream_options"] = {"include_usage": True}
+        stream = client.with_options(max_retries=0, timeout=120).chat.completions.create(
+            **call_kwargs,
+        )
         parts = []
         for chunk_ev in stream:
+            if getattr(chunk_ev, "usage", None):
+                usage = chunk_ev.usage
             delta = chunk_ev.choices[0].delta if chunk_ev.choices else None
             if delta and delta.content:
                 parts.append(delta.content)
         raw = "".join(parts).strip()
     except Exception as e:
+        if audit is not None:
+            audit.fail(e)
         log.error("[file_parser] LLM API call failed: %s", e)
         raise RuntimeError(f"LLM 调用失败: {e}") from e
+    if audit is not None:
+        audit.succeed(locals().get("usage"))
     log.info("[file_parser] LLM response (first 300 chars): %r", raw[:300])
     return _parse_raw_to_records(raw)
 
 
-def _llm_extract(text: str, client, model: str) -> list[dict]:
+def _llm_extract(
+    text: str, client, model: str, audit_factory=None, include_usage: bool = False,
+) -> list[dict]:
     """Split text into chunks and extract records from each, then merge."""
     # Split on blank lines to avoid cutting mid-sentence
     paragraphs = re.split(r"\n{2,}", text.strip())
@@ -283,7 +301,10 @@ def _llm_extract(text: str, client, model: str) -> list[dict]:
 
     for i, chunk in enumerate(chunks):
         log.debug("[file_parser] processing chunk %d/%d", i + 1, len(chunks))
-        recs = _llm_call_once(chunk, client, model)
+        recs = _llm_call_once(
+            chunk, client, model, audit_factory=audit_factory,
+            include_usage=include_usage,
+        )
         for rec in recs:
             # Dedup key varies by table
             table = rec.get("table", "")
@@ -306,7 +327,10 @@ def _llm_extract(text: str, client, model: str) -> list[dict]:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def parse_file(filepath: str, client, model: str) -> dict[str, Any]:
+def parse_file(
+    filepath: str, client, model: str, audit_factory=None,
+    include_usage: bool = False,
+) -> dict[str, Any]:
     """Parse a docx or xlsx file into a preview list of knowledge records.
 
     Returns:
@@ -343,7 +367,10 @@ def parse_file(filepath: str, client, model: str) -> dict[str, Any]:
         preview: list[dict] = list(structured_records)
         if unstructured_texts:
             combined = "\n\n".join(unstructured_texts)
-            preview.extend(_llm_extract(combined, client, model))
+            preview.extend(_llm_extract(
+                combined, client, model, audit_factory=audit_factory,
+                include_usage=include_usage,
+            ))
 
         fmt = "structured" if structured_records and not unstructured_texts else "unstructured"
         if structured_records and unstructured_texts:
@@ -353,7 +380,10 @@ def parse_file(filepath: str, client, model: str) -> dict[str, Any]:
 
     elif ext == ".docx":
         text = _extract_docx_text(filepath)
-        preview = _llm_extract(text, client, model)
+        preview = _llm_extract(
+            text, client, model, audit_factory=audit_factory,
+            include_usage=include_usage,
+        )
         return {"format": "unstructured", "preview": preview}
 
     else:

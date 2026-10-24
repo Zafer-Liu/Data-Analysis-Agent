@@ -26,6 +26,7 @@ def run_frozen_smoke() -> int:
             checks[name] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
     for module_name in (
+        "webview",
         "duckdb",
         "openpyxl",
         "xlrd",
@@ -72,6 +73,21 @@ def run_frozen_smoke() -> int:
         }
     except Exception as exc:
         checks["analysis_registry"] = {
+            "ok": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+    try:
+        from agent.validate import validate_sql_structured
+
+        result = validate_sql_structured("SELECT COUNT(*) FROM test_table")
+        checks["sqlglot_duckdb"] = {
+            "ok": result.status == "passed",
+            "status": result.status,
+            "error": result.message,
+        }
+    except Exception as exc:
+        checks["sqlglot_duckdb"] = {
             "ok": False,
             "error": f"{type(exc).__name__}: {exc}",
         }

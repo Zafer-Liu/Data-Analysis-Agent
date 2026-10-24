@@ -2,6 +2,7 @@
 name: dashboard
 description: 规划业务数据仪表盘/看板（dashboard）
 icon: 📊
+tags: [mode-business, reporting, visualization]
 allowedTools: [get_schema, query_data, ask_user, propose_dashboard_outline]
 ---
 # 仪表盘规划

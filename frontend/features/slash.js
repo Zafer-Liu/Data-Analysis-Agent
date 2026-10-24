@@ -259,6 +259,11 @@ import { $, state } from "../core/runtime.js";
   }
 
   function onKeyDown(e) {
+    if (e.key === "Tab" && !isSlashOpen()
+      && window.BAA.chatStream?.acceptPromptSuggestion?.()) {
+      e.preventDefault();
+      return;
+    }
     if (isSlashOpen()) {
       const sc = $("slash-popup-scroll");
       const available = sc ? [...sc.querySelectorAll(".slash-item:not(.disabled)")] : [];

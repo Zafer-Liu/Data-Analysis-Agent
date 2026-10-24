@@ -2,6 +2,7 @@
 name: decile
 description: 执行十分位分层分析并识别高低价值群体（segmentation 分层分析）
 icon: 📉
+tags: [mode-business, segmentation, visualization]
 allowedTools: [get_schema, query_data, run_analysis, generate_chart]
 ---
 # 十分位分析

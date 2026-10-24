@@ -122,9 +122,11 @@ AGENT_TOOLS = [
                     "sql": {
                         "type": "string",
                         "description": (
-                            "SQL SELECT that defines the analysis table — "
-                            "select the exact columns needed, apply WHERE filters, "
-                            "GROUP BY aggregations, JOINs, etc."
+                            "SQL that defines the analysis table — SELECT the exact "
+                            "columns needed, apply WHERE filters, GROUP BY aggregations, "
+                            "JOINs; or a write statement (CREATE/INSERT/UPDATE/DELETE) "
+                            "to prep data in memory. Writes stay in the in-memory "
+                            "cache and never modify the original files."
                         ),
                     },
                     "table_name": {
@@ -132,6 +134,14 @@ AGENT_TOOLS = [
                         "description": (
                             "Name for the new temp table (default: 'analysis_data'). "
                             "Use a descriptive name when creating multiple tables."
+                        ),
+                    },
+                    "purpose": {
+                        "type": "string",
+                        "description": (
+                            "One sentence describing the business goal of this query — "
+                            "e.g. '统计各区域销售额占比用于结构分析'. Shown to the user in "
+                            "the tool timeline alongside the validation badge."
                         ),
                     },
                 },
@@ -171,13 +181,22 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "query_data",
-            "description": "Execute a SQL SELECT query and return the results as a table.",
+            "description": "Execute a SQL query (SELECT, or a write statement for in-memory data prep) and return the results as a table.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "sql": {
                         "type": "string",
-                        "description": "A valid SQL SELECT statement using actual column/table names from the schema.",
+                        "description": "A valid SQL statement using actual column/table names from the schema. SELECT for queries; CREATE TABLE / INSERT / UPDATE / DELETE for data prep — all writes apply only to the in-memory cache and never modify the original files.",
+                    },
+                    "purpose": {
+                        "type": "string",
+                        "description": (
+                            "One sentence describing the business goal of this query — "
+                            "e.g. '统计各月销售额趋势', '对比 A/B 两组转化率'. Shown to "
+                            "the user in the tool timeline alongside the SQL validation "
+                            "badge, so always fill it in. Keep it under ~40 chars."
+                        ),
                     }
                 },
                 "required": ["sql"],
@@ -225,7 +244,15 @@ AGENT_TOOLS = [
                     },
                     "analysis_options": {
                         "type": "object",
-                        "description": "Analysis-specific options. For AB_Test_Analysis: control_group, metric_type (auto/binary/continuous), expected_allocation.",
+                        "description": "Analysis-specific options. For AB_Test_Analysis: control_group, metric_type (auto/binary/continuous), expected_allocation. For Time_Series_TimesFM3: time_column, series_column OR target_columns, horizon (default 7), frequency, backtest_steps (default 0), make_positive, use_symmetric_averaging. Only use an already configured local forecast service; never download models or pass URLs.",
+                    },
+                    "purpose": {
+                        "type": "string",
+                        "description": (
+                            "One sentence describing the business goal of this analysis — "
+                            "e.g. '对收入做十分位分析识别高价值客群'. Shown to the user "
+                            "in the tool timeline alongside the SQL validation badge."
+                        ),
                     },
                 },
                 "required": ["analysis_name", "sql", "target_column"],
@@ -308,6 +335,46 @@ AGENT_TOOLS = [
                         "description": (
                             "Required human-readable chart title shown in the tool "
                             "timeline and above the visualization."
+                        ),
+                    },
+                    "highlight": {
+                        "type": "string",
+                        "description": (
+                            "Optional comma-separated series names or category values "
+                            "to emphasize (max 2): matched elements get the accent "
+                            "color while everything else is dimmed, so the focal "
+                            "point stands out. Use when the user calls out a key "
+                            "series, region, or conclusion. E.g. '预测' or '华东,华南'. "
+                            "Only works for Plotly charts."
+                        ),
+                    },
+                    "size": {
+                        "type": "string",
+                        "enum": ["chat", "dashboard", "slide", "square", "print"],
+                        "description": (
+                            "Output size preset: 'chat' (default, responsive inside "
+                            "the conversation), 'dashboard' 960x480 card, 'slide' "
+                            "1280x720 full-slide 16:9 for decks, 'square' 800x800 "
+                            "report figure, 'print' 1600x900 hi-res. Only affects "
+                            "Plotly charts."
+                        ),
+                    },
+                    "color_scheme": {
+                        "type": "string",
+                        "enum": ["mckinsey", "bcg", "bain", "ey"],
+                        "description": (
+                            "Optional color palette for this chart: 'mckinsey' (default), "
+                            "'bcg', 'bain', 'ey'. Use when the user asks for a different "
+                            "color theme, firm style, or brand for THIS chart without "
+                            "changing the session-wide scheme."
+                        ),
+                    },
+                    "purpose": {
+                        "type": "string",
+                        "description": (
+                            "One sentence describing the data-fetching goal of this "
+                            "query — e.g. '按月聚合销售额用于趋势折线图'. Shown to the "
+                            "user alongside the SQL validation badge."
                         ),
                     },
                 },
@@ -794,8 +861,9 @@ AGENT_TOOLS = [
                 "underspecified, especially open-ended requests like '帮我分析一下' / "
                 "'analyse this' / '看看数据'. Present a short question and 2-6 predefined "
                 "options the user can click as chips — this is the ONLY sanctioned way to "
-                "offer analysis direction choices to the user. Always include a catch-all "
-                "option so the user can type a custom answer. NEVER enumerate 2+ analysis "
+                "offer analysis direction choices to the user. The options array is REQUIRED "
+                "and MUST NEVER be empty. The UI adds a custom-answer option automatically, "
+                "so do not add one yourself. NEVER enumerate 2+ analysis "
                 "directions as plain text bullets for the user to pick from — convert them "
                 "into an ask_user call instead. Example: user uploads data and says '帮我"
                 "分析一下' -> call ask_user with options like 盈利分析 / 结构分析 / 趋势"
@@ -807,12 +875,15 @@ AGENT_TOOLS = [
                     "question": {
                         "type": "string",
                         "description": "The clarifying question to show the user (one sentence, ≤120 chars).",
+                        "minLength": 1,
+                        "maxLength": 120,
                     },
                     "options": {
                         "type": "array",
-                        "items": {"type": "string"},
+                        "items": {"type": "string", "minLength": 1, "maxLength": 40},
                         "description": (
-                            "2–6 predefined answer options. Keep each option short (≤40 chars). "
+                            "REQUIRED: 2–6 predefined answer options; NEVER return an empty array. "
+                            "Keep each option short (≤40 chars). "
                             "Do NOT include an 'Other' option — it is added automatically."
                         ),
                         "minItems": 2,
@@ -916,6 +987,213 @@ HOOKS_AUTOMATION_TOOL_SCHEMAS = [
 
 AGENT_TOOLS.extend(HOOKS_AUTOMATION_TOOL_SCHEMAS)
 
+
+BROWSER_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_search",
+            "description": (
+                "Search the web in a visible browser window. A real Chromium browser "
+                "will open on screen so the user can watch the search happen. "
+                "Returns a list of result titles and URLs."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query text.",
+                    },
+                    "engine": {
+                        "type": "string",
+                        "enum": ["google", "bing", "baidu"],
+                        "description": "Search engine. Default google.",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_navigate",
+            "description": (
+                "Navigate the visible browser to a URL. The page will load visibly. "
+                "Returns the page title and final URL."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "Absolute http:// or https:// URL.",
+                    },
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_click",
+            "description": (
+                "Click an element in the visible browser. Either provide a CSS "
+                "selector or visible text to match."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "selector": {
+                        "type": "string",
+                        "description": "CSS selector for the element to click.",
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Visible text to find and click. Used when selector is empty.",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_fill",
+            "description": (
+                "Fill an input field in the visible browser and press Enter. "
+                "Use for search boxes or form inputs."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "selector": {
+                        "type": "string",
+                        "description": "CSS selector for the input field.",
+                    },
+                    "value": {
+                        "type": "string",
+                        "description": "Text to type into the field.",
+                    },
+                },
+                "required": ["selector", "value"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_extract",
+            "description": (
+                "Extract visible text from the current browser page. "
+                "Returns the page title, URL, and body text (truncated)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "max_chars": {
+                        "type": "integer",
+                        "minimum": 500,
+                        "maximum": 20000,
+                        "description": "Maximum characters to extract. Default 8000.",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_screenshot",
+            "description": (
+                "Take a screenshot of the current browser page. "
+                "The screenshot is saved automatically and its path returned."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_close",
+            "description": "Close the visible browser window.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+]
+
+AGENT_TOOLS.extend(BROWSER_TOOL_SCHEMAS)
+
+
+TABLE_INGEST_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_table",
+            "description": (
+                "Fetch a public http/https URL (HTML page, JSON endpoint, CSV file "
+                "or PDF document) and register every usable table it contains as "
+                "a new queryable data source in ONE step. After registration the "
+                "tables are immediately available to get_schema, query_data and "
+                "the chart/analysis tools. For JavaScript-rendered pages (tables "
+                "missing or empty) use browser_navigate first and then "
+                "browser_extract_tables instead."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "Absolute http:// or https:// URL of the page/file.",
+                    },
+                    "source_name": {
+                        "type": "string",
+                        "description": "Optional display name for the new data source.",
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "minimum": 5,
+                        "maximum": 60,
+                        "description": "Request timeout in seconds. Default 30.",
+                    },
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_extract_tables",
+            "description": (
+                "Extract every <table> element from the CURRENT page in the "
+                "visible browser and register them as a new queryable data "
+                "source in ONE step. Use for JavaScript-rendered pages after "
+                "browser_navigate (or browser_search + browser_click) has the "
+                "target table on screen."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "source_name": {
+                        "type": "string",
+                        "description": "Optional display name for the new data source.",
+                    },
+                },
+            },
+        },
+    },
+]
+
+AGENT_TOOLS.extend(TABLE_INGEST_TOOL_SCHEMAS)
 
 FEISHU_BITABLE_TOOL_SCHEMAS = [
     {
@@ -1043,8 +1321,7 @@ WORKSPACE_TOOL_SCHEMAS = [
     {"type": "function", "function": {"name": "workspace_edit_file", "description": "Replace one unique exact string in a previously-read file under outputs or the mounted user workspace. System uploads and mcp roots are read-only.", "parameters": {"type": "object", "properties": {"file_path": {"type": "string"}, "old_string": {"type": "string"}, "new_string": {"type": "string"}}, "required": ["file_path", "old_string", "new_string"]}}},
     {"type": "function", "function": {"name": "workspace_delete_file", "description": "Delete exactly one file from workspace://outputs or a writable mounted user workspace. Recursive/directory deletion is forbidden and confirm=true is always required.", "parameters": {"type": "object", "properties": {"file_path": {"type": "string"}, "confirm": {"type": "boolean", "description": "Must be true after confirming the exact file path to delete."}}, "required": ["file_path", "confirm"]}}},
     {"type": "function", "function": {"name": "workspace_move_file", "description": "Move or rename exactly one file within writable workspace roots. Directory moves are forbidden; replacing an existing file requires confirm_overwrite=true.", "parameters": {"type": "object", "properties": {"source_path": {"type": "string"}, "destination_path": {"type": "string"}, "confirm_overwrite": {"type": "boolean"}}, "required": ["source_path", "destination_path"]}}},
-    {"type": "function", "function": {"name": "workspace_bash", "description": "Run a restricted Bash-like command in the mounted workspace. Allowed commands: pwd, ls/dir, cat, rg, sha256sum, read-only git status/log/diff, python -m compileall, rm/del, and mv/move/ren. No pipes, redirection, chaining, substitutions, recursive deletion, arbitrary executables, or shell=True. rm and overwrite moves require confirm=true.", "parameters": {"type": "object", "properties": {"command": {"type": "string"}, "timeout": {"type": "integer", "minimum": 1, "maximum": 120}, "confirm": {"type": "boolean", "description": "Required for rm/del and for overwriting an existing mv destination."}}, "required": ["command"]}}},
-    {"type": "function", "function": {"name": "workspace_command", "description": "Run a fixed shell-free operation: checksum, json_validate, git_status, git_diff, git_log, or python_compile. Arbitrary commands are impossible.", "parameters": {"type": "object", "properties": {"operation": {"type": "string", "enum": ["checksum", "json_validate", "git_status", "git_diff", "git_log", "python_compile"]}, "path": {"type": "string"}, "timeout": {"type": "integer", "minimum": 1, "maximum": 120}}, "required": ["operation"]}}},
+    {"type": "function", "function": {"name": "workspace_bash", "description": "Run the strongest restricted command facade in the mounted workspace. Allowed commands: pwd, ls/dir, cat, rg, sha256sum/shasum, json_validate/json validate, read-only git status/log/diff, python -m compileall, rm/del, and mv/move/ren. It delegates to workspace-scoped file and fixed-command backends; arbitrary executables, pipes, redirection, chaining, substitutions, recursive deletion, and shell=True remain forbidden. rm and overwrite moves require confirm=true.", "parameters": {"type": "object", "properties": {"command": {"type": "string"}, "timeout": {"type": "integer", "minimum": 1, "maximum": 120}, "confirm": {"type": "boolean", "description": "Required for rm/del and for overwriting an existing mv destination."}}, "required": ["command"]}}},
     {"type": "function", "function": {"name": "structured_output", "description": "Return machine-readable output and optionally require object fields. Reserved for structured/coordinator workflows.", "parameters": {"type": "object", "properties": {"output": {}, "required_fields": {"type": "array", "items": {"type": "string"}}}, "required": ["output"]}}},
     {"type": "function", "function": {"name": "load_analysis_skill", "description": "Load a named project analysis skill and return its full SOP body.", "parameters": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}}},
 ]
@@ -1102,6 +1379,7 @@ DIAGRAM_TOOL_SCHEMAS = [
                 "Display a draw.io diagram in the business canvas drawer. "
                 "PREFERRED: use content-fill mode (template_id + content) for known frameworks "
                 "to guarantee correct layout. Only use raw xml for custom diagrams. "
+                "Shape-library references in raw XML are resolved and validated internally. "
                 "Available templates: business_model_canvas, bcg_matrix, swot_analysis, value_proposition."
             ),
             "parameters": {
@@ -1191,27 +1469,6 @@ DIAGRAM_TOOL_SCHEMAS = [
                     }
                 },
                 "required": ["project_id"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_shape_library",
-            "description": (
-                "Fetch draw.io shape library documentation. Call this BEFORE using any icon library "
-                "in your diagram XML. Never guess shape style syntax — always look it up first."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "library": {
-                        "type": "string",
-                        "description": "Shape library name. Available: basic, flowchart, bpmn, infographic, arrows2",
-                        "enum": ["basic", "flowchart", "bpmn", "infographic", "arrows2"]
-                    }
-                },
-                "required": ["library"]
             }
         }
     },

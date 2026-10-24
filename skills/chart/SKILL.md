@@ -2,6 +2,7 @@
 name: chart
 description: 根据当前数据选择并生成合适的业务图表（visualization 可视化）
 icon: 📊
+tags: [mode-business, mode-ml, mode-empirical, visualization]
 allowedTools: [get_schema, query_data, select_chart, ask_user, generate_chart]
 ---
 # 图表分析

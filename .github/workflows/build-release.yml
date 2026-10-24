@@ -6,7 +6,7 @@ on:
       version:
         description: "Package version without v prefix, for example 1.0.0"
         required: false
-        default: "1.2.0"
+        default: "1.4.0"
   push:
     tags:
       - "v*"
@@ -51,9 +51,16 @@ jobs:
             python -m pip install -r requirements.txt
           fi
           python -m pip install -r requirements-build.txt
+          python -m pip install -r requirements-test.txt
       - name: Compile runtime sources
         shell: bash
         run: python -m compileall -q agent api data app.py
+      - name: Test application features
+        shell: bash
+        run: |
+          python scripts/generate_tool_inventory.py --check
+          python -m unittest discover -s tests -v
+          python -m pytest Function/Charts_generation/tests -q
 
   build-windows:
     name: Build Windows installer

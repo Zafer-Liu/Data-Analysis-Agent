@@ -23,6 +23,16 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from charts.base import ChartResult
 
+try:
+    from charts.color_schemes import get_color_scheme
+except ImportError as e:  # pragma: no cover - 兜底，保证独立调用可用
+    log.debug("[chart] 配色模块加载失败: %s", e)
+    def get_color_scheme(name: str = "mckinsey"):
+        return {"colors": [
+            "#0B1F3A", "#005B9A", "#00A3E0", "#6E7B8B", "#B9C2CF",
+            "#7D8998", "#4A90E2", "#2E3A46",
+        ]}
+
 __all__ = ["generate"]
 
 _DATA_FMT = "x列(类别) + 分组列 + y列(数值) 或 宽格式(行标签 + 多个数值列)"
@@ -49,20 +59,20 @@ def _auto_col(df: pd.DataFrame, *hints: str) -> Optional[str]:
     3. 类型匹配：根据 hint 的语义推断类型
     4. 自动推断：无 hints 时返回第一个合适的列
     """
-    strs = [c for c in df.columns if df[c].dtype == object or df[c].dtype == 'string']
+    strs = [c for c in df.columns if (df[c].dtype == object or pd.api.types.is_string_dtype(df[c]))]
     nums = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
     col_lower = {str(c).lower(): c for c in df.columns}
     hints = tuple(h for h in hints if isinstance(h, str) and h)
     
     # 1. 精确匹配 hints
     for h in hints:
-        h_lower = h.lower()
+        h_lower = str(h).lower()
         if h_lower in col_lower:
             return col_lower[h_lower]
     
     # 2. 模糊匹配（包含关系）
     for h in hints:
-        h_lower = h.lower()
+        h_lower = str(h).lower()
         if len(h_lower) < 2:
             continue
         for col in df.columns:
@@ -74,7 +84,7 @@ def _auto_col(df: pd.DataFrame, *hints: str) -> Optional[str]:
     
     # 3. 类型匹配：根据 hint 的语义推断应该是什么类型
     if hints:
-        hint = hints[0].lower()
+        hint = str(hints[0]).lower()
         # 字符串类型的 hints
         if any(kw in hint for kw in ["source", "target", "label", "name", "group", "category", "phase", "row", "col", "path", "text", "word", "location", "geo"]):
             if strs:
@@ -115,11 +125,12 @@ def _detect_wide_format(df: pd.DataFrame, mapping: dict) -> bool:
             or isinstance(mapping.get("series"), list):
         return True
 
-    series_hint = mapping.get("series") or mapping.get("color")
+    series_hint = mapping.get("series")
+    series_hint = series_hint if series_hint is not None else mapping.get("color")
     if isinstance(series_hint, str) and series_hint in df.columns:
         return False
 
-    strs = [c for c in df.columns if df[c].dtype == object or df[c].dtype == 'string']
+    strs = [c for c in df.columns if (df[c].dtype == object or pd.api.types.is_string_dtype(df[c]))]
     nums = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
     
     # 宽格式特征：恰好1个字符串列，2个以上数值列
@@ -204,16 +215,20 @@ def generate(
         else:
             return ChartResult(warnings=["请提供 df 或 excel_path"])
 
-    x_col = mapping.get("x") or x
-    y_col = mapping.get("y") or y
-    color_col = mapping.get("color") or mapping.get("series") or color
+    x_col = mapping.get("x")
+    x_col = x_col if x_col is not None else x
+    y_col = mapping.get("y")
+    y_col = y_col if y_col is not None else y
+    color_col = mapping.get("color")
+    color_col = color_col if color_col is not None else (mapping.get("series") if mapping.get("series") is not None else color)
     title = options.get("title", title)
 
     # ── 检测并转换宽格式数据 ──────────────────────────────
     if _detect_wide_format(df, mapping):
         # 找到字符串列作为 id_col
-        x_hint = mapping.get("x") or x_col
-        string_cols = [c for c in df.columns if df[c].dtype == object or df[c].dtype == 'string']
+        x_hint = mapping.get("x")
+        x_hint = x_hint if x_hint is not None else x_col
+        string_cols = [c for c in df.columns if (df[c].dtype == object or pd.api.types.is_string_dtype(df[c]))]
         id_col = x_hint if isinstance(x_hint, str) and x_hint in df.columns else (
             string_cols[0] if string_cols else df.columns[0]
         )
@@ -261,6 +276,21 @@ def generate(
     if _color and _color not in df.columns:
         _color = None
 
+    # 数值强制转换：长格式 _y 可能是字符串编码的数字（如 "1,234"），
+    # px.bar 对 object dtype 的字符串可能失败或错误渲染。
+    df = df.copy()
+    df[_y] = pd.to_numeric(df[_y], errors="coerce")
+    before = len(df)
+    df = df.dropna(subset=[_y])
+    if before != len(df):
+        warnings.append(f"已忽略 {before - len(df)} 行无法解析为数值的 y 数据")
+    if df.empty:
+        return ChartResult(warnings=warnings + ["y 列不含可用数值"])
+
+    # 配色方案：优先用 options.color_scheme，回退到 _MCKINSEY_COLORS
+    _scheme = get_color_scheme(options.get("color_scheme", "mckinsey"))
+    _palette = _scheme.get("colors") or _MCKINSEY_COLORS
+
     fig = px.bar(
         df,
         x=_x,
@@ -269,7 +299,7 @@ def generate(
         title=title,
         barmode="stack",
         text_auto=".2f",
-        color_discrete_sequence=_MCKINSEY_COLORS,
+        color_discrete_sequence=_palette,
         **kwargs
     )
 

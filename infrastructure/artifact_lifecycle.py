@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from infrastructure.paths import data_path
+from infrastructure.paths import content_data_path
 
 log = logging.getLogger(__name__)
 _LOCK = threading.RLock()
@@ -29,11 +29,11 @@ def _within(path: Path, root: Path) -> bool:
 
 
 def _audit_path() -> Path:
-    return data_path("outputs", "lifecycle", "audit.jsonl")
+    return content_data_path("outputs", "lifecycle", "audit.jsonl")
 
 
 def _settings_path() -> Path:
-    return data_path("config", "lifecycle.json")
+    return content_data_path("config", "lifecycle.json")
 
 
 def load_lifecycle_settings() -> dict[str, Any]:
@@ -102,7 +102,7 @@ def _session_owned_artifacts(session_id: str, exclude_files: set[Path]) -> list[
     if not session_id:
         return []
     corpus, _ = _artifact_reference_corpus(exclude_files=exclude_files)
-    data_root = data_path().resolve(strict=False)
+    data_root = content_data_path().resolve(strict=False)
     with _LOCK:
         items = _load_registry()
     owned: list[dict[str, Any]] = []
@@ -160,7 +160,7 @@ def soft_delete_session_group(session_dir: Path, filename: str, *, archive_artif
 
     owned_artifacts = _session_owned_artifacts(session_id, set(candidates)) if (archive_artifacts and session_id) else []
 
-    trash = data_path("outputs", ".trash", "sessions", f"{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex}")
+    trash = content_data_path("outputs", ".trash", "sessions", f"{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex}")
     moved: list[dict[str, Any]] = []
     failed: list[dict[str, str]] = []
     moved_artifacts: list[dict[str, Any]] = []
@@ -174,7 +174,7 @@ def soft_delete_session_group(session_dir: Path, filename: str, *, archive_artif
             except OSError as exc:
                 failed.append({"filename": path.name, "error": str(exc)})
 
-        data_root = data_path().resolve(strict=False)
+        data_root = content_data_path().resolve(strict=False)
         for artifact in owned_artifacts:
             relative = artifact["relative_path"]
             source_path = (data_root / relative).resolve(strict=False)
@@ -227,7 +227,7 @@ def reclaim_expired_session_trash(*, retention_days: int = 30, now: datetime | N
     if retention_days < 0:
         raise ValueError("retention_days must be non-negative")
     current = now or datetime.now()
-    root = data_path("outputs", ".trash", "sessions")
+    root = content_data_path("outputs", ".trash", "sessions")
     removed_groups = 0
     removed_files = 0
     freed_bytes = 0
@@ -272,15 +272,15 @@ def reclaim_expired_session_trash(*, retention_days: int = 30, now: datetime | N
 def lifecycle_report() -> dict[str, Any]:
     """Return a read-only disk-usage summary for lifecycle-managed locations."""
     locations = {
-        "saved_sessions": data_path("outputs", "Session"),
-        "session_trash": data_path("outputs", ".trash", "sessions"),
-        "artifact_trash": data_path("outputs", ".trash", "artifacts"),
-        "upload_trash": data_path("outputs", ".trash", "uploads"),
-        "memory_trash": data_path("outputs", ".trash", "memories"),
-        "uploads": data_path("uploads"),
-        "charts": data_path("outputs", "charts"),
-        "exports": data_path("outputs", "exports"),
-        "memories": data_path("memory"),
+        "saved_sessions": content_data_path("outputs", "Session"),
+        "session_trash": content_data_path("outputs", ".trash", "sessions"),
+        "artifact_trash": content_data_path("outputs", ".trash", "artifacts"),
+        "upload_trash": content_data_path("outputs", ".trash", "uploads"),
+        "memory_trash": content_data_path("outputs", ".trash", "memories"),
+        "uploads": content_data_path("uploads"),
+        "charts": content_data_path("outputs", "charts"),
+        "exports": content_data_path("outputs", "exports"),
+        "memories": content_data_path("memory"),
     }
     report: dict[str, Any] = {"locations": {}, "total_files": 0, "total_bytes": 0}
     for name, root in locations.items():
@@ -293,15 +293,15 @@ def lifecycle_report() -> dict[str, Any]:
 
 
 def _session_trash_root() -> Path:
-    return data_path("outputs", ".trash", "sessions")
+    return content_data_path("outputs", ".trash", "sessions")
 
 
 def _artifact_trash_root() -> Path:
-    return data_path("outputs", ".trash", "artifacts")
+    return content_data_path("outputs", ".trash", "artifacts")
 
 
 def _upload_trash_root() -> Path:
-    return data_path("outputs", ".trash", "uploads")
+    return content_data_path("outputs", ".trash", "uploads")
 
 
 def list_session_trash() -> list[dict[str, Any]]:
@@ -354,7 +354,7 @@ def restore_session_trash(trash_id: str) -> dict[str, Any]:
     if not isinstance(artifacts, list):
         artifacts = []
 
-    session_dir = data_path("outputs", "Session")
+    session_dir = content_data_path("outputs", "Session")
     session_dir.mkdir(parents=True, exist_ok=True)
     sources: list[tuple[Path, Path, str, str]] = []  # (source, destination, kind, registry_id)
     for item in files:
@@ -367,7 +367,7 @@ def restore_session_trash(trash_id: str) -> dict[str, Any]:
             raise ValueError(f"无法恢复：{destination.name} 已存在")
         sources.append((source, destination, "json", ""))
 
-    data_root = data_path().resolve(strict=False)
+    data_root = content_data_path().resolve(strict=False)
     for artifact in artifacts:
         if not isinstance(artifact, dict):
             raise ValueError("回收站项目包含无效产物")
@@ -402,7 +402,7 @@ def restore_session_trash(trash_id: str) -> dict[str, Any]:
 
 
 def _registry_path() -> Path:
-    return data_path("outputs", "lifecycle", "artifacts.json")
+    return content_data_path("outputs", "lifecycle", "artifacts.json")
 
 
 def _load_registry() -> dict[str, dict[str, Any]]:
@@ -458,7 +458,7 @@ def prune_missing_registered() -> dict[str, int]:
     Used to reconcile historical "registered but missing" entries (e.g. files
     removed by earlier cleanup sweeps before registry sync existed).
     """
-    root = data_path().resolve(strict=False)
+    root = content_data_path().resolve(strict=False)
     with _LOCK:
         items = _load_registry()
         removed: list[str] = []
@@ -487,17 +487,35 @@ def register_artifact(
     session_id: str = "",
     workspace_id: str = "",
     artifact_id: str = "",
+    workspace_root: Path | None = None,
 ) -> str:
     """Register an owned artifact under a lifecycle-managed root.
 
-    Unknown or out-of-root files are never registered, so later scans remain
-    conservative and cannot be used to delete arbitrary paths.
+    Files under the application data root enter the global lifecycle registry.
+    A user-selected Workspace may live outside that root; in that case only a
+    file inside ``<workspace>/artifacts`` is accepted, and it is audit-only.
+    External Workspace files deliberately stay out of the global registry so
+    lifecycle cleanup can never delete user-owned project files.
     """
-    root = data_path().resolve(strict=False)
+    root = content_data_path().resolve(strict=False)
     resolved = path.resolve(strict=False)
-    if not path.is_file() or not _within(resolved, root):
+    if not path.is_file():
         raise ValueError("产物路径不在受控数据目录内")
     key = artifact_id or uuid.uuid4().hex
+    if not _within(resolved, root):
+        if workspace_root is None or not workspace_id:
+            raise ValueError("产物路径不在受控数据目录内")
+        artifacts_root = (Path(workspace_root).resolve(strict=False) / "artifacts").resolve(strict=False)
+        if not _within(resolved, artifacts_root):
+            raise ValueError("产物路径不在受控数据目录内")
+        _record("workspace_artifact_registered", {
+            "artifact_id": key,
+            "type": artifact_type,
+            "session_id": session_id,
+            "workspace_id": workspace_id,
+            "size_bytes": resolved.stat().st_size,
+        })
+        return key
     with _LOCK:
         items = _load_registry()
         items[key] = {
@@ -516,8 +534,8 @@ def register_artifact(
 
 def _managed_artifact_dirs() -> dict[str, Path]:
     return {
-        "charts": data_path("outputs", "charts"),
-        "exports": data_path("outputs", "exports"),
+        "charts": content_data_path("outputs", "charts"),
+        "exports": content_data_path("outputs", "exports"),
     }
 
 
@@ -530,7 +548,7 @@ def _safe_relative_path(value: str) -> Path:
 
 def artifact_cleanup_preview() -> dict[str, Any]:
     """List registry-backed artifacts that disappeared and unregistered files."""
-    root = data_path().resolve(strict=False)
+    root = content_data_path().resolve(strict=False)
     managed = _managed_artifact_dirs()
     with _LOCK:
         items = _load_registry()
@@ -565,8 +583,8 @@ def artifact_cleanup_preview() -> dict[str, Any]:
 
 def uploads_storage_preview() -> dict[str, Any]:
     """Classify uploads without deleting or deciding reclaimability."""
-    data_root = data_path().resolve(strict=False)
-    uploads_root = data_path("uploads").resolve(strict=False)
+    data_root = content_data_path().resolve(strict=False)
+    uploads_root = content_data_path("uploads").resolve(strict=False)
     categories: dict[str, dict[str, int]] = {
         "registered_uploads": {"files": 0, "bytes": 0},
         "knowledge": {"files": 0, "bytes": 0},
@@ -634,7 +652,7 @@ def recycle_upload_file(category: str, relative_path: str) -> dict[str, Any]:
     """Move a safe upload-side candidate into managed upload trash."""
     if category not in {"unknown_uploads", "parsed_excel_cache"}:
         raise ValueError("仅支持回收未知上传或 Excel 解析缓存")
-    uploads_root = data_path("uploads").resolve(strict=False)
+    uploads_root = content_data_path("uploads").resolve(strict=False)
     relative = _safe_relative_path(relative_path)
     target = (uploads_root / relative).resolve(strict=False)
     if not target.is_file() or not _within(target, uploads_root):
@@ -645,7 +663,7 @@ def recycle_upload_file(category: str, relative_path: str) -> dict[str, Any]:
     actual_category = "parsed_excel_cache" if parts and parts[0] == ".parsed_excel" else "unknown_uploads"
     if actual_category != category:
         raise ValueError("上传文件分类不匹配")
-    data_root = data_path().resolve(strict=False)
+    data_root = content_data_path().resolve(strict=False)
     registry_path = str(target.relative_to(data_root))
     with _LOCK:
         registered_upload_paths = {
@@ -722,7 +740,7 @@ def restore_upload_trash(trash_id: str) -> dict[str, Any]:
     filename = str(manifest.get("filename") or "")
     relative = _safe_relative_path(str(manifest.get("relative_path") or ""))
     source = (group / Path(filename).name).resolve(strict=False)
-    uploads_root = data_path("uploads").resolve(strict=False)
+    uploads_root = content_data_path("uploads").resolve(strict=False)
     destination = (uploads_root / relative).resolve(strict=False)
     if not filename or not source.is_file() or not _within(source, group) or not _within(destination, uploads_root):
         raise ValueError("上传回收站项目包含无效文件")
@@ -798,7 +816,7 @@ def _artifact_reference_corpus(exclude_files: set[Path] | None = None) -> tuple[
     being archived themselves, so their own references do not count as
     "external" references that would block the archive.
     """
-    roots = [data_path("outputs", "Session")]
+    roots = [content_data_path("outputs", "Session")]
     chunks: list[str] = []
     files = 0
     max_file_bytes = 2_000_000
@@ -826,7 +844,7 @@ def registered_artifact_reference_preview() -> dict[str, Any]:
     This is a preview only. A missing token in saved-session metadata is not
     proof that an artifact is safe to delete; it is only a candidate signal.
     """
-    root = data_path().resolve(strict=False)
+    root = content_data_path().resolve(strict=False)
     with _LOCK:
         items = _load_registry()
     active_items = _active_registry_items(items)
@@ -874,7 +892,7 @@ def recycle_unregistered_artifact(kind: str, relative_path: str) -> dict[str, An
     managed = _managed_artifact_dirs()
     if kind not in managed:
         raise ValueError("仅支持回收 charts / exports 历史产物")
-    root = data_path().resolve(strict=False)
+    root = content_data_path().resolve(strict=False)
     base = managed[kind].resolve(strict=False)
     relative = _safe_relative_path(relative_path)
     target = (base / relative).resolve(strict=False)
@@ -917,7 +935,7 @@ def recycle_registered_artifact(artifact_id: str) -> dict[str, Any]:
     candidate_ids = {str(item) for item in preview.get("unreferenced_ids") or []}
     if artifact_id not in candidate_ids:
         raise ValueError("该产物仍有引用或未进入可回收候选")
-    root = data_path().resolve(strict=False)
+    root = content_data_path().resolve(strict=False)
     with _LOCK:
         items = _load_registry()
         item = items.get(artifact_id)
@@ -1018,7 +1036,7 @@ def restore_artifact_trash(trash_id: str) -> dict[str, Any]:
         destination = (base / relative).resolve(strict=False)
         boundary = base
     else:
-        base = data_path().resolve(strict=False)
+        base = content_data_path().resolve(strict=False)
         destination = (base / relative).resolve(strict=False)
         boundary = base
     if not source.is_file() or not _within(source, group) or not _within(destination, boundary):

@@ -8,7 +8,7 @@ from flask import Blueprint, jsonify, request
 
 from agent.skills import SkillLoader
 from agent.skills.parser import SkillError, parse_skill_file
-from agent.skills.models import SKILL_NAME_RE
+from agent.skills.models import SKILL_NAME_RE, normalize_skill_tags
 
 log = logging.getLogger(__name__)
 
@@ -37,17 +37,20 @@ def _resolve_skill(name, sid=""):
     return skill.path, skill.source
 
 
-def _build_skill_md(name, description, icon, allowed_tools, prompt):
+def _build_skill_md(name, description, icon, allowed_tools, tags, prompt):
     """Build SKILL.md file content from form fields."""
     tools_yaml = ""
     if allowed_tools:
         tools_str = ", ".join(str(t) for t in allowed_tools)
         tools_yaml = "\nallowedTools: [" + tools_str + "]"
+    tags_yaml = ""
+    if tags:
+        tags_yaml = "\ntags: [" + ", ".join(tags) + "]"
     return (
         "---\n"
         f"name: {name}\n"
         f"description: {description}\n"
-        f"icon: {icon}{tools_yaml}\n"
+        f"icon: {icon}{tools_yaml}{tags_yaml}\n"
         "---\n"
         f"{prompt}\n"
     )
@@ -58,6 +61,9 @@ def list_skills():
     """List all available skills (builtin + user + workspace)."""
     workspace_dir = None
     sid = (request.args.get("sid") or "").strip()
+    mode = (request.args.get("mode") or "").strip().lower()
+    if mode and mode not in {"business", "ml", "empirical"}:
+        return jsonify({"ok": False, "error": "Unknown analysis mode."}), 400
     if sid:
         from data.workspace import workspace_manager
         runtime = workspace_manager.get(sid)
@@ -69,7 +75,10 @@ def list_skills():
         from agent.workflows.skills import session_workflow_skills
         for name, skill in session_workflow_skills(sid).items():
             loaded.setdefault(name, skill)
-    skills = [skill.to_public_dict() for skill in loaded.values()]
+    skills = [
+        skill.to_public_dict() for skill in loaded.values()
+        if not mode or skill.supports_analysis_mode(mode)
+    ]
     return jsonify({
         "skills": skills,
         "diagnostics": [item.to_dict() for item in loader.diagnostics()],
@@ -93,8 +102,10 @@ def get_skill_detail(name):
                     "icon": workflow_skill.icon,
                     "source": workflow_skill.source,
                     "allowed_tools": list(workflow_skill.allowed_tools),
+                    "tags": list(workflow_skill.tags),
                     "path": "",
                     "readonly": True,
+                    "prompt": workflow_skill.prompt,
                     "raw": workflow_skill.prompt,
                 },
             })
@@ -118,8 +129,10 @@ def get_skill_detail(name):
             "icon": skill.icon,
             "source": skill.source,
             "allowed_tools": list(skill.allowed_tools),
+            "tags": list(skill.tags),
             "path": str(path),
             "readonly": source == "builtin",
+            "prompt": skill.prompt,
             "raw": raw,
         },
     })
@@ -136,6 +149,10 @@ def create_skill():
     allowed_tools = body.get("allowed_tools", [])
     if not isinstance(allowed_tools, list):
         allowed_tools = []
+    try:
+        tags = normalize_skill_tags(body.get("tags", []))
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
 
     if not SKILL_NAME_RE.fullmatch(name):
         return jsonify({"ok": False, "error": "Name must start with lowercase letter, only lowercase/digits/hyphens (2-64 chars)."}), 400
@@ -155,7 +172,7 @@ def create_skill():
         return jsonify({"ok": False, "error": "Skill already exists."}), 409
 
     skill_dir.mkdir(parents=True, exist_ok=True)
-    content = _build_skill_md(name, description, icon, allowed_tools, prompt)
+    content = _build_skill_md(name, description, icon, allowed_tools, tags, prompt)
     skill_file.write_text(content, encoding="utf-8")
     log.info("[skills] created user skill %r at %s", name, skill_file)
     return jsonify({"ok": True, "name": name}), 201
@@ -179,6 +196,10 @@ def update_skill(name):
     allowed_tools = body.get("allowed_tools", [])
     if not isinstance(allowed_tools, list):
         allowed_tools = []
+    try:
+        tags = normalize_skill_tags(body.get("tags", []))
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
     new_name = str(body.get("name", name)).strip()
 
     if not SKILL_NAME_RE.fullmatch(new_name):
@@ -196,12 +217,12 @@ def update_skill(name):
         if skill_file.exists():
             return jsonify({"ok": False, "error": "Skill name already exists."}), 409
         skill_dir.mkdir(parents=True, exist_ok=True)
-        skill_file.write_text(_build_skill_md(new_name, description, icon, allowed_tools, prompt), encoding="utf-8")
+        skill_file.write_text(_build_skill_md(new_name, description, icon, allowed_tools, tags, prompt), encoding="utf-8")
         old_dir = user_dir / name
         if old_dir.exists():
             shutil.rmtree(old_dir, ignore_errors=True)
     else:
-        skill_file.write_text(_build_skill_md(name, description, icon, allowed_tools, prompt), encoding="utf-8")
+        skill_file.write_text(_build_skill_md(name, description, icon, allowed_tools, tags, prompt), encoding="utf-8")
 
     log.info("[skills] updated user skill %r", new_name)
     return jsonify({"ok": True, "name": new_name})

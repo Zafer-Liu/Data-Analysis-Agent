@@ -22,6 +22,12 @@ function setSidebarNav(nav = "agent") {
 // ── Open / close independent panel (skills / knowledge / mcp) ─────
 
 function openPanel(name) {
+  // Close the sessions/sources drawer — panels share the same expanding
+  // column slot, so only one may be open at a time.
+  const drawer = $("sb-drawer");
+  if (drawer && !drawer.classList.contains("collapsed")) {
+    drawer.classList.add("collapsed");
+  }
   // Close the current panel if it is a different one.
   if (_activePanel && _activePanel !== name) {
     _closePanel(_activePanel, { restoreNav: false });

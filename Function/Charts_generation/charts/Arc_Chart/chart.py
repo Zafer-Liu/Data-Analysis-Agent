@@ -23,31 +23,44 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from charts.base import ChartResult
 
+try:
+    from charts.color_schemes import get_color_scheme
+except ImportError as e:  # pragma: no cover - 兜底，保证独立调用可用
+    log.debug("[chart] 配色模块加载失败: %s", e)
+    def get_color_scheme(name: str = "mckinsey"):
+        return {"colors": [
+            "#1F77B4", "#D62728", "#2CA02C", "#FF7F0E", "#9467BD",
+            "#8C564B", "#E377C2", "#17BECF", "#BCBD22", "#7F7F7F",
+            "#003F5C", "#FFA600", "#665191", "#2F4B7C", "#A05195",
+            "#D45087", "#F95D6A", "#00A676", "#3A86FF", "#FF006E"
+        ]}
+
 __all__ = ["generate"]
 
 _DATA_FMT = "source列 + target列 + value列"
 _DESC = "底部节点使用半圆表示节点规模，半圆之间的上拱弧带表示关系，弧带宽度表示关系强度；弧带颜色=流出(source)节点颜色。"
 
 
-def _auto_col(df: pd.DataFrame, *hints: str) -> Optional[str]:
-    strs = [c for c in df.columns if df[c].dtype == object or df[c].dtype == "string"]
-    nums = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-    col_lower = {c.lower(): c for c in df.columns}
+def _auto_col(df: pd.DataFrame, *hints: str, exclude: set = None) -> Optional[str]:
+    exclude = exclude or set()
+    strs = [c for c in df.columns if c not in exclude and (df[c].dtype == object or pd.api.types.is_string_dtype(df[c]))]
+    nums = [c for c in df.columns if c not in exclude and pd.api.types.is_numeric_dtype(df[c])]
+    col_lower = {str(c).lower(): c for c in df.columns if c not in exclude}
 
     for h in hints:
-        h2 = h.lower()
+        h2 = str(h).lower()
         if h2 in col_lower:
             return col_lower[h2]
 
     for h in hints:
-        h2 = h.lower()
+        h2 = str(h).lower()
         for col in df.columns:
-            c = col.lower()
+            c = str(col).lower()
             if h2 in c or c in h2:
                 return col
 
     if hints:
-        h0 = hints[0].lower()
+        h0 = str(hints[0]).lower()
         if any(k in h0 for k in ["source", "target", "label", "name", "group", "category"]):
             return strs[0] if strs else (nums[0] if nums else None)
         if any(k in h0 for k in ["value", "size", "amount", "count", "frequency"]):
@@ -166,19 +179,34 @@ def generate(
     if df is None or len(df) == 0:
         return ChartResult(warnings=["输入数据为空"])
 
-    src_col = mapping.get("source") or source
-    tgt_col = mapping.get("target") or target
-    val_col = mapping.get("value") or value
+    # chart_selector 声明 required_roles=["x","y","z"]（流出x + 流入y + 流出值z），
+    # 调度器不做 x→source 转换。这里同时接受 selector 规范 (x/y/z) 与语义别名
+    # (source/target/value)，使两种 payload 都能正确解析。
+    src_col = mapping.get("source")
+    src_col = src_col if src_col is not None else (mapping.get("x") if mapping.get("x") is not None else source)
+    tgt_col = mapping.get("target")
+    tgt_col = tgt_col if tgt_col is not None else (mapping.get("y") if mapping.get("y") is not None else target)
+    val_col = mapping.get("value")
+    val_col = val_col if val_col is not None else (mapping.get("z") if mapping.get("z") is not None else value)
     title = options.get("title", title)
 
-    _src = _auto_col(df, src_col, "source", "起点", "from")
-    _tgt = _auto_col(df, tgt_col, "target", "终点", "to")
-    _val = _auto_col(df, val_col, "value", "数值", "amount", "权重")
+    # 链式 exclude：source/target/value 依次排除已解析列，避免无 hint 时
+    # 三者回退到同一 strs[0]，产生 df[[c,c,v]] 重复列导致下游崩溃
+    _excl: set = set()
+    _src = _auto_col(df, src_col, "source", "x", "起点", "from")
+    if _src:
+        _excl.add(_src)
+    _tgt = _auto_col(df, tgt_col, "target", "y", "终点", "to", exclude=_excl)
+    if _tgt:
+        _excl.add(_tgt)
+    _val = _auto_col(df, val_col, "value", "z", "数值", "amount", "权重", exclude=_excl)
 
     for role, col_ in [("source", _src), ("target", _tgt), ("value", _val)]:
         if col_ is None or col_ not in df.columns:
             warnings.append(f"找不到必填字段 [{role}]")
-    if _src is None or _tgt is None or _val is None:
+    if _src is None or _tgt is None or _val is None or _src == _tgt:
+        if _src == _tgt and _src is not None:
+            warnings.append("source 与 target 解析到同一列，请提供显式映射")
         return ChartResult(warnings=warnings)
 
     d = df[[_src, _tgt, _val]].dropna().copy()
@@ -218,12 +246,15 @@ def generate(
     node_r = {n: _normalize(node_size[n], ns_min, ns_max, r_min, r_max) for n in nodes}
 
     # 高对比类别色板（避免浅色，强化类别区分）
-    strong_palette = options.get("palette", [
+    # 配色方案：优先用 options.color_scheme，回退到内置色板
+    _scheme = get_color_scheme(options.get("color_scheme", "mckinsey"))
+    _palette = _scheme.get("colors") or [
         "#1F77B4", "#D62728", "#2CA02C", "#FF7F0E", "#9467BD",
         "#8C564B", "#E377C2", "#17BECF", "#BCBD22", "#7F7F7F",
         "#003F5C", "#FFA600", "#665191", "#2F4B7C", "#A05195",
         "#D45087", "#F95D6A", "#00A676", "#3A86FF", "#FF006E"
-    ])
+    ]
+    strong_palette = options.get("palette", _palette)
     node_color = {n: strong_palette[i % len(strong_palette)] for i, n in enumerate(nodes)}
 
     fig = go.Figure()

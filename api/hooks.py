@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, abort, jsonify, request
+from infrastructure.paths import is_cloud_managed_runtime
 
 from agent.hooks.events import DISPATCHED_EVENTS, EVENT_ALIASES, SUPPORTED_EVENTS
 from agent.hooks.loader import ACTION_TYPES, ONCE_SCOPES, HookConfigError, load_settings, serialize_settings
@@ -10,6 +11,12 @@ from agent.hooks.models import HookContext
 from data.hooks_store import clear_hook_history, list_hook_history, load_raw_settings, save_raw_settings
 
 bp = Blueprint("hooks", __name__)
+
+
+@bp.before_request
+def _disable_shared_hooks_in_cloud():
+    if is_cloud_managed_runtime():
+        abort(404)
 
 
 @bp.get("/api/hooks/history")

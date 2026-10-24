@@ -15,7 +15,20 @@ MAX_DISPLAY_ROWS = 200   # max rows shown to the LLM in query results
 class DataSource:
     name: str = ""
 
-    def get_schema(self) -> str:
+    def writable_conn(self):
+        """The connection that write SQL (A6) should execute against.
+
+        Memory-backed sources (``:memory:`` DuckDB) return ``self._conn``
+        directly — writes are naturally ephemeral. File-backed sources
+        override this to lazily build an in-memory snapshot (副 sheet) so
+        the on-disk database is never touched by agent SQL.
+        """
+        return getattr(self, "_conn", None)
+
+    def list_tables(self) -> List[str]:
+        """Return ALL table names currently in the data source, including
+        analysis/derived tables created at runtime via create_analysis_table.
+        Subclasses backed by DuckDB should query information_schema."""
         raise NotImplementedError
 
     def execute_query(self, sql: str) -> Tuple[pd.DataFrame, str]:
@@ -33,12 +46,6 @@ class DataSource:
     def create_analysis_table(
         self, sql: str, table_name: str = "analysis_data", _df=None
     ) -> str:
-        raise NotImplementedError
-
-    def list_tables(self) -> List[str]:
-        """Return ALL table names currently in the data source, including
-        analysis/derived tables created at runtime via create_analysis_table.
-        Subclasses backed by DuckDB should query information_schema."""
         raise NotImplementedError
 
     @staticmethod

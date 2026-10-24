@@ -10,8 +10,12 @@ import { getUiIsland } from "../core/ui-registry.js";
     ollama:     { label: "Ollama (本地)",     icon: COMMON_ICON, local: true },
   };
   const MODEL_PICKER = {
-    index: 0,
+    // -1 means no keyboard-highlighted item. The picker previously started at
+    // index 0, which made the first model (currently GLM-5.3) look selected
+    // even when another model was active.
+    index: -1,
     models: [],
+    loadError: "",
   };
 
   // 判断 base_url 是否本地地址（与后端 _is_local_base_url 保持一致）
@@ -33,13 +37,34 @@ import { getUiIsland } from "../core/ui-registry.js";
 
   function _modelLabel(key, cfg) {
     if (!key) return t('sidebar.model_placeholder') || "— 选择模型 —";
+    if (cfg?.is_hosted) return cfg.display_name || cfg.name || "免费模型";
     return cfg?.is_custom
       ? (cfg.name || cfg.model || key)
       : (BUILTIN_META[key]?.label || cfg?.model || key);
   }
 
+  function _formatWeight(value) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed >= 0
+      ? `${parsed.toFixed(2).replace(/\.?0+$/, "")}×`
+      : "";
+  }
+
+  function _modelRateLabel(cfg) {
+    if (!cfg?.is_hosted) return "";
+    const input = Number(cfg.input_multiplier ?? cfg.quota_multiplier);
+    const output = Number(cfg.output_multiplier ?? cfg.quota_multiplier);
+    if (!Number.isFinite(input) || input < 0 || !Number.isFinite(output) || output < 0) {
+      return "";
+    }
+    const combined = _formatWeight((input + output) / 2);
+    if (!combined) return "";
+    return input === output ? combined : `≈ ${combined}`;
+  }
+
   function _modelDescription(key, cfg) {
     if (!cfg) return key || "";
+    if (cfg.is_hosted) return cfg.description || "使用每日赠送额度";
     const parts = [];
     if (cfg.model) parts.push(cfg.model);
     if (cfg.base_url) parts.push(cfg.base_url);
@@ -53,8 +78,26 @@ import { getUiIsland } from "../core/ui-registry.js";
         key,
         label: _modelLabel(key, cfg),
         description: _modelDescription(key, cfg),
-        source: cfg.is_custom ? "自定义" : "内置",
-      }));
+        source: cfg.is_hosted
+          ? (cfg.requires_paid_balance
+            ? (cfg.selectable
+              ? (t("model_picker.paid_quota") || "额度余额")
+              : (t("model_picker.paid_required") || "需要额度"))
+            : (t("model_picker.daily_quota") || "每日赠送额度"))
+          : (cfg.is_custom
+            ? (t("model_picker.custom") || "自定义")
+            : (t("model_picker.configured") || "已配置")),
+        group: cfg.is_hosted ? "hosted" : "personal",
+        tier: cfg.tier || "",
+        isHosted: Boolean(cfg.is_hosted),
+        selectable: cfg.selectable !== false,
+        rateLabel: _modelRateLabel(cfg),
+      }))
+      .sort((a, b) => {
+        if (a.group !== b.group) return a.group === "hosted" ? -1 : 1;
+        const tierOrder = { advanced: 0, standard: 1, free: 2 };
+        return (tierOrder[a.tier] ?? 9) - (tierOrder[b.tier] ?? 9);
+      });
   }
 
   function _syncModelLabels(value) {
@@ -78,20 +121,57 @@ import { getUiIsland } from "../core/ui-registry.js";
   }
 
   async function loadModels() {
-    const r = await fetch("/api/models");
-    const models = await r.json();
+    const [configuredResponse, catalogResponse] = await Promise.all([
+      fetch("/api/models").catch(() => null),
+      fetch("/api/models/catalog", { cache: "no-store" }).catch(() => null),
+    ]);
+    const configuredModels = configuredResponse?.ok ? await configuredResponse.json() : {};
+    let catalog = { models: [], default_model_id: null };
+    MODEL_PICKER.loadError = "";
+    if (catalogResponse?.ok) {
+      catalog = await catalogResponse.json();
+    } else {
+      const failure = catalogResponse
+        ? await catalogResponse.json().catch(() => ({}))
+        : {};
+      MODEL_PICKER.loadError = failure.error
+        || t("model_picker.load_failed")
+        || "无法加载内置模型，请检查网络或重新登录。";
+    }
+    const hostedModels = Object.fromEntries((catalog.models || [])
+      .filter(item => item?.available && item?.id)
+      .map(item => [item.id, {
+        provider: item.id,
+        model: item.public_model_name || item.display_name,
+        name: item.display_name,
+        display_name: item.display_name,
+        public_model_name: item.public_model_name || "",
+        description: item.description || "",
+        tier: item.tier || "free",
+        quota_source: item.quota_source || "daily_gift",
+        quota_multiplier: item.quota_multiplier ?? 1,
+        input_multiplier: item.input_multiplier ?? item.quota_multiplier ?? 1,
+        output_multiplier: item.output_multiplier ?? item.quota_multiplier ?? 1,
+        cache_read_multiplier: item.cache_read_multiplier ?? item.quota_multiplier ?? 1,
+        cache_write_multiplier: item.cache_write_multiplier ?? item.quota_multiplier ?? 1,
+        requires_paid_balance: Boolean(item.requires_paid_balance),
+        selectable: item.selectable !== false,
+        enabled: true,
+        is_custom: false,
+        is_hosted: true,
+        has_api_key: true,
+      }]));
+    const models = { ...hostedModels, ...configuredModels };
     state.modelConfigs = models;
     const selectors = _modelSelectors();
     const prevValue = selectors.map(select => select.value).find(Boolean) || "";
     for (const sel of selectors) {
       sel.innerHTML = `<option value="">${t('sidebar.model_placeholder')}</option>`;
       for (const [key, cfg] of Object.entries(models)) {
-        if (!cfg.has_api_key) continue;
+        if (!cfg.has_api_key || cfg.selectable === false) continue;
         const opt = document.createElement("option");
         opt.value = key;
-        opt.textContent = cfg.is_custom
-          ? (cfg.name || cfg.model || key)
-          : (BUILTIN_META[key]?.label || cfg.model || key);
+        opt.textContent = _modelLabel(key, cfg);
         sel.appendChild(opt);
       }
     }
@@ -101,17 +181,28 @@ import { getUiIsland } from "../core/ui-registry.js";
       _syncModelSelectors(prevValue);
     } else if (_firstLoad && primary && primary.options.length > 1) {
       // 仅首次加载且之前没有选中值时，才自动选第一个并通知后端
-      _syncModelSelectors(primary.options[1].value);
-      onModelChange(primary.options[1].value);
+      const defaultValue = [...primary.options]
+        .find(option => option.value === catalog.default_model_id)?.value
+        || primary.options[1].value;
+      _syncModelSelectors(defaultValue);
+      onModelChange(defaultValue);
     } else {
       _syncModelSelectors(primary?.value || "");
     }
     // 后续刷新时若 prevValue 已不存在（模型被删除），保持空选择，不强制切换
-    _firstLoad = false;
+    if (!MODEL_PICKER.loadError || Object.keys(models).length) _firstLoad = false;
   }
 
   async function onModelChange(value) {
     const v = value !== undefined ? value : $("model-sel").value;
+    const previous = $("model-sel")?.value || "";
+    if (state.modelConfigs?.[v]?.selectable === false) {
+      window.BAA.overlay.toast(
+        t("model_picker.paid_required_detail") || "该模型需要可用额度，请先获取或购买额度。",
+        "err",
+      );
+      return;
+    }
     _syncModelSelectors(v);
     closeModelPicker();
     // Switching the model invalidates any previous "tested OK" indicator.
@@ -119,9 +210,23 @@ import { getUiIsland } from "../core/ui-registry.js";
     if (!v || !state.SID) return;
     const response = await fetch(`/api/session/${state.SID}/model`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ provider: v }),
+      body: JSON.stringify({ model_id: v }),
     });
-    if (response.ok) await window.BAA.slash?.loadCommands?.();
+    if (!response.ok) {
+      const failure = await response.json().catch(() => ({}));
+      _syncModelSelectors(previous);
+      window.BAA.overlay.toast(
+        failure.error || t("model_picker.select_failed") || "模型切换失败",
+        "err",
+      );
+      await loadModels();
+      return;
+    }
+    await window.BAA.slash?.loadCommands?.();
+    if (state.modelConfigs?.[v]?.is_hosted) {
+      _setDotState(v, "ok");
+      return;
+    }
     // Auto-test the freshly selected model. Fire-and-forget — the function
     // owns its own UI feedback (dot colour + failure modal).
     testModel(v);
@@ -141,35 +246,82 @@ import { getUiIsland } from "../core/ui-registry.js";
     const list = $("model-picker-list");
     if (!list) return;
     const term = String(filter || "").trim().toLowerCase();
-    MODEL_PICKER.models = _availableModels().filter(item => !term
+    const availableModels = _availableModels();
+    MODEL_PICKER.models = availableModels.filter(item => !term
       || item.label.toLowerCase().includes(term)
       || item.description.toLowerCase().includes(term)
       || item.key.toLowerCase().includes(term));
     list.innerHTML = "";
     if (!MODEL_PICKER.models.length) {
-      list.innerHTML = `<div class="skill-picker-empty">${_esc(t("model_picker.empty") || "没有匹配的模型")}</div>`;
+      const empty = document.createElement("div");
+      empty.className = "skill-picker-empty model-picker-empty-state";
+      const message = document.createElement("span");
+      const loadFailed = !availableModels.length && Boolean(MODEL_PICKER.loadError);
+      message.textContent = loadFailed
+        ? MODEL_PICKER.loadError
+        : (t("model_picker.empty") || "没有匹配的模型");
+      empty.appendChild(message);
+      if (loadFailed) {
+        const retry = document.createElement("button");
+        retry.type = "button";
+        retry.className = "model-picker-retry";
+        retry.textContent = t("model_picker.retry") || "重新加载";
+        retry.addEventListener("click", async () => {
+          retry.disabled = true;
+          await loadModels();
+          renderModelPicker($("model-picker-search")?.value || "");
+        });
+        empty.appendChild(retry);
+      }
+      list.appendChild(empty);
       return;
     }
     const selected = $("model-sel")?.value || "";
+    let currentGroup = "";
     MODEL_PICKER.models.forEach((model, index) => {
+      if (model.group !== currentGroup) {
+        currentGroup = model.group;
+        const heading = document.createElement("div");
+        heading.className = "model-picker-group";
+        heading.textContent = currentGroup === "hosted"
+          ? (t("model_picker.group_builtin") || "内置模型")
+          : (t("model_picker.group_personal") || "我的模型");
+        list.appendChild(heading);
+      }
       const button = document.createElement("button");
       button.type = "button";
       button.className = [
         "skill-picker-item",
         "model-picker-item",
+        model.isHosted ? "model-picker-item--hosted" : "",
+        model.tier ? `model-picker-item--${model.tier}` : "",
+        !model.selectable ? "model-picker-item--locked" : "",
         model.key === selected ? "selected" : "",
         index === MODEL_PICKER.index ? "active" : "",
       ].filter(Boolean).join(" ");
       button.dataset.model = model.key;
+      button.disabled = !model.selectable;
       button.setAttribute("role", "option");
       button.setAttribute("aria-selected", String(model.key === selected));
+      button.setAttribute("aria-disabled", String(!model.selectable));
+      const tierLabel = model.tier === "free"
+        ? (t("model_picker.tier_free") || "免费")
+        : ({
+          advanced: t("model_picker.tier_advanced") || "高级",
+          standard: t("model_picker.tier_standard") || "标准",
+        })[model.tier] || "";
       button.innerHTML = `
-        <span class="skill-picker-icon model-picker-icon">AI</span>
+        <span class="skill-picker-icon model-picker-icon" aria-hidden="true">${model.isHosted
+          ? '<svg viewBox="0 0 24 24"><path d="M13 2 5.5 13H11l-1 9L18.5 10H13z"/></svg>'
+          : "AI"}</span>
         <span class="skill-picker-copy">
-          <strong>${_esc(model.label)}</strong>
+          <span class="model-picker-title"><strong>${_esc(model.label)}</strong>${tierLabel
+            ? `<em>${_esc(tierLabel)}</em>` : ""}</span>
           <small>${_esc(model.description || model.key)}</small>
         </span>
-        <span class="skill-picker-source">${_esc(model.source)}</span>`;
+        <span class="skill-picker-source model-picker-rate"${model.rateLabel
+          ? ` title="${_esc(t("model_picker.blended_rate_hint") || "综合倍率仅用于快速比较，实际扣费以本次用量为准。")}"`
+          : ""}>${_esc(model.rateLabel || model.source)}</span>`;
       button.addEventListener("click", () => selectModel(model.key));
       list.appendChild(button);
     });
@@ -200,7 +352,7 @@ import { getUiIsland } from "../core/ui-registry.js";
     window.BAA.slash?.closeSlashPopup?.();
     const button = trigger?.closest?.("#model-picker-trigger, #model-picker-trigger-sidebar")
       || $("model-picker-trigger");
-    MODEL_PICKER.index = 0;
+    MODEL_PICKER.index = -1;
     if (!Object.keys(state.modelConfigs || {}).length) await loadModels();
     const search = $("model-picker-search");
     if (search) search.value = "";
@@ -208,7 +360,7 @@ import { getUiIsland } from "../core/ui-registry.js";
     _positionModelPicker(button);
     $("model-picker")?.classList.add("open");
     _syncModelLabels($("model-sel")?.value || "");
-    search?.focus();
+    search?.focus({ preventScroll: true });
   }
 
   function closeModelPicker() {
@@ -227,7 +379,7 @@ import { getUiIsland } from "../core/ui-registry.js";
   }
 
   function onModelSearch(event) {
-    MODEL_PICKER.index = 0;
+    MODEL_PICKER.index = -1;
     renderModelPicker(event.target.value);
   }
 
@@ -237,16 +389,27 @@ import { getUiIsland } from "../core/ui-registry.js";
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       const delta = event.key === "ArrowDown" ? 1 : -1;
-      MODEL_PICKER.index = Math.max(0, Math.min(items.length - 1, MODEL_PICKER.index + delta));
+      if (!items.length) return;
+      MODEL_PICKER.index = MODEL_PICKER.index < 0
+        ? (delta > 0 ? 0 : items.length - 1)
+        : Math.max(0, Math.min(items.length - 1, MODEL_PICKER.index + delta));
       renderModelPicker(event.currentTarget.value);
       document.querySelectorAll("#model-picker-list .model-picker-item")[MODEL_PICKER.index]
         ?.scrollIntoView({ block: "nearest" });
       return;
     }
-    if (event.key === "Enter" && items[MODEL_PICKER.index]) {
+    if (event.key === "Enter" && MODEL_PICKER.index >= 0 && items[MODEL_PICKER.index]) {
       event.preventDefault();
       selectModel(items[MODEL_PICKER.index].dataset.model);
     }
+  }
+
+  function onModelPickerScroll(event) {
+    const picker = $("model-picker");
+    if (!picker?.classList.contains("open")) return;
+    const target = event.target;
+    if (target instanceof Node && picker.contains(target)) return;
+    closeModelPicker();
   }
 
   // ── Model connection test ─────────────────────────────────────────
@@ -649,7 +812,7 @@ import { getUiIsland } from "../core/ui-registry.js";
   modelSearch?.addEventListener("input", onModelSearch);
   modelSearch?.addEventListener("keydown", onModelKeyDown);
   window.addEventListener("resize", closeModelPicker);
-  window.addEventListener("scroll", closeModelPicker, true);
+  window.addEventListener("scroll", onModelPickerScroll, true);
 
 export const models = Object.freeze({
     loadModels, onModelChange, loadBuiltinProviders, renderBuiltinProviders, renderCustomList,

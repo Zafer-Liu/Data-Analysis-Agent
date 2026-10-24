@@ -33,6 +33,16 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from charts.base import ChartResult
 
+try:
+    from charts.color_schemes import get_color_scheme
+except ImportError as e:  # pragma: no cover - 兜底，保证独立调用可用
+    log.debug("[chart] 配色模块加载失败: %s", e)
+    def get_color_scheme(name: str = "mckinsey"):
+        return {"colors": [
+            "#003D7A", "#0084D1", "#00A4EF", "#7FBA00", "#FFB81C",
+            "#F7630C", "#DA3B01", "#A4373A", "#6B2C91", "#00B4EF",
+        ]}
+
 __all__ = ["generate"]
 
 _DATA_FMT = "长格式：x列(时间) + y列(排名/分数) + group列(实体名称) | 宽格式：首列为时间，其余列为实体数据"
@@ -61,16 +71,16 @@ def _auto_col(df: pd.DataFrame, role: str, exclude: set = None) -> Optional[str]
         exclude: 已使用的列名集合
     """
     exclude = exclude or set()
-    strs = [c for c in df.columns if df[c].dtype == object and c not in exclude]
+    strs = [c for c in df.columns if (df[c].dtype == object or pd.api.types.is_string_dtype(df[c])) and c not in exclude]
     nums = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c]) and c not in exclude]
-    col_lower = {c.lower(): c for c in df.columns if c not in exclude}
+    col_lower = {str(c).lower(): c for c in df.columns if c not in exclude}
     
     if role == "x":
         # x 优先查找时间列
         time_hints = ["date", "time", "month", "year", "week", "day", "period", "时间", "日期", "月份", "年份", "年度"]
         for hint in time_hints:
-            if hint.lower() in col_lower:
-                return col_lower[hint.lower()]
+            if str(hint).lower() in col_lower:
+                return col_lower[str(hint).lower()]
         # 回退到第一个字符串列
         if strs:
             return strs[0]
@@ -81,8 +91,8 @@ def _auto_col(df: pd.DataFrame, role: str, exclude: set = None) -> Optional[str]
         # y 优先查找排名/分数列
         rank_hints = ["rank", "ranking", "score", "value", "排名", "分数", "评分", "数值"]
         for hint in rank_hints:
-            if hint.lower() in col_lower:
-                return col_lower[hint.lower()]
+            if str(hint).lower() in col_lower:
+                return col_lower[str(hint).lower()]
         # 回退到第一个数值列
         if nums:
             return nums[0]
@@ -93,8 +103,8 @@ def _auto_col(df: pd.DataFrame, role: str, exclude: set = None) -> Optional[str]
         # group 优先查找实体/分组列
         group_hints = ["group", "entity", "name", "category", "country", "brand", "team", "分组", "实体", "名称", "国家", "品牌", "球队"]
         for hint in group_hints:
-            if hint.lower() in col_lower:
-                return col_lower[hint.lower()]
+            if str(hint).lower() in col_lower:
+                return col_lower[str(hint).lower()]
         # 回退到第一个字符串列
         if strs:
             return strs[0]
@@ -197,9 +207,12 @@ def generate(
         else:
             return ChartResult(warnings=["请提供 df 或 excel_path"])
 
-    x_col = mapping.get("x") or x
-    y_col = mapping.get("y") or y
-    group_col = mapping.get("group") or group
+    x_col = mapping.get("x")
+    x_col = x_col if x_col is not None else x
+    y_col = mapping.get("y")
+    y_col = y_col if y_col is not None else y
+    group_col = mapping.get("group")
+    group_col = group_col if group_col is not None else group
     title = options.get("title", title)
 
     # 新增：模式参数
@@ -302,6 +315,10 @@ def generate(
             warnings.append(f"实体数过多({n_groups}个)，建议 ≤15")
 
         # 绘图
+        # 配色方案：优先用 options.color_scheme，回退到 MCKINSEY_COLORS
+        _scheme = get_color_scheme(options.get("color_scheme", "mckinsey"))
+        _palette = _scheme.get("colors") or MCKINSEY_COLORS
+
         fig = go.Figure()
         groups = sorted(df_plot[_group].astype(str).unique())
 
@@ -314,11 +331,11 @@ def generate(
                 continue
 
             if highlight and group_val in [str(h) for h in highlight]:
-                color = MCKINSEY_COLORS[0]
+                color = _palette[0]
                 width = 4.5
                 opacity = 1.0
             else:
-                color = MCKINSEY_COLORS[(idx + 1) % len(MCKINSEY_COLORS)]
+                color = _palette[(idx + 1) % len(_palette)]
                 width = 2.8
                 opacity = 0.9
 

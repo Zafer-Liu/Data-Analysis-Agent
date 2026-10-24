@@ -25,7 +25,6 @@ import "../legacy/datasource.js";
 import "../legacy/preview.js";
 import "./legacy-stream.js";
 import "../legacy/app_settings.js";
-import '../legacy/lifecycle_settings.js';
 import "../legacy/job_history.js";
 import "../legacy/sessions.js";
 import "../legacy/autosave.js";

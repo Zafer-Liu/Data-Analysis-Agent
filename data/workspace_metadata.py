@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from infrastructure.paths import data_path
+from infrastructure.paths import content_data_path
 
 
 WORKSPACE_SCHEMA_VERSION = 1
@@ -187,7 +187,7 @@ class WorkspaceMetadataStore:
     """Create/load stable workspace identities and maintain a global index."""
 
     def __init__(self, index_path: Path | str | None = None):
-        self.index_path = Path(index_path or data_path("outputs", "workspaces", "index.json"))
+        self.index_path = Path(index_path or content_data_path("outputs", "workspaces", "index.json"))
 
     @staticmethod
     def metadata_path(root: Path | str) -> Path:

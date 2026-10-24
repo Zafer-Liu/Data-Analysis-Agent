@@ -25,14 +25,6 @@ import pandas as pd
 import plotly.graph_objects as go
 import plotly.io as pio
 
-import sys
-from pathlib import Path
-from typing import Dict, Any, Optional, List, Union
-
-import pandas as pd
-import plotly.graph_objects as go
-import plotly.io as pio
-
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
@@ -62,7 +54,7 @@ def _get_colors_for_scheme(color_scheme_name: str, count: int = 10) -> List[str]
 
 
 def _auto_col(df: pd.DataFrame, *hints: str) -> Optional[str]:
-    strs = [c for c in df.columns if df[c].dtype == object or str(df[c].dtype) == "string"]
+    strs = [c for c in df.columns if (df[c].dtype == object or pd.api.types.is_string_dtype(df[c]))]
     nums = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
     col_lower = {str(c).lower(): c for c in df.columns}
 
@@ -101,7 +93,7 @@ def _detect_wide_format(df: pd.DataFrame):
     rest_cols = list(df.columns[1:])
 
     first_ok = False
-    if df[id_col].dtype == object or str(df[id_col].dtype) == "string":
+    if df[id_col].dtype == object or pd.api.types.is_string_dtype(df[id_col]):
         first_ok = True
     elif pd.api.types.is_datetime64_any_dtype(df[id_col]):
         first_ok = True
@@ -158,9 +150,12 @@ def generate(
         else:
             return ChartResult(warnings=["请提供 df 或 excel_path"])
 
-    x_col = mapping.get("x") or x
-    y_cols = mapping.get("y") or y
-    series_col = mapping.get("series") or mapping.get("color") or None
+    x_col = mapping.get("x")
+    x_col = x_col if x_col is not None else x
+    y_cols = mapping.get("y")
+    y_cols = y_cols if y_cols is not None else y
+    series_col = mapping.get("series")
+    series_col = series_col if series_col is not None else (mapping.get("color") if mapping.get("color") is not None else None)
     title = options.get("title", title)
     color_scheme_name = options.get("color_scheme", "mckinsey")
 

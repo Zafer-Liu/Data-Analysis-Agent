@@ -43,7 +43,7 @@ from infrastructure.artifact_lifecycle import (
     prune_registry_for_paths,
     soft_delete_session_group,
 )
-from infrastructure.paths import data_root
+from infrastructure.paths import content_data_root, is_cloud_managed_runtime
 
 log = logging.getLogger(__name__)
 
@@ -53,10 +53,19 @@ log = logging.getLogger(__name__)
 # them silently would be a worse failure than disk growth. The only exception
 # is _sweep_stale_autosaves below: long-idle autosave_*.json go to the
 # recoverable session trash, never straight to unlink.
+_DEFAULT_UPLOAD_DAYS = "1" if is_cloud_managed_runtime() else "30"
+_DEFAULT_OUTPUT_DAYS = "1" if is_cloud_managed_runtime() else "90"
+# Workspace-mounted export artifacts (A5: <workspace_root>/artifacts/) sit
+# outside content_data_root and therefore outside the DEFAULT_RULES sweep.
+# They get their own TTL pass that walks known Workspaces' artifacts dirs.
+_DEFAULT_WORKSPACE_ARTIFACT_DAYS = os.environ.get(
+    "BAA_CLEANUP_WORKSPACE_ARTIFACT_DAYS", _DEFAULT_OUTPUT_DAYS,
+)
+
 DEFAULT_RULES: Tuple[Tuple[str, int, str], ...] = (
-    ("uploads",          int(os.environ.get("BAA_CLEANUP_UPLOAD_DAYS", "30")), "uploads"),
-    ("outputs/charts",   int(os.environ.get("BAA_CLEANUP_OUTPUT_DAYS", "90")), "outputs/charts"),
-    ("outputs/exports",  int(os.environ.get("BAA_CLEANUP_OUTPUT_DAYS", "90")), "outputs/exports"),
+    ("uploads",          int(os.environ.get("BAA_CLEANUP_UPLOAD_DAYS", _DEFAULT_UPLOAD_DAYS)), "uploads"),
+    ("outputs/charts",   int(os.environ.get("BAA_CLEANUP_OUTPUT_DAYS", _DEFAULT_OUTPUT_DAYS)), "outputs/charts"),
+    ("outputs/exports",  int(os.environ.get("BAA_CLEANUP_OUTPUT_DAYS", _DEFAULT_OUTPUT_DAYS)), "outputs/exports"),
 )
 
 
@@ -137,6 +146,69 @@ def _sweep_stale_autosaves(session_dir: Path, max_age_days: int) -> int:
     return removed
 
 
+def _sweep_workspace_artifacts(max_age_days: int) -> Tuple[int, int]:
+    """Sweep export artifacts from mounted Workspace roots.
+
+    A5-mounted Workspaces write exports to ``<workspace_root>/artifacts/``
+    which is **outside** ``content_data_root`` — the DEFAULT_RULES sweep
+    never sees them. Without this pass, a long-lived Workspace accumulates
+    every export/report/ppt the user ever generated, turning into a
+    "file graveyard" with no TTL.
+
+    Walks every known Workspace's ``artifacts/`` directory and removes
+    files older than ``max_age_days`` (by mtime). Empty leaf directories
+    are pruned after their files are. Returns ``(n_files, bytes_freed)``.
+
+    Defensive: only ``artifacts/`` is touched — the Workspace's DuckDB
+    file, ``.zhixi`` flow files, and any other user content stay put.
+    """
+    if max_age_days <= 0:
+        return 0, 0
+    try:
+        from data.workspace import workspace_manager
+    except ImportError:
+        return 0, 0
+    records = workspace_manager.list_known()
+    if not records:
+        return 0, 0
+    cutoff = time.time() - (max_age_days * 86400)
+    total_removed = 0
+    total_freed = 0
+    for record in records:
+        root_text = str(record.get("root_path") or "")
+        if not root_text:
+            continue
+        artifacts_dir = Path(root_text) / "artifacts"
+        if not artifacts_dir.is_dir():
+            continue
+        for path in artifacts_dir.rglob("*"):
+            if not path.is_file():
+                continue
+            try:
+                if path.stat().st_mtime < cutoff:
+                    size = path.stat().st_size
+                    path.unlink()
+                    total_removed += 1
+                    total_freed += size
+            except OSError as exc:
+                log.warning("[cleanup] cannot remove workspace artifact %s: %s", path, exc)
+        # Prune empty leaf directories (deepest first) — but NEVER the
+        # workspace root or .zhixi; only artifacts/ subdirs.
+        for path in sorted(artifacts_dir.rglob("*"), key=lambda p: -len(p.parts)):
+            if path.is_dir() and path != artifacts_dir:
+                try:
+                    if not any(path.iterdir()):
+                        path.rmdir()
+                except OSError:
+                    pass
+    if total_removed:
+        log.info(
+            "[cleanup] workspace artifacts: removed %d file(s), freed %.1f MB (>%d days old)",
+            total_removed, total_freed / 1024 / 1024, max_age_days,
+        )
+    return total_removed, total_freed
+
+
 def run_cleanup(base_dir: Path, rules: Iterable[Tuple[str, int, str]] = DEFAULT_RULES) -> None:
     """Run one sweep across all rules. Safe to call repeatedly."""
     total_removed = 0
@@ -149,6 +221,15 @@ def run_cleanup(base_dir: Path, rules: Iterable[Tuple[str, int, str]] = DEFAULT_
         base_dir / "outputs" / "Session",
         int(os.environ.get("BAA_AUTOSAVE_IDLE_DAYS", "30")),
     )
+    # A5-mounted Workspace artifacts live outside content_data_root —
+    # give them their own TTL pass so long-lived Workspaces don't grow
+    # unbounded. Only exports/reports/ppt files are touched; DuckDB,
+    # .zhixi flow files, and other user content are preserved.
+    ws_days = int(_DEFAULT_WORKSPACE_ARTIFACT_DAYS)
+    if ws_days > 0:
+        n, b = _sweep_workspace_artifacts(ws_days)
+        total_removed += n
+        total_freed += b
     # Archived conversations (session trash) are NEVER auto-reclaimed: a
     # conversation can only be archived or emptied by the user, per product
     # decision (Settings → Storage). Artifacts/uploads/memory trash are still
@@ -179,7 +260,7 @@ def setup_cleanup(base_dir: Path | None = None) -> None:
         log.info("[cleanup] disabled via BAA_CLEANUP_DISABLED=1")
         return
 
-    base = base_dir or data_root()
+    base = base_dir or content_data_root()
     rules = DEFAULT_RULES
     interval = int(os.environ.get("BAA_CLEANUP_INTERVAL_HOURS", "24"))
 

@@ -8,15 +8,15 @@ import datetime
 import uuid
 
 from flask import Blueprint, request, jsonify, render_template, abort
-from infrastructure.paths import data_path
+from infrastructure.paths import content_data_path, is_cloud_managed_runtime
 
 log = logging.getLogger(__name__)
 
 bp = Blueprint("dashboard", __name__)
 
-_DASHBOARD_DIR = str(data_path("outputs", "Dashboard"))
+_DASHBOARD_DIR = str(content_data_path("outputs", "Dashboard"))
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
 
 def _dashboard_path(dashboard_id: str) -> str:
@@ -29,10 +29,20 @@ def _load_dashboard(dashboard_id: str) -> dict:
     if not os.path.isfile(path):
         abort(404, description=f"Dashboard '{dashboard_id}' not found")
     with open(path, encoding="utf-8") as f:
-        return json.load(f)
+        dashboard = json.load(f)
+    if is_cloud_managed_runtime():
+        from .auth import current_user
+
+        user = current_user()
+        owner_uid = str(dashboard.get("owner_uid") or "")
+        if not user or not owner_uid or owner_uid != str(user["id"]):
+            abort(404, description=f"Dashboard '{dashboard_id}' not found")
+    return dashboard
 
 
 def _save_dashboard(data: dict, dashboard_id: str) -> None:
+    if is_cloud_managed_runtime() and not str(data.get("owner_uid") or ""):
+        raise ValueError("cloud dashboard owner is required")
     os.makedirs(_DASHBOARD_DIR, exist_ok=True)
     path = _dashboard_path(dashboard_id)
     with open(path, "w", encoding="utf-8") as f:
@@ -176,6 +186,7 @@ def prefetch_dashboard_widget_data(
 
 @bp.get("/dashboard/<dashboard_id>")
 def dashboard_page(dashboard_id: str):
+    _load_dashboard(dashboard_id)
     return render_template("dashboard.html", dashboard_id=dashboard_id)
 
 
@@ -202,7 +213,7 @@ def build_dashboard(
 
 def build_dashboard_from_prefetched_widgets(
     chart_store, *, session_id: str, workspace_id: str, name: str,
-    widget_inputs: list, color_scheme: str,
+    widget_inputs: list, color_scheme: str, owner_uid: str = "",
 ) -> dict:
     """Build dashboard JSON from caller-thread SQL results."""
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -235,6 +246,14 @@ def build_dashboard_from_prefetched_widgets(
             base["error"] = error
         built_widgets.append(base)
 
+    if not owner_uid:
+        from .state import session_manager
+
+        sess = session_manager.get(session_id)
+        owner_uid = str(getattr(sess, "owner_user_id", "") or "")
+    if is_cloud_managed_runtime() and not owner_uid:
+        raise ValueError("cloud dashboard owner is required")
+
     dashboard = {
         "_schema_version": _SCHEMA_VERSION,
         "id": dashboard_id,
@@ -243,6 +262,7 @@ def build_dashboard_from_prefetched_widgets(
         "color_scheme": color_scheme,
         "session_id": session_id,
         "workspace_id": workspace_id,
+        "owner_uid": owner_uid,
         "widgets": built_widgets,
     }
     _save_dashboard(dashboard, dashboard_id)
@@ -250,15 +270,20 @@ def build_dashboard_from_prefetched_widgets(
 
 @bp.post("/api/dashboard/generate")
 def create_dashboard():
-    from .state import session_manager, chart_store
+    from .state import check_session_ownership, session_manager, chart_store
     body = request.get_json(force=True)
     sid = body.get("session_id", "")
     name = body.get("name", "Dashboard")
     widgets_spec = body.get("widgets", [])
     color_scheme = body.get("color_scheme", "mckinsey")
 
+    allowed, _ = check_session_ownership(sid)
+    if not allowed:
+        return jsonify({"error": "无权访问此会话", "code": "forbidden"}), 403
     sess = session_manager.get(sid)
-    data_source = sess.data_source if sess else None
+    if sess is None:
+        return jsonify({"error": "Session not found"}), 404
+    data_source = sess.data_source
     from data.workspace import workspace_manager
     current_workspace_id = workspace_manager.workspace_id_for_session(sid) or ""
     requested_workspace_id = str(body.get("workspace_id") or "")
@@ -298,6 +323,12 @@ def list_dashboards():
         try:
             with open(fpath, encoding="utf-8") as f:
                 d = json.load(f)
+            if is_cloud_managed_runtime():
+                from .auth import current_user
+
+                user = current_user()
+                if not user or str(d.get("owner_uid") or "") != str(user["id"]):
+                    continue
             results.append({
                 "id": d.get("id", fname[:-5]),
                 "name": d.get("name", fname[:-5]),
@@ -338,6 +369,7 @@ def update_dashboard(dashboard_id: str):
 
 @bp.delete("/api/dashboard/<dashboard_id>")
 def delete_dashboard(dashboard_id: str):
+    _load_dashboard(dashboard_id)
     path = _dashboard_path(dashboard_id)
     if not os.path.isfile(path):
         abort(404)
@@ -349,9 +381,13 @@ def delete_dashboard(dashboard_id: str):
 
 @bp.post("/api/dashboard/<dashboard_id>/refresh")
 def refresh_dashboard(dashboard_id: str):
-    from .state import session_manager, chart_store
+    from .state import check_session_ownership, session_manager, chart_store
     body = request.get_json(force=True)
     sid = body.get("session_id", "")
+
+    allowed, _ = check_session_ownership(sid)
+    if not allowed:
+        return jsonify({"error": "无权访问此会话", "code": "forbidden"}), 403
 
     sess = session_manager.get(sid)
     if not sess:
@@ -396,9 +432,13 @@ def refresh_dashboard(dashboard_id: str):
 
 @bp.post("/api/dashboard/<dashboard_id>/widget/<widget_id>/refresh")
 def refresh_widget(dashboard_id: str, widget_id: str):
-    from .state import session_manager, chart_store
+    from .state import check_session_ownership, session_manager, chart_store
     body = request.get_json(force=True)
     sid = body.get("session_id", "")
+
+    allowed, _ = check_session_ownership(sid)
+    if not allowed:
+        return jsonify({"error": "无权访问此会话", "code": "forbidden"}), 403
 
     sess = session_manager.get(sid)
     if not sess:

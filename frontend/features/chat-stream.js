@@ -16,6 +16,7 @@ import {
   updateTokenBar,
 } from "../core/page-runtime.js";
 import { getUiIsland } from "../core/ui-registry.js";
+import { mirrorGeneratedExport } from "../core/local-data-store.js";
 import { scheduleAutosave, setLoadedName } from "../legacy/autosave.js";
 import { open as openCheckpoints } from "../legacy/checkpoints.js";
 import { commandHandlers } from "../legacy/command_handlers.js";
@@ -27,6 +28,11 @@ import {
 } from "../legacy/job_history.js";
 import { openSchemaView } from "../legacy/preview.js";
 import { loadSavedList } from "../legacy/sessions.js";
+import {
+  MAX_SSE_RETRIES,
+  canAutoRetrySse,
+  sseRetryDelayMs,
+} from "./sse-retry.js";
 
   const clearSkill = () => window.BAA.skills?.clearSkill?.();
 
@@ -40,36 +46,17 @@ import { loadSavedList } from "../legacy/sessions.js";
   }
 
   function _cancelAskUser() {
-    // User clicked stop while ask_user card is open — cancel the turn.
     state.askUserPending = false;
     _cancelTailActivity();
-    // Hide tool-activity ("正在思考下一步…") on the current assistant bubble.
-    const curAssistant = state.activeTurn?.assistantId
-      ? document.querySelector(`[data-vue-msg-id="${state.activeTurn.assistantId}"]`)
-      : null;
-    if (curAssistant) {
-      const curSteps = curAssistant.querySelector(".tool-steps");
-      if (curSteps && getUiIsland("chat")?.hideToolActivity) {
-        getUiIsland("chat").hideToolActivity(curSteps, { delayMs: 0 });
-      }
+    const assistantId = state.activeTurn?.assistantId || "";
+    const island = getUiIsland("chat");
+    if (assistantId && island?.markStopped) {
+      island.markStopped(assistantId, t('stop_note'), null);
     }
-    // Remove typing dots from the current assistant bubble.
-    document.querySelectorAll(".msg-bubble .typing-dots").forEach(el => { if (el.parentNode) el.remove(); });
-    // Lock all ask_user cards so the user can't submit after cancelling.
-    document.querySelectorAll(".ask-user-card").forEach(card => {
-      card.querySelectorAll("button, input").forEach(el => { el.disabled = true; });
-    });
+    document.querySelectorAll(".ask-user-card button, .ask-user-card input").forEach(el => { el.disabled = true; });
     state.isStreaming = false;
     state.activeTurn = null;
     syncSendButton();
-    // Show a stop note before the last assistant bubble.
-    const lastAssistant = document.querySelector(".msg-row.assistant:last-child .msg-bubble");
-    if (lastAssistant) {
-      const stopNote = document.createElement("div");
-      stopNote.className = "stop-note";
-      stopNote.textContent = t('stop_note') || "已停止";
-      lastAssistant.before(stopNote);
-    }
   }
 
   async function stopStreaming() {
@@ -145,6 +132,26 @@ import { loadSavedList } from "../legacy/sessions.js";
     state.promptSuggestionRequestId = (Number(state.promptSuggestionRequestId) || 0) + 1;
     state.promptSuggestionText = "";
     _clearPromptSuggestionMarker();
+  }
+
+  function acceptPromptSuggestion() {
+    const input = $("msg-input");
+    if (!_hasPromptSuggestionMarker(input) || input.value.trim()) return false;
+    const text = state.promptSuggestionText.trim();
+    if (!text) return false;
+
+    state._applyingPromptSuggestion = true;
+    try {
+      input.value = text;
+      _invalidatePromptSuggestion();
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    } finally {
+      state._applyingPromptSuggestion = false;
+    }
+    input.focus();
+    input.setSelectionRange(text.length, text.length);
+    syncSendButton();
+    return true;
   }
 
   function onComposerInput(event) {
@@ -943,126 +950,143 @@ import { loadSavedList } from "../legacy/sessions.js";
     await _streamChat(payload, stepsEl, bubbleEl, typing);
   }
 
+  function _showReconnectBadge(attempt, max, stepsEl) {
+    let badge = stepsEl.querySelector(".reconnect-badge");
+    if (!badge) {
+      badge = document.createElement("div");
+      badge.className = "reconnect-badge";
+      stepsEl.appendChild(badge);
+    }
+    badge.textContent = `连接中断，正在重试 (${attempt}/${max})…`;
+    scrollBottom();
+  }
+
+  function _hideReconnectBadge(stepsEl) {
+    const badge = stepsEl.querySelector(".reconnect-badge");
+    if (badge) badge.remove();
+  }
+
   async function _streamChat(payload, stepsEl, bubbleEl, typing) {
+    // Let the backend localize tool-timeline labels / activity messages.
+    payload.lang = window.getLang ? window.getLang() : "zh";
     if (state.analysisContext && !payload.data_context) {
       payload.data_context = state.analysisContext;
     }
-    let reader = null;
     let streamHadIssue = false;
     state._stopRequested = false;
+    $("messages").classList.add("streaming");
     try {
-      const resp = await fetch(`/api/session/${state.SID}/chat`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      if (!resp.ok) {
-        const failure = await resp.json().catch(() => ({}));
-        if (failure.needs_auth) { window.location.href = "/login"; return; }
-        if (failure.code === "quota_exceeded") {
-          const sysErr = document.createElement("div");
-          sysErr.className = "msg msg-sys";
-          sysErr.innerHTML = '<span style="color:#f59e0b">⚠️ ' + (failure.error || "今日免费额度已用尽") + "</span>";
-          if (stepsEl) stepsEl.appendChild(sysErr);
-          else if (bubbleEl) bubbleEl.appendChild(sysErr);
-          return;
-        }
-        throw new Error(failure.error || `Chat request failed (${resp.status})`);
-      }
-      if (!resp.body) throw new Error(`Chat request failed (${resp.status})`);
-      reader = resp.body.getReader();
-      state._streamReader = reader;
-      const dec = new TextDecoder();
-      let buf = "";
-      const consumeLine = async (line) => {
-        if (!line.startsWith("data: ")) return;
-        try {
-          const event = JSON.parse(line.slice(6));
-          if (event.type === "error" || event.type === "stopped") streamHadIssue = true;
-          await handleEvent(event, stepsEl, bubbleEl, typing);
-        }
-        catch (_) {}
-      };
+      let retries = 0;
+      let receivedEvent = false;
       while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
-        const lines = buf.split("\n"); buf = lines.pop();
-        for (const line of lines) {
-          await consumeLine(line);
+        let reader = null;
+        try {
+          const resp = await fetch(`/api/session/${state.SID}/chat`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          if (!resp.ok) {
+            const failure = await resp.json().catch(() => ({}));
+            if (failure.needs_auth) { window.location.href = "/login"; return; }
+            if (failure.code === "quota_exceeded") {
+              const sysErr = document.createElement("div");
+              sysErr.className = "msg msg-sys";
+              sysErr.innerHTML = '<span style="color:#f59e0b">⚠️ ' + (failure.error || "今日免费额度已用尽") + "</span>";
+              if (stepsEl) stepsEl.appendChild(sysErr);
+              else if (bubbleEl) bubbleEl.appendChild(sysErr);
+              return;
+            }
+            throw new Error(failure.error || `Chat request failed (${resp.status})`);
+          }
+          if (!resp.body) throw new Error(`Chat request failed (${resp.status})`);
+          reader = resp.body.getReader();
+          state._streamReader = reader;
+          const dec = new TextDecoder();
+          let buf = "";
+          const consumeLine = async (line) => {
+            if (!line.startsWith("data: ")) return;
+            try {
+              const event = JSON.parse(line.slice(6));
+              receivedEvent = true;
+              if (event.type === "error" || event.type === "stopped") streamHadIssue = true;
+              await handleEvent(event, stepsEl, bubbleEl, typing);
+            }
+            catch (_) {}
+          };
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buf += dec.decode(value, { stream: true });
+            const lines = buf.split("\n"); buf = lines.pop();
+            for (const line of lines) {
+              await consumeLine(line);
+            }
+          }
+          if (buf.trim()) await consumeLine(buf.trim());
+          break;
+        } catch (error) {
+          const message = error?.message || String(error);
+          const isCancel = !!(reader && /cancel/i.test(message));
+          if (canAutoRetrySse({
+            error,
+            receivedEvent,
+            retries,
+            stopRequested: !!state._stopRequested,
+            cancelled: isCancel,
+          })) {
+            retries++;
+            _showReconnectBadge(retries, MAX_SSE_RETRIES, stepsEl);
+            await new Promise(r => setTimeout(r, sseRetryDelayMs(retries)));
+            _hideReconnectBadge(stepsEl);
+            state._streamReader = null;
+            continue;
+          }
+          streamHadIssue = true;
+          if (reader && state._streamReader === reader) {
+            if (message && !isCancel) {
+              await handleEvent({ type: "error", message }, stepsEl, bubbleEl, typing);
+            }
+          } else if (!reader) {
+            await handleEvent({ type: "error", message }, stepsEl, bubbleEl, typing);
+          }
+          break;
         }
-      }
-      if (buf.trim()) await consumeLine(buf.trim());
-    } catch (error) {
-      // reader.cancel() throws — expected when stopStreaming() is called.
-      if (reader && state._streamReader === reader) {
-        // A real HTTP failure should not wedge the FIFO; show it in the turn.
-        const message = error?.message || String(error);
-        if (message && !/cancel/i.test(message)) {
-          await handleEvent({ type: "error", message }, stepsEl, bubbleEl, typing);
-        }
-      } else if (!reader) {
-        await handleEvent({ type: "error", message: error?.message || String(error) }, stepsEl, bubbleEl, typing);
       }
     } finally {
-      // If an ask_user card is showing, the turn is NOT finished — the user
-      // still needs to answer.  Keep typing-dots, isStreaming, and the stop
-      // button in place.  Cleanup happens in sendConfirmStream (answer) or
-      // _cancelAskUser (stop).
+      $("messages").classList.remove("streaming");
+      _hideReconnectBadge(stepsEl);
       if (state.askUserPending) {
         state._streamReader = null;
         scrollBottom();
-        return;
-      }
-      const continuingAfterAppend = !!state.silentContinuation;
-      const stoppedByUser = !!state._stopRequested;
-      if (continuingAfterAppend) {
-        _cancelTailActivity();
-        _showToolActivity({ stepsEl });
       } else {
-        _cancelTailActivity();
-        if (!(getUiIsland("chat") && getUiIsland("chat").finishAllTools && getUiIsland("chat").finishAllTools(stepsEl))) {
-          _tickAllSteps(stepsEl);
+        const continuingAfterAppend = !!state.silentContinuation;
+        const stoppedByUser = !!state._stopRequested;
+        if (continuingAfterAppend) {
+          _cancelTailActivity();
+          _showToolActivity({ stepsEl });
+        } else {
+          _cancelTailActivity();
+          getUiIsland("chat")?.finishAllTools?.(stepsEl);
+          getUiIsland("chat")?.hideToolActivity?.(stepsEl);
+          _collapseReasoning({ stepsEl, bubbleEl });
         }
-        if (getUiIsland("chat") && getUiIsland("chat").hideToolActivity) {
-          getUiIsland("chat").hideToolActivity(stepsEl);
+        if (typing && typing.parentNode) typing.remove();
+        state._streamReader = null;
+        state.isStreaming   = false;
+        syncSendButton();
+        scrollBottom();
+        scheduleAutosave();
+        state.silentContinuation = false;
+        state.activeTurn = null;
+        _drainMessageQueue();
+        window.BAA.slash?.loadCommands?.().catch(() => {});
+        if (!stoppedByUser && !continuingAfterAppend && !streamHadIssue && !state.isStreaming) {
+          setTimeout(_requestPromptSuggestion, 120);
+          _pollMemoryNotices();
         }
+        state._stopRequested = false;
       }
-      if (typing && typing.parentNode) typing.remove();
-      state._streamReader = null;
-      state.isStreaming   = false;
-      syncSendButton();
-      scrollBottom();       // respect users who scrolled up during streaming
-      // Trigger auto-save after every completed AI reply
-      scheduleAutosave();
-      state.silentContinuation = false;
-      state.activeTurn = null;
-      _drainMessageQueue();
-      window.BAA.slash?.loadCommands?.().catch(() => {});
-      if (!stoppedByUser && !continuingAfterAppend && !streamHadIssue && !state.isStreaming) {
-        setTimeout(_requestPromptSuggestion, 120);
-        _pollMemoryNotices();
-      }
-      state._stopRequested = false;
     }
-  }
-
-  // ── Tool-step ticker helpers ───────────────────────────────────────
-  function _finishStep(s) {
-    if (s.classList.contains("tool-step-compaction")) {
-      s.classList.add("done-compaction");
-      const iconEl = s.querySelector(".compaction-spin");
-      if (iconEl) { iconEl.classList.remove("compaction-spin"); iconEl.textContent = "✦"; }
-    } else {
-      s.classList.add("done");
-      const spinEl = s.querySelector(".spin");
-      if (spinEl) { spinEl.classList.remove("spin"); spinEl.textContent = "✓"; }
-    }
-  }
-  function _tickFinishedSteps(stepsEl) {
-    stepsEl.querySelectorAll('.tool-step[data-finished]:not(.done):not(.done-compaction)').forEach(_finishStep);
-  }
-  function _tickAllSteps(stepsEl) {
-    stepsEl.querySelectorAll(".tool-step:not(.done):not(.done-compaction)").forEach(_finishStep);
   }
 
   function _showToolActivity(ctx) {
@@ -1106,6 +1130,44 @@ import { loadSavedList } from "../legacy/sessions.js";
     applyLiveEvent(ev);
   }
 
+  const recentExportSyncs = new Map();
+
+  function _exportCandidates(ev) {
+    const candidates = [];
+    const add = (item) => {
+      if (!item || typeof item !== "object") return;
+      const url = String(item.url || item.download_url || "").trim();
+      if (!url) return;
+      candidates.push({ url, filename: item.filename || item.name || item.label || "" });
+    };
+    add(ev?.artifact);
+    for (const artifact of ev?.artifacts || []) add(artifact);
+    const content = String(ev?.content || "");
+    const pattern = /\[([^\]]+)\]\((\/api\/(?:export|output)\/[^)\s]+)\)/g;
+    for (const match of content.matchAll(pattern)) {
+      candidates.push({ url: match[2], filename: match[1].replace(/^📥\s*/, "").trim() });
+    }
+    return candidates;
+  }
+
+  function _syncGeneratedExports(ev) {
+    for (const candidate of _exportCandidates(ev)) {
+      const key = candidate.url;
+      const now = Date.now();
+      if (now - Number(recentExportSyncs.get(key) || 0) < 30_000) continue;
+      recentExportSyncs.set(key, now);
+      mirrorGeneratedExport({ ...candidate, sessionId: state.SID })
+        .then((result) => {
+          if (result?.saved) window.BAA.ui?.toast?.(`已保存到 Sage：${result.filename}`, "ok");
+          else recentExportSyncs.delete(key);
+        })
+        .catch(() => {
+          // local-data-store already reports a user-facing fallback warning.
+          recentExportSyncs.delete(key);
+        });
+    }
+  }
+
   function _onHookEvent(ev, ctx) {
     if (!ev?.ok && window.BAA.ui?.toast) {
       window.BAA.ui.toast(`Hook ${ev.hook_id || ""} 执行失败`, "err");
@@ -1134,7 +1196,10 @@ import { loadSavedList } from "../legacy/sessions.js";
   const _onJobCreated = _onJobEvent;
   const _onJobStarted = _onJobEvent;
   const _onJobProgress = _onJobEvent;
-  const _onArtifactCreated = _onJobEvent;
+  function _onArtifactCreated(ev, ctx) {
+    _syncGeneratedExports(ev);
+    _onJobEvent(ev, ctx);
+  }
   const _onJobDone = _onJobEvent;
   const _onJobError = _onJobEvent;
   const _onJobCanceled = _onJobEvent;
@@ -1142,28 +1207,9 @@ import { loadSavedList } from "../legacy/sessions.js";
   // ── SSE event handlers (object-table dispatch) ─────────────────────
   function _onToolStart(ev, ctx) {
     _cancelTailActivity();
+    _finishReasoning(ctx);
     if (ctx.typing && ctx.typing.parentNode) ctx.typing.remove();
-    if (getUiIsland("chat") && getUiIsland("chat").startTool) {
-      if (getUiIsland("chat").startTool(ctx.stepsEl, ev)) {
-        scrollBottom();
-        return;
-      }
-    }
-    _hideToolActivity(ctx);
-    _tickFinishedSteps(ctx.stepsEl);
-    const isCompaction = ev.tool === "compaction";
-    const s = document.createElement(isCompaction ? "div" : "details");
-    s.className = isCompaction ? "tool-step tool-step-compaction" : "tool-step";
-    s.dataset.tool = ev.tool || "";
-    if (!isCompaction) s.open = false;
-    const shortText = esc(String(ev.display || ev.detail || "").replace(/\s+/g, " ").trim());
-    const fullText  = esc(ev.detail || ev.display || "");
-    const icon      = isCompaction ? `<span class="compaction-spin">⟳</span>` : `<span class="spin">⟳</span>`;
-    s.innerHTML = isCompaction
-      ? `${icon}<span class="tool-step-text">${fullText}</span>`
-      : `<summary class="tool-step-head">${icon}<span class="tool-step-text">${shortText}</span></summary><div class="tool-step-detail">${fullText}</div>`;
-    ctx.stepsEl.appendChild(s);
-    scrollBottom();
+    if (getUiIsland("chat")?.startTool?.(ctx.stepsEl, ev)) scrollBottom();
   }
 
   function _onKnowledgeRefs(ev, ctx) {
@@ -1223,104 +1269,19 @@ import { loadSavedList } from "../legacy/sessions.js";
     scrollBottom();
   }
 
-  function _attachPanelAfterStep(ctx, toolName, className, panel) {
-    const steps = [...ctx.stepsEl.querySelectorAll(`.tool-step[data-tool="${toolName}"]`)];
-    const step = steps[steps.length - 1];
-    if (!step) return false;
-    const old = step.parentElement.querySelector(`.${className}[data-for-step="${step.dataset.stepId || ""}"]`);
-    if (old) old.remove();
-    if (!step.dataset.stepId) step.dataset.stepId = `${toolName}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    panel.dataset.forStep = step.dataset.stepId;
-    step.after(panel);
-    scrollBottom();
-    return true;
-  }
-
   function _onDataRefs(ev, ctx) {
-    if (getUiIsland("chat") && getUiIsland("chat").setDataRefs) {
-      if (getUiIsland("chat").setDataRefs(ctx.stepsEl, ev)) {
-        _scheduleTailActivity(ctx);
-        scrollBottom();
-        return;
-      }
+    if (getUiIsland("chat")?.setDataRefs?.(ctx.stepsEl, ev)) {
+      _scheduleTailActivity(ctx);
+      scrollBottom();
     }
-    const refs = Array.isArray(ev.refs) ? ev.refs : [];
-    if (!refs.length) return;
-    const panel = document.createElement("details");
-    panel.className = "data-refs";
-    panel.open = false;
-    const summary = document.createElement("summary");
-    summary.textContent = `数据依据（${refs.length} 条）`;
-    panel.appendChild(summary);
-
-    const list = document.createElement("div");
-    list.className = "knowledge-ref-list";
-    refs.forEach(ref => {
-      const item = document.createElement("div");
-      item.className = "knowledge-ref-item";
-      const rows = ref.rows !== null && ref.rows !== undefined
-        ? `<span class="knowledge-ref-score">${esc(String(ref.rows))} rows</span>`
-        : "";
-      item.innerHTML = `
-        <div class="knowledge-ref-head">
-          <span class="knowledge-ref-type">${esc(ref.type || "数据")}</span>
-          <span class="knowledge-ref-title">${esc(ref.title || "SQL 查询")}</span>
-          ${rows}
-        </div>
-        ${ref.source ? `<div class="knowledge-ref-source">${esc(ref.source)}</div>` : ""}
-        ${ref.snippet ? `<div class="knowledge-ref-snippet">${esc(ref.snippet)}</div>` : ""}`;
-      list.appendChild(item);
-    });
-    panel.appendChild(list);
-    _attachPanelAfterStep(ctx, "query_data", "data-refs", panel)
-      || _attachPanelAfterStep(ctx, "create_analysis_table", "data-refs", panel)
-      || _attachPanelAfterStep(ctx, "run_analysis", "data-refs", panel)
-      || _attachPanelAfterStep(ctx, "generate_chart", "data-refs", panel);
-    _scheduleTailActivity(ctx);
   }
 
   function _onToolAudit(ev, ctx) {
-    if (getUiIsland("chat") && getUiIsland("chat").setToolAudit) {
-      if (getUiIsland("chat").setToolAudit(ctx.stepsEl, ev)) {
-        _scheduleTailActivity(ctx);
-        scrollBottom();
-        return;
-      }
+    _syncGeneratedExports(ev);
+    if (getUiIsland("chat")?.setToolAudit?.(ctx.stepsEl, ev)) {
+      _scheduleTailActivity(ctx);
+      scrollBottom();
     }
-    const tool = ev.tool || "";
-    if (!tool) return;
-    const panel = document.createElement(ev.content || ev.summary ? "details" : "div");
-    panel.className = ev.ok === false ? "tool-audit tool-audit-error" : "tool-audit";
-    panel.dataset.tool = tool;
-    if (panel.tagName === "DETAILS") panel.open = false;
-    const elapsed = ev.elapsed_seconds !== undefined ? `${ev.elapsed_seconds}s` : "";
-    const sourceCount = Array.isArray(ev.sources) ? ev.sources.length : 0;
-    const artifactCount = Array.isArray(ev.artifacts) ? ev.artifacts.length : 0;
-    const bits = [
-      ev.parallel ? "并行" : "",
-      elapsed && `耗时 ${esc(elapsed)}`,
-      sourceCount ? `来源 ${sourceCount}` : "",
-      artifactCount ? `产物 ${artifactCount}` : "",
-      ev.error ? `错误 ${esc(ev.error)}` : "",
-    ].filter(Boolean);
-    const statusLine = document.createElement(panel.tagName === "DETAILS" ? "summary" : "span");
-    statusLine.className = "tool-audit-status";
-    statusLine.textContent = bits.length ? bits.join(" · ") : "工具执行完成";
-    panel.appendChild(statusLine);
-    const content = ev.content ?? ev.data ?? ev.summary;
-    if (content) {
-      panel.classList.add("tool-audit-has-summary");
-      const body = document.createElement("div");
-      body.className = "tool-audit-summary";
-      body.textContent = String(content);
-      panel.appendChild(body);
-    }
-    if (ev.args_preview) {
-      try { panel.title = JSON.stringify(ev.args_preview, null, 2); } catch (_) {}
-    }
-    _attachPanelAfterStep(ctx, tool, "tool-audit", panel);
-    _onToolEnd({ tool }, ctx);
-    _scheduleTailActivity(ctx);
   }
 
   function _onToolEnd(ev, ctx) {
@@ -1439,34 +1400,89 @@ import { loadSavedList } from "../legacy/sessions.js";
 
   function _onTextDelta(ev, ctx) {
     _cancelTailActivity();
+    _finishReasoning(ctx);
     _hideToolActivity(ctx);
-    if (getUiIsland("chat") && getUiIsland("chat").appendTextDelta) {
-      if (getUiIsland("chat").appendTextDelta(ctx.bubbleEl, ev.content, ctx.typing)) {
-        scrollBottom();
-        return;
-      }
-    }
+    if (getUiIsland("chat")?.appendTextDelta?.(ctx.bubbleEl, ev.content, ctx.typing)) return;
     if (ctx.typing.parentNode) ctx.typing.remove();
     ctx.bubbleEl.insertAdjacentText("beforeend", ev.content || "");
     scrollBottom();
   }
 
-  function _buildReasoningBlock(content) {
-    const block = document.createElement("div");
-    block.className = "reasoning-block";
-    const toggle = document.createElement("div");
-    toggle.className = "reasoning-toggle";
-    toggle.innerHTML = `<span class="reasoning-arrow">▶</span> ${t('reasoning_toggle')}`;
+  function _buildReasoningBlock(content, options = {}) {
+    const block = document.createElement("details");
+    block.className = `reasoning-trace ${options.live ? "is-streaming" : "is-finished"}`;
+    block.open = options.open === undefined ? !!options.live : !!options.open;
+    if (options.live) block.dataset.startedAt = String(Date.now());
+    const toggle = document.createElement("summary");
+    toggle.className = "reasoning-trace-head";
+    const label = options.live
+      ? (t("reasoning_live", { duration: "1 秒" }) || "正在思考 · 1 秒")
+      : (t("reasoning_toggle") || "思考过程");
+    toggle.innerHTML = `
+      <span class="reasoning-trace-dot" aria-hidden="true"></span>
+      <span class="reasoning-trace-label">${esc(label)}</span>
+      <span class="reasoning-trace-chevron" aria-hidden="true"></span>`;
     const body = document.createElement("div");
-    body.className = "reasoning-body";
-    body.textContent = content || "";
-    toggle.addEventListener("click", () => {
-      toggle.classList.toggle("open");
-      body.classList.toggle("open");
-    });
+    body.className = "reasoning-trace-body";
+    const copy = document.createElement("div");
+    copy.className = "reasoning-trace-copy";
+    copy.textContent = content || "";
+    body.appendChild(copy);
+    if (options.live) {
+      const caret = document.createElement("span");
+      caret.className = "reasoning-stream-caret";
+      caret.setAttribute("aria-hidden", "true");
+      body.appendChild(caret);
+    }
     block.appendChild(toggle);
     block.appendChild(body);
     return block;
+  }
+
+  function _legacyReasoningTrace(ctx) {
+    const traces = ctx.stepsEl?.querySelectorAll?.(".reasoning-trace.is-streaming") || [];
+    return traces.length ? traces[traces.length - 1] : null;
+  }
+
+  function _finishReasoning(ctx) {
+    if (getUiIsland("chat")?.finishReasoning?.(ctx.bubbleEl)) return true;
+    const block = _legacyReasoningTrace(ctx);
+    if (!block) return false;
+    const startedAt = Number(block.dataset.startedAt) || Date.now();
+    const seconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+    const duration = window.getLang?.() === "en" ? `${seconds}s` : `${seconds} 秒`;
+    const label = t("reasoning_done", { duration }) || `思考了 ${duration}`;
+    block.classList.remove("is-streaming");
+    block.classList.add("is-finished");
+    const labelEl = block.querySelector(".reasoning-trace-label");
+    if (labelEl) labelEl.textContent = label;
+    block.querySelector(".reasoning-stream-caret")?.remove();
+    return true;
+  }
+
+  function _collapseReasoning(ctx) {
+    if (getUiIsland("chat")?.collapseReasoning?.(ctx.bubbleEl)) return true;
+    _finishReasoning(ctx);
+    const traces = ctx.stepsEl?.querySelectorAll?.(".reasoning-trace") || [];
+    traces.forEach(trace => { trace.open = false; });
+    return traces.length > 0;
+  }
+
+  function _onReasoningDelta(ev, ctx) {
+    _cancelTailActivity();
+    if (ctx.typing?.parentNode) ctx.typing.remove();
+    if (getUiIsland("chat")?.appendReasoningDelta?.(ctx.bubbleEl, ev.content, ctx.typing)) {
+      scrollBottom();
+      return;
+    }
+    let block = _legacyReasoningTrace(ctx);
+    if (!block) {
+      block = _buildReasoningBlock("", { live: true, open: true });
+      ctx.stepsEl.appendChild(block);
+    }
+    const copy = block.querySelector(".reasoning-trace-copy");
+    if (copy) copy.textContent += String(ev.content || "");
+    scrollBottom();
   }
 
   function _onReasoning(ev, ctx) {
@@ -1477,30 +1493,35 @@ import { loadSavedList } from "../legacy/sessions.js";
         return;
       }
     }
-    if (ctx.typing.parentNode) ctx.typing.remove();
-    const block = _buildReasoningBlock(ev.content);
-    ctx.bubbleEl.before(block);
-    _showToolActivity(ctx);
+    if (ctx.typing?.parentNode) ctx.typing.remove();
+    const block = _buildReasoningBlock(ev.content, { open: true });
+    ctx.stepsEl.appendChild(block);
     scrollBottom();
+  }
+
+  function _restoreReasoning(target, content) {
+    if (getUiIsland("chat")?.addReasoning?.(target, content, null)) {
+      getUiIsland("chat")?.collapseReasoning?.(target);
+      return true;
+    }
+    const body = target?.closest?.(".msg-body");
+    const steps = body?.querySelector?.(".tool-steps");
+    if (!steps) return false;
+    steps.appendChild(_buildReasoningBlock(content));
+    return true;
   }
 
   function _onText(ev, ctx) {
     _cancelTailActivity();
+    _collapseReasoning(ctx);
     const md = ev.content || "";
     _hideToolActivity(ctx);
     if (!md.trim()) return;
     if (ctx.typing.parentNode) ctx.typing.remove();
-    if (!(getUiIsland("chat") && getUiIsland("chat").finishAllTools && getUiIsland("chat").finishAllTools(ctx.stepsEl))) {
-      _tickAllSteps(ctx.stepsEl);
-    }
-    const renderedByVue = getUiIsland("chat") && getUiIsland("chat").setMarkdown
-      ? getUiIsland("chat").setMarkdown(ctx.bubbleEl, md, ctx.typing)
-      : false;
+    getUiIsland("chat")?.finishAllTools?.(ctx.stepsEl);
+    const renderedByVue = getUiIsland("chat")?.setMarkdown?.(ctx.bubbleEl, md, ctx.typing) || false;
     if (!renderedByVue) ctx.bubbleEl.innerHTML = renderMd(md);
-    // Attach hover-revealed action bar (copy) to the assistant message body.
-    // The body persists across the bubble innerHTML rewrite, so we attach there.
     _ensureMsgActions(ctx.bubbleEl, md);
-    // 绑定气泡内图片：点击新标签打开原图、加载失败时标注
     bindBubbleImages(ctx.bubbleEl);
     scrollBottom();
   }
@@ -1584,6 +1605,7 @@ import { loadSavedList } from "../legacy/sessions.js";
     // user input, not actually in an error state.
     if (state.askUserPending) return;
     _cancelTailActivity();
+    getUiIsland("chat")?.failActiveTool?.(ctx.stepsEl, ev.message || "");
     _hideToolActivity(ctx);
     if (getUiIsland("chat") && getUiIsland("chat").setError) {
       if (getUiIsland("chat").setError(ctx.bubbleEl, ev.message, ctx.typing)) return;
@@ -1596,8 +1618,6 @@ import { loadSavedList } from "../legacy/sessions.js";
   }
 
   function _onStopped(_ev, ctx) {
-    // If ask_user is pending, the stream ending is expected — don't show a
-    // "stopped" note or remove typing dots; the ask_user card is still open.
     if (state.askUserPending) return;
     _cancelTailActivity();
     if (state.silentContinuation) {
@@ -1606,12 +1626,8 @@ import { loadSavedList } from "../legacy/sessions.js";
       return;
     }
     _hideToolActivity(ctx);
-    if (!(getUiIsland("chat") && getUiIsland("chat").finishAllTools && getUiIsland("chat").finishAllTools(ctx.stepsEl))) {
-      _tickAllSteps(ctx.stepsEl);
-    }
-    if (getUiIsland("chat") && getUiIsland("chat").markStopped) {
-      if (getUiIsland("chat").markStopped(ctx.bubbleEl, t('stop_note'), ctx.typing)) return;
-    }
+    getUiIsland("chat")?.finishAllTools?.(ctx.stepsEl);
+    if (getUiIsland("chat")?.markStopped?.(ctx.bubbleEl, t('stop_note'), ctx.typing)) return;
     if (ctx.typing.parentNode) ctx.typing.remove();
     const stopNote = document.createElement("div");
     stopNote.className = "stop-note";
@@ -1646,276 +1662,54 @@ import { loadSavedList } from "../legacy/sessions.js";
     _cancelTailActivity();
     _hideToolActivity(ctx);
     if (ctx.typing.parentNode) ctx.typing.remove();
-    if (!(getUiIsland("chat") && getUiIsland("chat").finishAllTools && getUiIsland("chat").finishAllTools(ctx.stepsEl))) {
-      _tickAllSteps(ctx.stepsEl);
-    }
+    getUiIsland("chat")?.finishAllTools?.(ctx.stepsEl);
 
     const meta = _outlineMeta(ev);
 
-    if (getUiIsland("chat") && getUiIsland("chat").addOutlineCard) {
-      if (getUiIsland("chat").addOutlineCard(ctx.bubbleEl, {
-        icon: meta.icon,
-        headerTitle: meta.headerTitle,
-        markdown: ev.markdown || "",
-      }, {
-        onConfirm: () => sendConfirmStream({ internal_action: meta.confirmCmd, message: "确认", ...meta.confirmPayload }),
-        onRevise: (editText) => {
-          let message = String(editText || "");
-          if (meta.reviseCmd === "ppt_revise" && meta.confirmPayload.ppt_slides)
-            message = `${message}\n\n[CURRENT_SLIDES_JSON]\n${JSON.stringify(meta.confirmPayload.ppt_slides)}`;
-          else if (meta.reviseCmd === "report_revise" && meta.confirmPayload.report_sections)
-            message = `${message}\n\n[CURRENT_REPORT_JSON]\n${JSON.stringify({ title: meta.confirmPayload.report_title, sections: meta.confirmPayload.report_sections })}`;
-          else if (meta.reviseCmd === "dashboard_revise" && meta.confirmPayload.dashboard_widgets)
-            message = `${message}\n\n[CURRENT_DASHBOARD_JSON]\n${JSON.stringify({ name: meta.confirmPayload.dashboard_name, widgets: meta.confirmPayload.dashboard_widgets })}`;
-          sendConfirmStream({ internal_action: meta.reviseCmd, message });
-        },
-        onCancel: () => {},
-      })) {
-        scrollBottom();
-        return;
-      }
+    if (getUiIsland("chat")?.addOutlineCard?.(ctx.bubbleEl, {
+      icon: meta.icon,
+      headerTitle: meta.headerTitle,
+      markdown: ev.markdown || "",
+    }, {
+      onConfirm: () => sendConfirmStream({ internal_action: meta.confirmCmd, message: "确认", ...meta.confirmPayload }),
+      onRevise: (editText) => {
+        let message = String(editText || "");
+        if (meta.reviseCmd === "ppt_revise" && meta.confirmPayload.ppt_slides)
+          message = `${message}\n\n[CURRENT_SLIDES_JSON]\n${JSON.stringify(meta.confirmPayload.ppt_slides)}`;
+        else if (meta.reviseCmd === "report_revise" && meta.confirmPayload.report_sections)
+          message = `${message}\n\n[CURRENT_REPORT_JSON]\n${JSON.stringify({ title: meta.confirmPayload.report_title, sections: meta.confirmPayload.report_sections })}`;
+        else if (meta.reviseCmd === "dashboard_revise" && meta.confirmPayload.dashboard_widgets)
+          message = `${message}\n\n[CURRENT_DASHBOARD_JSON]\n${JSON.stringify({ name: meta.confirmPayload.dashboard_name, widgets: meta.confirmPayload.dashboard_widgets })}`;
+        sendConfirmStream({ internal_action: meta.reviseCmd, message });
+      },
+      onCancel: () => {},
+    })) {
+      scrollBottom();
     }
-
-    _legacyOutlineBody(ev, ctx, meta);
-  }
-
-  function _legacyOutlineBody(ev, ctx, meta) {
-    const { icon, confirmCmd, reviseCmd, confirmPayload, headerTitle } = meta;
-
-    const card = document.createElement("div");
-    card.className = "ppt-outline-card";
-    card.innerHTML = `
-      <div class="ppt-outline-header">
-        <span class="ppt-outline-icon">${icon}</span>
-        <span>${headerTitle}</span>
-      </div>
-      <div class="ppt-outline-content">${renderMd(ev.markdown || "")}</div>
-      <div class="ppt-outline-edit-wrap hidden">
-        <div class="ppt-outline-edit-hint">请说明希望如何修改：</div>
-        <textarea class="ppt-outline-edit" rows="3" placeholder="例如：把第3张换成双栏文字，增加一张市场份额环形图…"></textarea>
-      </div>
-      <div class="ppt-outline-btns">
-        <button class="ppt-btn ppt-btn-confirm">✅ 确认生成</button>
-        <button class="ppt-btn ppt-btn-revise">✏️ 修改大纲</button>
-        <button class="ppt-btn ppt-btn-cancel">✕ 取消</button>
-      </div>`;
-    ctx.bubbleEl.appendChild(card);
-    scrollBottom();
-
-    const editWrap   = card.querySelector(".ppt-outline-edit-wrap");
-    const btnConfirm = card.querySelector(".ppt-btn-confirm");
-    const btnRevise  = card.querySelector(".ppt-btn-revise");
-    const btnCancel  = card.querySelector(".ppt-btn-cancel");
-    const editTA     = card.querySelector(".ppt-outline-edit");
-
-    function _lockCard() {
-      [btnConfirm, btnRevise, btnCancel].forEach(b => b.disabled = true);
-      editTA.disabled = true;
-    }
-
-    btnConfirm.addEventListener("click", () => {
-      _lockCard();
-      sendConfirmStream({ internal_action: confirmCmd, message: "确认", ...confirmPayload });
-    });
-
-    btnRevise.addEventListener("click", () => {
-      const open = !editWrap.classList.contains('hidden');
-      editWrap.classList.toggle('hidden', open);
-      if (!open) editTA.focus();
-    });
-
-    btnCancel.addEventListener("click", () => {
-      _lockCard();
-      card.querySelector(".ppt-outline-btns").remove();
-      const note = document.createElement("div");
-      note.className = "ppt-cancelled-note";
-      note.textContent = "已取消。";
-      card.appendChild(note);
-    });
-
-    editTA.addEventListener("keydown", e => {
-      if (e.key === "Enter" && !e.shiftKey) {
-        e.preventDefault();
-        const txt = editTA.value.trim();
-        if (!txt) return;
-        _lockCard();
-        let revisePayload = { internal_action: reviseCmd, message: txt };
-        if (reviseCmd === "ppt_revise" && confirmPayload.ppt_slides)
-          revisePayload.message = `${txt}\n\n[CURRENT_SLIDES_JSON]\n${JSON.stringify(confirmPayload.ppt_slides)}`;
-        else if (reviseCmd === "report_revise" && confirmPayload.report_sections)
-          revisePayload.message = `${txt}\n\n[CURRENT_REPORT_JSON]\n${JSON.stringify({ title: confirmPayload.report_title, sections: confirmPayload.report_sections })}`;
-        else if (reviseCmd === "dashboard_revise" && confirmPayload.dashboard_widgets)
-          revisePayload.message = `${txt}\n\n[CURRENT_DASHBOARD_JSON]\n${JSON.stringify({ name: confirmPayload.dashboard_name, widgets: confirmPayload.dashboard_widgets })}`;
-        sendConfirmStream(revisePayload);
-      }
-    });
   }
 
   function _onAskUser(ev, ctx) {
     _cancelTailActivity();
     _hideToolActivity(ctx);
-    // Keep typing-dots visible during ask_user so the user sees a continuous
-    // "thinking" state.  _streamChat's finally block will skip cleanup while
-    // state.askUserPending is true; the dots are removed when the user submits
-    // an answer (sendConfirmStream) or cancels (_cancelAskUser).
-    if (!(getUiIsland("chat") && getUiIsland("chat").finishAllTools && getUiIsland("chat").finishAllTools(ctx.stepsEl))) {
-      _tickAllSteps(ctx.stepsEl);
-    }
+    getUiIsland("chat")?.finishAllTools?.(ctx.stepsEl);
     state.askUserPending = true;
-    state.isStreaming = true;       // keep "stopping" button + activity look
+    state.isStreaming = true;
     syncSendButton();
 
-    // Capture skill/command NOW while state.activeTurn is still alive.
-    // _streamChat's finally block will null state.activeTurn after this turn,
-    // but the ask_user card persists and the user clicks later.
     const _base = state.activeTurn?.payload || {};
     const _skill = _base.skill || "";
     const _command = _base.command || "";
 
-    if (getUiIsland("chat") && getUiIsland("chat").addAskUserCard) {
-      if (getUiIsland("chat").addAskUserCard(ctx.bubbleEl, ev, {
-        onSubmit: (answer) => {
-          const payload = { message: answer };
-          if (_skill) payload.skill = _skill;
-          if (_command) payload.command = _command;
-          sendConfirmStream(payload);
-        },
-      })) {
-        scrollBottom();
-        return;
-      }
+    if (getUiIsland("chat")?.addAskUserCard?.(ctx.bubbleEl, ev, {
+      onSubmit: (answer) => {
+        const payload = { message: answer };
+        if (_skill) payload.skill = _skill;
+        if (_command) payload.command = _command;
+        sendConfirmStream(payload);
+      },
+    })) {
+      scrollBottom();
     }
-
-    _legacyAskUserBody(ev, ctx, { _skill, _command });
-  }
-
-  function _legacyAskUserBody(ev, ctx, captured = {}) {
-    const _skill = captured._skill || "";
-    const _command = captured._command || "";
-    const multiSelect = !!ev.multi_select;
-    const options = (Array.isArray(ev.options) ? ev.options : [])
-      .map(option => {
-        if (typeof option === "string") return option.trim();
-        if (!option || typeof option !== "object") return "";
-        for (const key of ["label", "text", "title", "name", "value"]) {
-          if (typeof option[key] === "string" && option[key].trim()) {
-            return option[key].trim();
-          }
-        }
-        return "";
-      })
-      .filter((option, index, all) => option && all.indexOf(option) === index)
-      .slice(0, 6);
-
-    const card = document.createElement("div");
-    card.className = "ask-user-card";
-
-    const qEl = document.createElement("div");
-    qEl.className = "ask-user-question";
-    qEl.textContent = ev.question || "";
-    card.appendChild(qEl);
-
-    const chipsEl = document.createElement("div");
-    chipsEl.className = "ask-user-chips";
-    card.appendChild(chipsEl);
-
-    const selected = new Set();
-
-    function _renderChips() {
-      chipsEl.innerHTML = "";
-      [...options, "__other__"].forEach(opt => {
-        const chip = document.createElement("button");
-        chip.className = "ask-user-chip";
-        chip.type = "button";
-        if (opt === "__other__") {
-          chip.textContent = t('ask_user.other') || "其他…";
-          chip.dataset.other = "1";
-        } else {
-          chip.textContent = opt;
-          chip.dataset.value = opt;
-        }
-        if (selected.has(opt)) chip.classList.add("selected");
-        chip.addEventListener("click", () => {
-          if (locked) return;
-          if (chip.dataset.other) {
-            otherWrap.classList.toggle('hidden');
-            if (!otherWrap.classList.contains('hidden')) otherInput.focus();
-            return;
-          }
-          if (multiSelect) {
-            if (selected.has(opt)) selected.delete(opt);
-            else selected.add(opt);
-            chip.classList.toggle("selected", selected.has(opt));
-          } else {
-            _submit(opt);
-          }
-        });
-        chipsEl.appendChild(chip);
-      });
-    }
-
-    const otherWrap = document.createElement("div");
-    otherWrap.className = "ask-user-other-wrap";
-    otherWrap.classList.add('hidden');
-    const otherInput = document.createElement("input");
-    otherInput.type = "text";
-    otherInput.className = "ask-user-other-input";
-    otherInput.placeholder = t('ask_user.other_placeholder') || "请输入您的回答…";
-    const otherBtn = document.createElement("button");
-    otherBtn.type = "button";
-    otherBtn.className = "ask-user-other-btn";
-    otherBtn.textContent = t('ask_user.submit') || "提交";
-    otherWrap.appendChild(otherInput);
-    otherWrap.appendChild(otherBtn);
-    card.appendChild(otherWrap);
-
-    let submitBtn = null;
-    if (multiSelect) {
-      submitBtn = document.createElement("button");
-      submitBtn.type = "button";
-      submitBtn.className = "ask-user-submit-btn";
-      submitBtn.textContent = t('ask_user.confirm') || "确认选择";
-      card.appendChild(submitBtn);
-    }
-
-    ctx.bubbleEl.appendChild(card);
-    scrollBottom();
-
-    let locked = false;
-    function _lock() {
-      locked = true;
-      card.querySelectorAll("button, input").forEach(el => { el.disabled = true; });
-    }
-
-    function _submit(answer) {
-      _lock();
-      const payload = { message: answer };
-      if (_skill) payload.skill = _skill;
-      if (_command) payload.command = _command;
-      sendConfirmStream(payload);
-    }
-
-    otherBtn.addEventListener("click", () => {
-      if (locked) return;
-      const val = otherInput.value.trim();
-      if (val) _submit(val);
-    });
-    otherInput.addEventListener("keydown", e => {
-      if (e.key === "Enter") { e.preventDefault(); otherBtn.click(); }
-    });
-
-    if (submitBtn) {
-      submitBtn.addEventListener("click", () => {
-        if (locked) return;
-        const vals = [...selected];
-        const otherVal = !otherWrap.classList.contains('hidden') ? otherInput.value.trim() : "";
-        if (otherVal) vals.push(otherVal);
-        if (!vals.length) return;
-        _submit(vals.join("、"));
-      });
-    }
-
-    _renderChips();
   }
 
   function _onSkillMatched(ev, ctx) {
@@ -1923,6 +1717,12 @@ import { loadSavedList } from "../legacy/sessions.js";
       _cancelTailActivity();
       if (ctx.typing && ctx.typing.parentNode) ctx.typing.remove();
       const skills = Array.isArray(ev.skills) ? ev.skills : [];
+      if (getUiIsland("chat")?.addSkillMatch?.(ctx.stepsEl, skills)) {
+        _scheduleTailActivity(ctx);
+        scrollBottom();
+        window.BAA.skills?.showMatchedSkills?.(skills);
+        return;
+      }
       const names = skills.map(s => s.name).join(", ");
       const s = document.createElement("div");
       s.className = "tool-step skill-step";
@@ -1939,19 +1739,31 @@ import { loadSavedList } from "../legacy/sessions.js";
   }
 
   function _onSkillActivated(ev, ctx) {
+    const skillName = String(ev.name || "").trim();
+    // Auto-loaded skills belong to the current turn. Keep the name only on the
+    // active-turn payload so an ask_user answer can continue the same workflow;
+    // never write it to state.activeSkill, which is reserved for a user's
+    // explicit composer selection and would leak into the next normal turn.
+    if (skillName && state.activeTurn?.payload) {
+      state.activeTurn.payload.skill = skillName;
+    }
     if (ctx?.stepsEl) {
       _cancelTailActivity();
       if (ctx.typing && ctx.typing.parentNode) ctx.typing.remove();
+      if (getUiIsland("chat")?.activateSkill?.(ctx.stepsEl, skillName)) {
+        _scheduleTailActivity(ctx);
+        scrollBottom();
+        return;
+      }
       const s = document.createElement("div");
       s.className = "tool-step skill-step done";
       s.dataset.tool = "skill_activate";
       s.dataset.finished = "1";
-      s.innerHTML = `<span class="skill-icon">✦</span><span class="tool-step-text">激活 Skill: ${esc(ev.name || "")}</span>`;
+      s.innerHTML = `<span class="skill-icon">✦</span><span class="tool-step-text">激活 Skill: ${esc(skillName)}</span>`;
       ctx.stepsEl.appendChild(s);
       _scheduleTailActivity(ctx);
       scrollBottom();
     }
-    window.BAA.skills?.activateSkill?.(ev.name);
   }
 
   const SSE_HANDLERS = {
@@ -1965,6 +1777,7 @@ import { loadSavedList } from "../legacy/sessions.js";
     team_event:         _onTeamEvent,
     chart_ref:          _onChartRef,
     text_delta:         _onTextDelta,
+    reasoning_delta:    _onReasoningDelta,
     reasoning:          _onReasoning,
     text:               _onText,
     usage:              _onUsage,
@@ -2001,7 +1814,7 @@ import { loadSavedList } from "../legacy/sessions.js";
   }
 
   const PAINT_BREAK_EVENTS = new Set(["tool_start", "tool_end", "knowledge_refs", "data_refs", "tool_audit", "agent_activity", "skill_matched", "skill_activated"]);
-  const STREAM_PAINT_EVENTS = new Set(["text_delta"]);
+  const STREAM_PAINT_EVENTS = new Set(["text_delta", "reasoning_delta"]);
   let lastStreamPaintAt = 0;
 
   function _nextPaint() {
@@ -2085,9 +1898,10 @@ import { loadSavedList } from "../legacy/sessions.js";
 
 export const chatStream = Object.freeze({
     onSendOrStop, sendMessage, sendConfirmStream, stopStreaming,
-    onComposerInput, syncComposerPlaceholder,
+    onComposerInput, syncComposerPlaceholder, acceptPromptSuggestion,
     clearPromptSuggestion: _invalidatePromptSuggestion,
     handleEvent, newChat, syncSendButton, buildChartFrame: _buildChartFrame,
     buildReasoningBlock: _buildReasoningBlock,
+    restoreReasoning: _restoreReasoning,
     retryLast, loadFeishuConversationStatus: _loadFeishuConversationStatus,
 });

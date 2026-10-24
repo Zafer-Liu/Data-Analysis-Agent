@@ -52,6 +52,23 @@ _ELB_SAMPLE   = 1000 # 肘部曲线最大样本量（大数据集采样）
 _SIL_SAMPLE   = 500  # 轮廓系数最大样本量（O(n²) 计算，须限制）
 
 
+def _select_cuda_device() -> Optional[str]:
+    """Return an enabled local CUDA device, or ``None`` for the NumPy path.
+
+    Importing PyTorch is intentionally deferred.  K-Means remains usable in
+    core installations without Torch/CUDA and follows the same GPU switch and
+    VRAM guard used by the Torch analysis modules.
+    """
+    try:
+        from infrastructure.training_device import select_training_device
+
+        choice = select_training_device()
+        device = str(choice.get("device") or "")
+        return device if device.startswith("cuda") else None
+    except Exception:
+        return None
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 #  1. 数据预处理
 # ═══════════════════════════════════════════════════════════════════════════
@@ -116,8 +133,15 @@ def _kmeanspp_init(X: np.ndarray, k: int,
             min(float(np.sum((x - c) ** 2)) for c in centers)
             for x in X
         ])
-        probs = dists / dists.sum()
-        centers.append(X[rng.choice(n, p=probs)])
+        total = float(dists.sum())
+        # Duplicate rows can make every remaining distance zero.  A random
+        # fallback keeps the requested K valid instead of producing NaN
+        # probabilities; the normal empty-cluster handling then applies.
+        if total <= 1e-12:
+            centers.append(X[rng.randint(n)])
+        else:
+            probs = dists / total
+            centers.append(X[rng.choice(n, p=probs)])
     return np.array(centers)
 
 
@@ -150,15 +174,63 @@ def _kmeans_once(
     return labels, centroids, inertia
 
 
+def _kmeans_once_cuda(
+    X: np.ndarray, k: int, seed: int, device_name: str,
+    max_iter: int = _MAX_ITER,
+) -> Tuple[np.ndarray, np.ndarray, float]:
+    """Run one K-Means initialization on CUDA, returning NumPy-compatible data.
+
+    K-Means++ seeding is kept deterministic on CPU.  The repeated assignment
+    and centroid-update steps, which dominate large inputs, execute as Torch
+    tensor operations on the selected local CUDA device.
+    """
+    import torch
+
+    rng = np.random.RandomState(seed)
+    centroids_np = _kmeanspp_init(X, k, rng).astype(np.float32, copy=False)
+    device = torch.device(device_name)
+    values = torch.as_tensor(X, dtype=torch.float32, device=device)
+    centroids = torch.as_tensor(centroids_np, dtype=torch.float32, device=device)
+    labels = torch.full((len(X),), -1, dtype=torch.long, device=device)
+
+    for _ in range(max_iter):
+        # Squared distance avoids an unnecessary square-root before argmin.
+        distances = (values[:, None, :] - centroids[None, :, :]).square().sum(dim=2)
+        next_labels = distances.argmin(dim=1)
+        if torch.equal(next_labels, labels):
+            labels = next_labels
+            break
+        labels = next_labels
+
+        counts = torch.bincount(labels, minlength=k)
+        sums = torch.zeros_like(centroids)
+        sums.index_add_(0, labels, values)
+        nonempty = counts > 0
+        next_centroids = centroids.clone()
+        next_centroids[nonempty] = sums[nonempty] / counts[nonempty, None]
+        centroids = next_centroids
+
+    inertia = float((values - centroids[labels]).square().sum().item())
+    return (
+        labels.detach().cpu().numpy().astype(int, copy=False),
+        centroids.detach().cpu().numpy().astype(float, copy=False),
+        inertia,
+    )
+
+
 def _kmeans(
     X: np.ndarray, k: int,
     n_init: int = _N_INIT,
     max_iter: int = _MAX_ITER,
+    cuda_device: Optional[str] = None,
 ) -> Tuple[np.ndarray, np.ndarray, float]:
     """运行 K-Means n_init 次，取惯性最小的结果。"""
     best = None
     for seed in range(n_init):
-        result = _kmeans_once(X, k, seed, max_iter)
+        result = (
+            _kmeans_once_cuda(X, k, seed, cuda_device, max_iter)
+            if cuda_device else _kmeans_once(X, k, seed, max_iter)
+        )
         if best is None or result[2] < best[2]:
             best = result
     return best  # (labels, centroids, inertia)
@@ -336,6 +408,7 @@ def _build_md(
     sil_score:    float,
     inertia:      float,
     label_col:    Optional[str],
+    compute_device: str,
 ) -> str:
     disp_feats    = feature_cols[:5]
     feat_ellipsis = len(feature_cols) > 5
@@ -347,6 +420,7 @@ def _build_md(
         "| 指标 | 值 |", "|------|-----|",
         f"| 样本数 | {n:,} |",
         f"| 特征数 | {len(feature_cols)} |",
+        f"| 计算设备 | {compute_device} |",
         f"| 簇数 K | {k} |",
         f"| 总惯性（SSE，标准化空间） | {inertia:,.4f} |",
         f"| 轮廓系数 | **{sil_score:.4f}** |",
@@ -515,8 +589,20 @@ def run(
     X_raw         = df[feature_cols].values.astype(float)
     X, mean, std  = _normalize(X_raw)
 
-    # 主 K-Means（n_init=10，取最优）
-    labels, centroids_n, inertia = _kmeans(X, K)
+    # 主 K-Means（n_init=10，取最优）。CUDA 不可用时完整回退到 NumPy/CPU。
+    cuda_device = _select_cuda_device()
+    if cuda_device:
+        try:
+            labels, centroids_n, inertia = _kmeans(X, K, cuda_device=cuda_device)
+            compute_device = cuda_device
+        except (ImportError, RuntimeError):
+            # Driver resets and VRAM allocation failures must not make an
+            # otherwise valid analysis fail; NumPy remains the safe baseline.
+            labels, centroids_n, inertia = _kmeans(X, K)
+            compute_device = "CPU（CUDA 执行失败后回退 NumPy）"
+    else:
+        labels, centroids_n, inertia = _kmeans(X, K)
+        compute_device = "CPU（NumPy 回退）"
 
     # 轮廓系数（在最终结果上评估）
     sil = _silhouette_score(X, labels)
@@ -540,6 +626,7 @@ def run(
         sil_score=sil,
         inertia=inertia,
         label_col=label_col,
+        compute_device=compute_device,
     )
 
     return result_df, breakdown_df, elbow_df, markdown

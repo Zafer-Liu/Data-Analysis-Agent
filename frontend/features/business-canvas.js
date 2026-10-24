@@ -2,6 +2,11 @@ import { state } from "../core/runtime.js";
 import { ensureUiIsland } from "./vue-app.js";
 import { getUiIsland } from "../core/ui-registry.js";
 
+function text(key, fallback) {
+  const value = window.t?.(key);
+  return value && value !== key ? value : fallback;
+}
+
 let _loaded       = false;
 let _templates    = [];
 let _projects     = [];
@@ -64,7 +69,10 @@ async function loadAll({ force = false } = {}) {
 
 function _loadCurrentDiagram() {
   const xml = _currentProject?.diagram_xml || "";
-  if (xml) _ui()?.loadXml?.(xml);
+  if (xml) {
+    _lastAppliedXml = xml;
+    _ui()?.loadXml?.(xml);
+  }
 }
 
 // ── public: open / close ───────────────────────────────────────
@@ -74,6 +82,7 @@ async function open() {
   document.body.classList.add("business-canvas-open");
   ui?.setOpen?.(true);
   await loadAll();
+  retryPendingSave();
 }
 
 function close() {
@@ -91,7 +100,11 @@ function setFullscreen(enabled) {
 
 async function createProject(templateId) {
   const template = _templates.find(t => t.id === templateId);
-  const title    = template?.name || "图表";
+  const lang = (window.getLang?.() || "zh").toLowerCase();
+  const fallbackName = lang.startsWith("en")
+    ? template?.name_en || template?.name || "Diagram"
+    : template?.name || "图表";
+  const title    = fallbackName;
   _sync({ saving: true, error: "" });
   try {
     const data = await _jsonFetch(`${_base()}/projects`, {
@@ -161,21 +174,75 @@ async function renameProject(projectId, newTitle) {
 
 // ── public: diagram XML ────────────────────────────────────────
 
-// Called by the draw.io iframe onAutosave to persist changes
-async function saveDiagramXml(projectId, xml) {
-  if (!projectId || !xml) return;
+// Debounced autosave: draw.io fires autosave on every change; large diagrams
+// can be hundreds of KB, so coalesce rapid edits into one PATCH.
+const AUTOSAVE_DEBOUNCE_MS = 1500;
+let _saveTimer = null;
+let _pendingSave = null; // { projectId, xml }
+let _lastAppliedXml = "";
+let _saveFailed = false;
+
+function _scheduleSave(projectId, xml) {
+  _pendingSave = { projectId, xml };
+  if (_saveTimer) clearTimeout(_saveTimer);
+  _saveTimer = setTimeout(_flushSave, AUTOSAVE_DEBOUNCE_MS);
+}
+
+async function _flushSave() {
+  _saveTimer = null;
+  const pending = _pendingSave;
+  if (!pending) return;
+  _pendingSave = null;
   try {
     await _jsonFetch(
-      `${_base()}/projects/${encodeURIComponent(projectId)}/diagram`,
-      { method: "PATCH", body: JSON.stringify({ diagram_xml: xml, actor_type: "user" }) },
+      `${_base()}/projects/${encodeURIComponent(pending.projectId)}/diagram`,
+      { method: "PATCH", body: JSON.stringify({ diagram_xml: pending.xml, actor_type: "user" }) },
     );
-  } catch { /* silent autosave */ }
+    if (_saveFailed) {
+      _saveFailed = false;
+      _sync({ error: "" });
+    }
+  } catch (err) {
+    _saveFailed = true;
+    // Keep the newest xml so a later successful save/flush wins.
+    _pendingSave = pending;
+    _sync({
+      error: text(
+        "canvas.autosave_failed",
+        "画布自动保存失败，最新内容仍保留在编辑器中，重新打开画布时会自动重试。"
+      ) + (err?.message ? `（${String(err.message)}）` : ""),
+    });
+  }
+}
+
+// Called by the draw.io iframe onAutosave to persist changes
+function saveDiagramXml(projectId, xml) {
+  if (!projectId || !xml) return;
+  _lastAppliedXml = xml;
+  _scheduleSave(projectId, xml);
+}
+
+// Retry a failed autosave as soon as the canvas panel is interacted with again.
+async function retryPendingSave() {
+  if (_saveFailed && _pendingSave) await _flushSave();
 }
 
 // Called by SSE canvas_event → loadDiagramXml
 async function loadDiagramXml(xml) {
+  // Skip redundant reloads of identical content (also avoids clobbering
+  // in-flight edits with the same xml that was just autosaved back).
+  if (!xml || xml === _lastAppliedXml) return;
+  // Never overwrite the editor while an autosave failed and the newer
+  // local content is still unsaved — the user's edits win over the push.
+  if (_saveFailed && _pendingSave) {
+    _sync({
+      error: text("canvas.push_skipped", "画布有未保存的本地编辑，已跳过远端更新。"),
+    });
+    return;
+  }
   // Ensure island is mounted (open() may not have been called yet)
   const ui = await _ensureUi();
+  _lastAppliedXml = xml;
   ui?.loadXml?.(xml);
 }
 
@@ -191,4 +258,5 @@ export const businessCanvas = Object.freeze({
   renameProject,
   saveDiagramXml,
   loadDiagramXml,
+  retryPendingSave,
 });

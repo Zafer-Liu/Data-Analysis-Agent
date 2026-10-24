@@ -15,7 +15,7 @@ import uuid
 import re
 from datetime import datetime
 from pathlib import Path
-from infrastructure.paths import data_path
+from infrastructure.paths import content_data_path
 
 log = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ TOOL_RESULT_CHAR_BUDGET = 2_000
 TOOL_RESULT_PREVIEW_CHARS = 2_000
 TOOL_RESULT_PREVIEW_LINES = 40
 TOOL_RESULT_READ_MAX_CHARS = 4_000
-_GLOBAL_RESULT_ROOT = data_path("outputs", "tool_results")
+_GLOBAL_RESULT_ROOT = content_data_path("outputs", "tool_results")
 
 
 @dataclass(frozen=True)
@@ -53,6 +53,8 @@ _TOOL_RESULT_POLICIES = {
     "export_report": ToolResultPolicy(800, 800, 20),
     "generate_ppt": ToolResultPolicy(800, 800, 20),
     "generate_dashboard": ToolResultPolicy(800, 800, 20),
+    "fetch_table": ToolResultPolicy(3_000, 3_000, 60),
+    "browser_extract_tables": ToolResultPolicy(3_000, 3_000, 60),
 }
 
 
@@ -192,7 +194,7 @@ def _result_root(runtime: Any = None) -> Path:
 def _evidence_root(runtime: Any = None) -> Path:
     if runtime is not None and getattr(runtime, "cache_dir", None):
         return Path(runtime.cache_dir) / "evidence_claims"
-    return data_path("outputs", "evidence_claims")
+    return content_data_path("outputs", "evidence_claims")
 
 
 def _sha256_text(value: Any) -> str:

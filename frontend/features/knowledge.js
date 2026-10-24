@@ -5,7 +5,18 @@
  */
 import { getUiIsland } from "../core/ui-registry.js";
 import { toast } from "../core/overlay.js";
+import { eventBus } from "../core/event-bus.js";
 import { state } from "../core/runtime.js";
+import {
+  deleteLocalKnowledgeFileByServerFilename,
+  deleteLocalKnowledgeFilesByCategory,
+  getLocalKnowledgeSnapshot,
+  isBrowserLocalMode,
+  listLocalKnowledgeFiles,
+  saveLocalKnowledgeFile,
+  saveLocalKnowledgeSnapshot,
+  updateLocalKnowledgeFile,
+} from "../core/local-data-store.js";
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
@@ -16,7 +27,10 @@ const _kb = {
   categories: [],
   activeCategoryId: 1,
   categoriesLoaded: false,
+  pendingSourceFile: null,
 };
+
+let browserKnowledgeRestorePromise = null;
 
 function kbScopeUrl(path) {
   // Prefer state.SID (always current) over the legacy SID global or sessionStorage.
@@ -39,6 +53,100 @@ function activeCategoryId() {
 function kbCategoryUrl(path) {
   const sep = path.includes("?") ? "&" : "?";
   return `${path}${sep}category_id=${encodeURIComponent(activeCategoryId())}`;
+}
+
+async function kbJson(path, options) {
+  const response = await kbFetch(path, options);
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "知识库请求失败");
+  return data;
+}
+
+async function kbBuildBrowserSnapshot() {
+  const categories = await kbJson("/api/knowledge/categories");
+  const categoryNames = new Map(categories.map((item) => [Number(item.id), item.name]));
+  const [metrics, rules, notes, documents] = await Promise.all([
+    Promise.all(categories.map((item) => kbJson(`/api/knowledge/metrics?category_id=${item.id}`))).then((rows) => rows.flat()),
+    Promise.all(categories.map((item) => kbJson(`/api/knowledge/rules?category_id=${item.id}`))).then((rows) => rows.flat()),
+    Promise.all(categories.map((item) => kbJson(`/api/knowledge/notes?category_id=${item.id}`))).then((rows) => rows.flat()),
+    listLocalKnowledgeFiles(),
+  ]);
+  const withCategory = (row) => ({
+    ...row,
+    category_name: categoryNames.get(Number(row.category_id)) || "",
+  });
+  return {
+    version: 1,
+    categories: categories.map(({ name, enabled }) => ({ name, enabled: Boolean(enabled) })),
+    metrics: metrics.map(withCategory),
+    rules: rules.map(withCategory),
+    notes: notes.map(withCategory),
+    documents: documents.map((item) => ({
+      id: item.id,
+      name: item.name,
+      server_filename: item.server_filename,
+      category_name: item.category_name,
+    })),
+  };
+}
+
+async function kbPersistBrowserSnapshot() {
+  if (!isBrowserLocalMode()) return;
+  try {
+    await saveLocalKnowledgeSnapshot(await kbBuildBrowserSnapshot());
+  } catch (error) {
+    console.warn("[knowledge] browser snapshot failed", error);
+    toast(`业务知识库本地保存失败：${error.message}`);
+  }
+}
+
+async function kbRestoreBrowserKnowledge() {
+  if (!isBrowserLocalMode()) return false;
+  if (!browserKnowledgeRestorePromise) {
+    browserKnowledgeRestorePromise = (async () => {
+      const snapshot = await getLocalKnowledgeSnapshot();
+      if (!snapshot) {
+        // First cloud visit: seed the local durable copy from the live temporary store.
+        await kbPersistBrowserSnapshot();
+        return false;
+      }
+      const restored = await kbJson("/api/knowledge/restore", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ snapshot }),
+      });
+      const documentMeta = new Map((snapshot.documents || []).map((item) => [item.id, item]));
+      const files = await listLocalKnowledgeFiles();
+      for (const record of files) {
+        const meta = documentMeta.get(record.id) || {};
+        const file = record.blob instanceof File
+          ? record.blob
+          : new File([record.blob], record.name, {
+            type: record.type || "application/octet-stream",
+            lastModified: record.last_modified || Date.now(),
+          });
+        const formData = new FormData();
+        formData.append("file", file, record.name);
+        const categoryName = record.category_name || meta.category_name || "";
+        formData.append("category_name", categoryName);
+        const response = await kbFetch("/api/knowledge/restore-file", { method: "POST", body: formData });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || `恢复知识文件 ${record.name} 失败`);
+        await updateLocalKnowledgeFile(record.id, {
+          server_filename: data.filename,
+          category_name: categoryName,
+        });
+      }
+      await kbPersistBrowserSnapshot();
+      return Boolean(restored.ok);
+    })().catch((error) => {
+      browserKnowledgeRestorePromise = null;
+      console.warn("[knowledge] browser restore failed", error);
+      toast(`业务知识库本地恢复失败：${error.message}`);
+      return false;
+    });
+  }
+  return browserKnowledgeRestorePromise;
 }
 
 
@@ -78,6 +186,7 @@ async function kbAddCategory(name) {
     vk?.setCategoryErr?.("");
     await kbLoadCategories();
     loadByTab(_kb.tab);
+    await kbPersistBrowserSnapshot();
   } catch (e) {
     vk?.setCategoryErr?.(e.message);
   }
@@ -97,6 +206,7 @@ async function kbToggleCategory(id) {
     if (!res.ok) throw new Error(data.error || "切换分类失败");
     Object.assign(rec, data);
     vk?.setCategories?.(_kb.categories, _kb.activeCategoryId);
+    await kbPersistBrowserSnapshot();
   } catch (e) {
     rec.enabled = oldEnabled;
     vk?.setCategories?.(_kb.categories, _kb.activeCategoryId);
@@ -119,8 +229,10 @@ async function kbDeleteCategory(id) {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "删除分类失败");
     if (Number(_kb.activeCategoryId) === cid) _kb.activeCategoryId = 1;
+    await deleteLocalKnowledgeFilesByCategory(rec.name);
     await kbLoadCategories();
     await loadByTab(_kb.tab);
+    await kbPersistBrowserSnapshot();
     toast(`已删除业务分类“${rec.name}”`);
   } catch (e) {
     toast(`分类删除失败: ${e.message}`);
@@ -225,6 +337,7 @@ async function kbToggle(type, id) {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "切换失败");
     // 成功：state 已是乐观值，无需 reload
+    await kbPersistBrowserSnapshot();
   } catch (e) {
     vk.updateItem(type, id, { enabled: oldEnabled });  // 回滚
     toast(`切换失败: ${e.message}`);
@@ -280,6 +393,7 @@ async function kbSubmitForm() {
     if (window.BAA?.sidebar?.closeKbInlineForm) window.BAA.sidebar.closeKbInlineForm();
     toast(mode === "edit" ? "已更新 ✓" : "已添加 ✓");
     loadByTab(type);  // 刷新当前类型列表
+    await kbPersistBrowserSnapshot();
   } catch (e) {
     vk.setFormErr(`请求失败: ${e.message}`);
     vk.setFormBusy(false);
@@ -299,6 +413,7 @@ async function kbDelete(type, id) {
     const delRes = await kbFetch(`/api/knowledge/${type}/${id}`, { method: "DELETE" });
     if (!delRes.ok) throw new Error("删除请求失败");
     toast("已删除");
+    await kbPersistBrowserSnapshot();
   } catch (e) {
     toast(`删除失败: ${e.message}`);
     loadByTab(type);  // 回滚：重新 load
@@ -343,7 +458,9 @@ async function kbDeleteFile(filename) {
     title: "删除知识文件", message: `确认删除文件“${filename}”？`, danger: true,
   })) return;
   try {
-    await kbFetch(`/api/knowledge/files/${encodeURIComponent(filename)}`, { method: "DELETE" });
+    const response = await kbFetch(`/api/knowledge/files/${encodeURIComponent(filename)}`, { method: "DELETE" });
+    if (!response.ok) throw new Error("删除知识文件失败");
+    await deleteLocalKnowledgeFileByServerFilename(filename);
     toast("文件已删除");
     kbLoadFiles();
   } catch (e) {
@@ -362,6 +479,7 @@ function kbResetImport() {
   document.getElementById("kb-drop-zone").classList.remove('hidden');
   _kb.previewRecs = [];
   _kb.sourceFile = "";
+  _kb.pendingSourceFile = null;
 }
 
 function kbOnDrop(e) {
@@ -411,6 +529,7 @@ async function kbParseFile(file) {
 
     _kb.previewRecs = data.preview || [];
     _kb.sourceFile = data.filename || "";
+    _kb.pendingSourceFile = file;
     kbRenderPreview(data);
     kbLoadFiles();   // refresh file list after upload
   } catch (e) {
@@ -542,6 +661,15 @@ async function kbConfirmImport() {
     const ragChunks = data.rag?.chunks || 0;
     okEl.textContent =
       `✓ 入库成功：指标 ${inserted.metrics} 条，规则 ${inserted.rules} 条，背景知识 ${inserted.notes} 条，RAG 分块 ${ragChunks} 条`;
+    const categoryName = _kb.categories.find((item) => Number(item.id) === activeCategoryId())?.name || "";
+    if (_kb.pendingSourceFile && _kb.sourceFile) {
+      await saveLocalKnowledgeFile({
+        file: _kb.pendingSourceFile,
+        serverFilename: _kb.sourceFile,
+        categoryName,
+      });
+    }
+    await kbPersistBrowserSnapshot();
     _kb.previewRecs = [];
     setTimeout(() => kbResetImport(), 1800);
   } catch (e) {
@@ -550,6 +678,8 @@ async function kbConfirmImport() {
 }
 
 // ── Init: refresh data when modal opens ──────────────────────────────────────
+
+let __kbOverlayListenerInstalled = false;
 
 function syncKnowledgeIsland(vk) {
   if (!vk?.isAvailable()) return false;
@@ -571,22 +701,22 @@ function syncKnowledgeIsland(vk) {
 }
 
 export function installKnowledgePanel() {
-  const originalOpenOverlay = window.openOverlay;
-  window.openOverlay = async function(id, ...rest) {
-    const result = originalOpenOverlay
-      ? await originalOpenOverlay(id, ...rest)
-      : undefined;
-    // Legacy path: still handle ov-knowledge if it ever gets opened programmatically.
-    if (id === "ov-knowledge") {
+  // F3 mid-term: subscribe to the overlay:open event instead of monkey-patching
+  // window.openOverlay (core/overlay.js emits after the overlay is open, so the
+  // island is already ensured by the legacy-core wrapper at that point).
+  if (!__kbOverlayListenerInstalled) {
+    __kbOverlayListenerInstalled = true;
+    eventBus.on("overlay:open", ({ id }) => {
+      // Legacy path: still handle ov-knowledge if it ever gets opened programmatically.
+      if (id !== "ov-knowledge") return;
       const vk = getUiIsland("knowledge");
       if (syncKnowledgeIsland(vk)) {
         vk.onOpen();
       } else {
         loadByTab(_kb.tab);
       }
-    }
-    return result;
-  };
+    });
+  }
 
   // New path: trigger data loading when the sb-panel-knowledge panel opens.
   // openSidePanel() first loads the Vue island, then calls sidebar.openPanel().
@@ -656,4 +786,5 @@ export const knowledge = Object.freeze({
   kbPreviewRemove,
   kbCancelImport,
   kbConfirmImport,
+  restoreBrowserKnowledge: kbRestoreBrowserKnowledge,
 });

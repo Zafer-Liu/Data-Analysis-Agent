@@ -1,0 +1,2 @@
+# Development/CI only; application runtime dependencies live in requirements.txt.
+pytest>=8.0,<10.0

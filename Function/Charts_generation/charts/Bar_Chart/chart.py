@@ -62,7 +62,7 @@ def _auto_col(df: pd.DataFrame, *hints: str) -> Optional[str]:
             str(df[c].dtype).startswith('string') or
             pd.api.types.is_string_dtype(df[c])]
     nums = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-    col_lower = {c.lower(): c for c in df.columns}
+    col_lower = {str(c).lower(): c for c in df.columns}
     
     # 1. 精确匹配 hints
     for h in hints:
@@ -160,8 +160,10 @@ def generate(
             return ChartResult(warnings=["请提供 df 或 excel_path"])
 
     # ── 字段解析 ────────────────────────────────────────
-    x_col = mapping.get("x") or x
-    y_col = mapping.get("y") or y
+    x_col = mapping.get("x")
+    x_col = x_col if x_col is not None else x
+    y_col = mapping.get("y")
+    y_col = y_col if y_col is not None else y
     title = options.get("title", title)
     orientation = options.get("orientation", orientation)
     sort = options.get("sort", sort)

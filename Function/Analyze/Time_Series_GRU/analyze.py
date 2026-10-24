@@ -24,6 +24,39 @@ import numpy as np
 import pandas as pd
 from typing import Callable, Optional, Tuple, List
 
+
+def _try_cuda_torch_gru(
+    df: pd.DataFrame,
+    target_column: str,
+    groupby_column: Optional[str],
+    n_deciles: int,
+    progress_callback: Optional[Callable[[int, str], None]],
+):
+    """Use the maintained Torch GRU only when a local CUDA device is usable.
+
+    The built-in NumPy implementation remains the deterministic CPU baseline.
+    This avoids making the ``gru`` Skill depend on the optional Torch package,
+    while allowing the same public analysis contract to use CUDA automatically.
+    """
+    try:
+        from infrastructure.training_device import select_training_device
+
+        choice = select_training_device()
+        if not str(choice.get("device") or "").startswith("cuda"):
+            return None
+        from Function.Analyze.Torch_RNN.analyze import run as run_torch_rnn
+
+        if progress_callback:
+            progress_callback(20, f"检测到 {choice['device']}，切换到 PyTorch GRU 加速")
+        return run_torch_rnn(
+            df, target_column, groupby_column, n_deciles, progress_callback,
+        )
+    except (ImportError, RuntimeError):
+        # Optional Torch/CUDA failures must retain the original CPU capability.
+        if progress_callback:
+            progress_callback(20, "PyTorch CUDA 不可用，回退到 NumPy CPU GRU")
+        return None
+
 # ── 模块元数据 ──────────────────────────────────────────────────────────────
 ANALYSIS_ID   = "Time_Series_GRU"
 ANALYSIS_NAME = "GRU 时间序列预测（深度学习）"
@@ -524,6 +557,12 @@ def run(
         raise ValueError(
             f"有效数据点不足（{len(series)} 个），GRU 至少需要 {_WINDOW + 4} 个数据点。"
         )
+
+    accelerated_result = _try_cuda_torch_gru(
+        df, target_column, groupby_column, n_deciles, progress_callback,
+    )
+    if accelerated_result is not None:
+        return accelerated_result
 
     # ── 归一化 ────────────────────────────────────────────────────────────
     progress(18, "正在构建 GRU 训练样本")

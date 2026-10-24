@@ -205,7 +205,7 @@ class StdioTransport(BaseTransport):
             "protocolVersion": "2024-11-05",
             "capabilities": {},
             "clientInfo": {"name": "business-analytics-agent", "version": "1.0"},
-        })
+        }, timeout=120)
         log.debug("[stdio] initialize response: %s", init_resp)
         # send notifications/initialized (no response expected)
         notif = json.dumps({
@@ -216,7 +216,7 @@ class StdioTransport(BaseTransport):
         self._proc.stdin.write(notif.encode())
         await self._proc.stdin.drain()
 
-    async def send_request(self, method: str, params: dict) -> Any:
+    async def send_request(self, method: str, params: dict, *, timeout: float = 30) -> Any:
         async with self._lock:
             self._req_id += 1
             req = json.dumps({
@@ -230,7 +230,7 @@ class StdioTransport(BaseTransport):
 
             while True:
                 line = await asyncio.wait_for(
-                    self._proc.stdout.readline(), timeout=30
+                    self._proc.stdout.readline(), timeout=timeout
                 )
                 if not line:
                     raise ConnectionError("MCP stdio process closed stdout")
@@ -582,7 +582,7 @@ class MCPManager:
             try:
                 self._submit(conn.disconnect(), timeout=10)
             except Exception:
-                pass
+               pass
 
     def connect_server(self, server_id: str) -> dict:
         """Lazily connect a single server. Exception-safe, returns status dict."""
@@ -594,13 +594,12 @@ class MCPManager:
         # Explicit connect resets the reconnect counter so auto-reconnect can retry
         conn._reconnect_attempts = 0
         try:
-            self._submit(conn.connect(), timeout=60)
+            self._submit(conn.connect(), timeout=180)
         except Exception as e:
             conn.status = STATUS_ERROR
             conn.last_error = str(e)
             log.error("[MCPManager] connect_server %s failed: %s", server_id, e)
         return conn.to_status_dict()
-
     def get_all_openai_schemas(self) -> List[dict]:
         with self._lock:
             conns = list(self._connections.values())

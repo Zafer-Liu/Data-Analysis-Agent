@@ -4,8 +4,8 @@ KnowledgeBase — SQLite-backed store for business knowledge.
 
 DB location is scope-dependent:
   - mounted Workspace: <workspace>/.zhixi/knowledge/knowledge.db
-  - desktop default user: <data_root>/uploads/knowledge/knowledge.db
-  - named user: <data_root>/uploads/knowledge/users/<user-hash>/knowledge.db
+  - desktop default user: <content_data_root>/uploads/knowledge/knowledge.db
+  - named user: <content_data_root>/uploads/knowledge/users/<user-hash>/knowledge.db
 
 Three tables:
   metrics        — canonical metric definitions (DAU, LTV, …)
@@ -26,7 +26,7 @@ import math
 import os
 import re
 from pathlib import Path
-from infrastructure.paths import data_path
+from infrastructure.paths import content_data_path
 import jieba
 from Function.Knowledge.neural_embedder import (
     embed as _neural_embed,
@@ -39,7 +39,7 @@ from Function.Knowledge.neural_embedder import (
 
 # ── Path resolution ───────────────────────────────────────────────────────────
 # Walk up from this file: Function/Knowledge/ → Function/ → project root
-_KB_DIR  = data_path("uploads", "knowledge")
+_KB_DIR  = content_data_path("uploads", "knowledge")
 _DB_PATH = _KB_DIR / "knowledge.db"
 _DEFAULT_USER_ID = "local-default"
 
@@ -404,6 +404,12 @@ class KnowledgeBase:
         except Exception as e:
             log.warning("[knowledge_base] 关闭数据库连接异常: %s", e)
 
+    def __enter__(self) -> "KnowledgeBase":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
     # ── internal helpers ──────────────────────────────────────────────────────
 
     def _now(self) -> float:
@@ -645,6 +651,118 @@ class KnowledgeBase:
             raise
         return counts
 
+    def replace_structured_snapshot(self, snapshot: dict) -> dict[str, int]:
+        """Replace structured knowledge from a browser-owned cloud snapshot.
+
+        Managed Web deployments deliberately keep user content outside the
+        Railway Volume.  The browser therefore owns the durable copy and uses
+        this method only to reconstruct the disposable server-side search
+        store.  Source-document chunks are restored separately from file
+        blobs, so they are intentionally cleared here.
+        """
+        if not isinstance(snapshot, dict):
+            raise ValueError("知识库快照格式无效")
+
+        raw_categories = snapshot.get("categories") or []
+        category_rows = []
+        seen_names: set[str] = set()
+        for item in raw_categories:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()[:120]
+            if not name or name in seen_names:
+                continue
+            seen_names.add(name)
+            category_rows.append((name, 1 if item.get("enabled", True) else 0))
+        if not category_rows:
+            category_rows.append((DEFAULT_CATEGORY_NAME, 1))
+        if len(category_rows) > 100:
+            raise ValueError("业务分类数量超过上限")
+
+        records_by_kind = {
+            "metrics": snapshot.get("metrics") or [],
+            "rules": snapshot.get("rules") or [],
+            "notes": snapshot.get("notes") or [],
+        }
+        if any(not isinstance(rows, list) or len(rows) > 2000
+               for rows in records_by_kind.values()):
+            raise ValueError("知识库条目数量超过上限或格式无效")
+
+        try:
+            self._conn.execute("BEGIN")
+            for table in ("structured_embeddings", "rag_chunks", "metrics",
+                          "business_rules", "context_notes", "knowledge_categories"):
+                self._conn.execute(f"DELETE FROM {table}")
+            now = self._now()
+            category_ids: dict[str, int] = {}
+            for name, enabled in category_rows:
+                cur = self._conn.execute(
+                    "INSERT INTO knowledge_categories (name, enabled, updated_at) VALUES (?, ?, ?)",
+                    (name, enabled, now),
+                )
+                category_ids[name] = int(cur.lastrowid)
+
+            fallback_category = next(iter(category_ids.values()))
+            inserted = {"metrics": 0, "rules": 0, "notes": 0}
+            for item in records_by_kind["metrics"]:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or "").strip()[:200]
+                if not name:
+                    continue
+                cid = category_ids.get(str(item.get("category_name") or ""), fallback_category)
+                self._conn.execute(
+                    """INSERT INTO metrics
+                       (name, alias, definition, sql_template, notes, category_id, enabled, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (name, str(item.get("alias") or ""), str(item.get("definition") or ""),
+                     str(item.get("sql_template") or ""), str(item.get("notes") or ""), cid,
+                     1 if item.get("enabled", True) else 0, now),
+                )
+                inserted["metrics"] += 1
+            for item in records_by_kind["rules"]:
+                if not isinstance(item, dict):
+                    continue
+                rule_id = str(item.get("rule_id") or "").strip()[:200]
+                if not rule_id:
+                    continue
+                cid = category_ids.get(str(item.get("category_name") or ""), fallback_category)
+                self._conn.execute(
+                    """INSERT INTO business_rules
+                       (rule_id, description, condition, severity, category_id, enabled, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (rule_id, str(item.get("description") or ""), str(item.get("condition") or ""),
+                     str(item.get("severity") or "warning"), cid,
+                     1 if item.get("enabled", True) else 0, now),
+                )
+                inserted["rules"] += 1
+            for item in records_by_kind["notes"]:
+                if not isinstance(item, dict):
+                    continue
+                topic = str(item.get("topic") or "").strip()[:200]
+                if not topic:
+                    continue
+                cid = category_ids.get(str(item.get("category_name") or ""), fallback_category)
+                self._conn.execute(
+                    """INSERT INTO context_notes
+                       (topic, content, tags, category_id, enabled, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (topic, str(item.get("content") or ""), str(item.get("tags") or ""), cid,
+                     1 if item.get("enabled", True) else 0, now),
+                )
+                inserted["notes"] += 1
+            self._conn.execute("INSERT INTO metrics_fts(metrics_fts) VALUES('rebuild')")
+            self._conn.execute("INSERT INTO context_notes_fts(context_notes_fts) VALUES('rebuild')")
+            self._conn.execute("INSERT INTO rag_chunks_fts(rag_chunks_fts) VALUES('rebuild')")
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+
+        if sum(inserted.values()):
+            self.rebuild_structured_embeddings()
+        return {**inserted, "categories": len(category_rows)}
+
     # ── enabled summary (admin/debug display only; never prompt injection) ─────
 
     def get_enabled_summary(self) -> str:
@@ -717,7 +835,8 @@ class KnowledgeBase:
     def add_metric(self, name: str, alias: str = "", definition: str = "",
                    sql_template: str = "", notes: str = "",
                    enabled: int = 1, category_id: int | str | None = None,
-                   cache_embedding: bool = True) -> dict:
+                   cache_embedding: bool = True,
+                   rebuild_fts: bool = True) -> dict:
         cur = self._conn.execute(
             """INSERT INTO metrics
                  (name, alias, definition, sql_template, notes, category_id, enabled, updated_at)
@@ -731,7 +850,8 @@ class KnowledgeBase:
              self._normalize_category_id(category_id), enabled, self._now()),
         )
         self._conn.commit()
-        self._rebuild_fts("metrics")
+        if rebuild_fts:
+            self._rebuild_fts("metrics")
         record = self.get_metric_by_id(cur.lastrowid or self._metric_id(name))
         if cache_embedding:
             self._try_cache_structured_record("metric", record)
@@ -784,7 +904,8 @@ class KnowledgeBase:
     def add_rule(self, rule_id: str, description: str = "",
                  condition: str = "", severity: str = "warning",
                  enabled: int = 1, category_id: int | str | None = None,
-                 cache_embedding: bool = True) -> dict:
+                 cache_embedding: bool = True,
+                 rebuild_fts: bool = True) -> dict:
         cur = self._conn.execute(
             """INSERT INTO business_rules
                  (rule_id, description, condition, severity, category_id, enabled, updated_at)
@@ -848,14 +969,16 @@ class KnowledgeBase:
 
     def add_note(self, topic: str, content: str = "", tags: str = "",
                  enabled: int = 1, category_id: int | str | None = None,
-                 cache_embedding: bool = True) -> dict:
+                 cache_embedding: bool = True,
+                 rebuild_fts: bool = True) -> dict:
         cur = self._conn.execute(
             """INSERT INTO context_notes (topic, content, tags, category_id, enabled, updated_at)
                VALUES (?, ?, ?, ?, ?, ?)""",
             (topic.strip(), content, tags, self._normalize_category_id(category_id), enabled, self._now()),
         )
         self._conn.commit()
-        self._rebuild_fts("context_notes")
+        if rebuild_fts:
+            self._rebuild_fts("context_notes")
         record = self.get_note_by_id(cur.lastrowid)
         if cache_embedding:
             self._try_cache_structured_record("note", record)
@@ -1160,7 +1283,9 @@ class KnowledgeBase:
             ("documents", chunk_rows),
         ):
             for row in rows:
-                score = float(row.get("score", row.get("vector_score", 0.0)) or 0.0)
+                # RRF is rank-based and comparable across result types, so it
+                # (not raw cosine) must drive the global Top-K merge.
+                score = float(row.get("rrf_score", row.get("vector_score", 0.0)) or 0.0)
                 ranked.append((score, kind, row))
         ranked.sort(key=lambda item: item[0], reverse=True)
 
@@ -1175,6 +1300,8 @@ class KnowledgeBase:
 
     def bulk_insert(self, records: list[dict], category_id: int | str | None = None) -> dict[str, int]:
         counts: dict[str, int] = {"metrics": 0, "rules": 0, "notes": 0}
+        # Defer FTS rebuild: add_metric/add_note would otherwise rebuild the
+        # full-text index once per record (O(N) rebuilds -> O(N^2) work).
         for rec in records:
             table = rec.get("table", "")
             if table == "metrics":
@@ -1186,6 +1313,7 @@ class KnowledgeBase:
                     notes=rec.get("notes", ""),
                     category_id=rec.get("category_id") or category_id,
                     cache_embedding=False,
+                    rebuild_fts=False,
                 )
                 counts["metrics"] += 1
             elif table == "business_rules":
@@ -1205,9 +1333,14 @@ class KnowledgeBase:
                     tags=rec.get("tags", ""),
                     category_id=rec.get("category_id") or category_id,
                     cache_embedding=False,
+                    rebuild_fts=False,
                 )
                 counts["notes"] += 1
         if sum(counts.values()):
+            if counts["metrics"]:
+                self._rebuild_fts("metrics")
+            if counts["notes"]:
+                self._rebuild_fts("context_notes")
             self.rebuild_structured_embeddings()
         return counts
 

@@ -62,6 +62,11 @@ def profile(
     missing_pct = (missing / n_rows * 100).round(2) if n_rows > 0 else missing * 0
     pseudo_missing = {col: _pseudo_null_count(df[col]) for col in df.columns}
     pseudo_missing_cols = [col for col, count in pseudo_missing.items() if count > 0]
+    # Zero values in numeric columns are a distinct quality signal: they may be
+    # real zeros or silently-failed readings. Profiling reports them separately
+    # so "0.0% missing" columns cannot masquerade as complete.
+    zero_counts = {col: int((df[col] == 0).sum()) for col in numeric_cols}
+    zero_cols = [col for col in numeric_cols if zero_counts[col] > 0]
     date_parse_rates = {
         col: _date_parse_rate(df[col])
         for col in df.columns
@@ -76,6 +81,7 @@ def profile(
         f"- 数值列：**{len(numeric_cols)}** 个",
         f"- 含缺失值的列：**{int((missing > 0).sum())}** 个",
         f"- 含伪缺失字符串的列：**{len(pseudo_missing_cols)}** 个",
+        f"- 含零值的数值列：**{len(zero_cols)}** 个",
         "",
     ]
 
@@ -84,6 +90,11 @@ def profile(
         quality_warnings.append(
             "检测到字符串型伪缺失值，建分析样本前必须先清洗或确认导入规则。"
         )
+    for col in zero_cols:
+        if n_rows > 0 and zero_counts[col] / n_rows > 0.5:
+            quality_warnings.append(
+                f"数值字段 `{col}` 零值占比超过 50%，需先确认零值语义（真实零还是缺失）。"
+            )
     for col, rate in date_parse_rates.items():
         if rate is not None and rate < 95:
             quality_warnings.append(f"日期字段 `{col}` 可解析率仅 {rate}%，需先检查格式。")
@@ -117,6 +128,17 @@ def profile(
         for col in pseudo_missing_cols:
             pct = round(pseudo_missing[col] / n_rows * 100, 2) if n_rows > 0 else 0
             lines.append(f"| {col} | {pseudo_missing[col]} | {pct}% |")
+
+    if zero_cols:
+        lines += [
+            "",
+            "## 数值列零值统计",
+            "| 列名 | 零值数 | 零值占比 |",
+            "|------|--------|----------|",
+        ]
+        for col in zero_cols:
+            pct = round(zero_counts[col] / n_rows * 100, 2) if n_rows > 0 else 0
+            lines.append(f"| {col} | {zero_counts[col]} | {pct}% |")
 
     if date_parse_rates:
         lines += [

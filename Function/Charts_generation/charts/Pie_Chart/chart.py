@@ -39,27 +39,27 @@ def _auto_col(df: pd.DataFrame, *hints: str) -> Optional[str]:
     3. 类型匹配：根据 hint 的语义推断类型
     4. 自动推断：无 hints 时返回第一个合适的列
     """
-    strs = [c for c in df.columns if df[c].dtype == object]
+    strs = [c for c in df.columns if (df[c].dtype == object or pd.api.types.is_string_dtype(df[c]))]
     nums = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-    col_lower = {c.lower(): c for c in df.columns}
+    col_lower = {str(c).lower(): c for c in df.columns}
     
     # 1. 精确匹配 hints
     for h in hints:
-        h_lower = h.lower()
+        h_lower = str(h).lower()
         if h_lower in col_lower:
             return col_lower[h_lower]
     
     # 2. 模糊匹配（包含关系）
     for h in hints:
-        h_lower = h.lower()
+        h_lower = str(h).lower()
         for col in df.columns:
-            col_lower_name = col.lower()
+            col_lower_name = str(col).lower()
             if h_lower in col_lower_name or col_lower_name in h_lower:
                 return col
     
     # 3. 类型匹配：根据 hint 的语义推断应该是什么类型
     if hints:
-        hint = hints[0].lower()
+        hint = str(hints[0]).lower()
         # 字符串类型的 hints
         if any(kw in hint for kw in ["source", "target", "label", "name", "group", "category", "phase", "row", "col", "path", "text", "word", "location", "geo"]):
             if strs:
@@ -149,11 +149,24 @@ def generate(
         else:
             return ChartResult(warnings=["请提供 df 或 excel_path"])
 
-    names_col = mapping.get("names") or mapping.get("name") or names
-    values_col = mapping.get("values") or mapping.get("value") or values
+    # 调度器把 aliases 归一化：labels→label、values→value（chart_generate.py:76-80）。
+    # 同时保留旧别名 names/name/values 以兼容直接调用与旧 payload。
+    # None-safe 读取：整数 0 列名在 or 链中是 falsy 会被吞。
+    names_col = mapping.get("label")
+    if names_col is None:
+        names_col = mapping.get("names")
+    if names_col is None:
+        names_col = mapping.get("name")
+    if names_col is None:
+        names_col = names
+    values_col = mapping.get("value")
+    if values_col is None:
+        values_col = mapping.get("values")
+    if values_col is None:
+        values_col = values
     title = options.get("title", title)
 
-    _names = _auto_col(df, names_col, "name", "names", "产品", "类别", "category", "label")
+    _names = _auto_col(df, names_col, "label", "name", "names", "产品", "类别", "category")
     # 查找 values 列时排除已选中的 names 列，避免两者映射到同一列
     _df_for_values = df.drop(columns=[_names]) if _names and _names in df.columns else df
     _values = _auto_col(_df_for_values, values_col, "value", "销售额", "销量", "amount", "num", "count")
@@ -177,13 +190,19 @@ def generate(
     elif n_rows > 5:
         warnings.append(f"⚠️ 类别较多（{n_rows}个）。建议≤5个类别以获得最佳视觉效果。")
     
-    # 3. 检查负数
+    # 3. 检查负数 / NaN（先转数值再判断，避免把 NaN 误报成“负数”）
     try:
         values_numeric = pd.to_numeric(df[_values], errors='coerce')
-        if (values_numeric < 0).any():
+        neg_mask = values_numeric < 0
+        nan_mask = values_numeric.isna()
+        if neg_mask.any():
             warnings.append("⚠️ 数据中包含负数。饼图不支持负数，请过滤或转换数据。")
-            # 过滤负数
-            df = df[values_numeric >= 0].copy()
+        if nan_mask.any() and not neg_mask.any():
+            warnings.append(f"⚠️ 数据中包含 {int(nan_mask.sum())} 个无法解析为数值的空值，已自动删除。")
+        # 过滤负数与 NaN
+        keep = values_numeric.notna() & (values_numeric >= 0)
+        if (~keep).any():
+            df = df[keep].copy()
             if len(df) == 0:
                 return ChartResult(warnings=warnings + ["❌ 过滤后无有效数据"])
     except Exception as e:

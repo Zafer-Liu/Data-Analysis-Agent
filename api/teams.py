@@ -4,6 +4,7 @@ from __future__ import annotations
 from flask import Blueprint, jsonify, request
 
 from agent.tools.workspace.teams import WorkspaceTeamError, WorkspaceTeamStore
+from .state import require_session_ownership
 
 bp = Blueprint("teams", __name__)
 
@@ -13,6 +14,7 @@ def _error_response(error: Exception, status: int):
 
 
 @bp.get("/api/session/<sid>/teams")
+@require_session_ownership
 def list_teams(sid: str):
     try:
         teams = WorkspaceTeamStore(sid).list()
@@ -22,6 +24,7 @@ def list_teams(sid: str):
 
 
 @bp.get("/api/session/<sid>/teams/<team_name>")
+@require_session_ownership
 def team_status(sid: str, team_name: str):
     try:
         team = WorkspaceTeamStore(sid).status(team_name, mark_lead_read=True)
@@ -33,6 +36,7 @@ def team_status(sid: str, team_name: str):
 
 
 @bp.delete("/api/session/<sid>/teams/<team_name>")
+@require_session_ownership
 def delete_team(sid: str, team_name: str):
     body = request.get_json(silent=True) or {}
     if body.get("confirm") is not True:
@@ -56,6 +60,7 @@ def delete_team(sid: str, team_name: str):
 
 
 @bp.delete("/api/session/<sid>/teams/<team_name>/messages")
+@require_session_ownership
 def clear_team_messages(sid: str, team_name: str):
     body = request.get_json(silent=True) or {}
     if body.get("confirm") is not True:
@@ -74,6 +79,7 @@ def clear_team_messages(sid: str, team_name: str):
     return jsonify({"ok": True, **result})
 
 @bp.get("/api/session/<sid>/team-plans")
+@require_session_ownership
 def list_team_plans(sid: str):
     from agent.teams.dynamic_plans import DynamicTeamPlanStore
     try:
@@ -86,6 +92,7 @@ def list_team_plans(sid: str):
 
 
 @bp.get("/api/session/<sid>/team-plans/<plan_id>")
+@require_session_ownership
 def get_team_plan(sid: str, plan_id: str):
     from agent.teams.dynamic_plans import DynamicTeamPlanStore
     try:
@@ -96,6 +103,7 @@ def get_team_plan(sid: str, plan_id: str):
 
 
 @bp.post("/api/session/<sid>/team-plans/<plan_id>/actions/<action>")
+@require_session_ownership
 def control_team_plan(sid: str, plan_id: str, action: str):
     from agent.teams.dynamic_plans import DynamicTeamPlanStore
     try:
@@ -118,6 +126,7 @@ def control_team_plan(sid: str, plan_id: str, action: str):
 
 
 @bp.post("/api/session/<sid>/team-plans/<plan_id>/workflow-draft")
+@require_session_ownership
 def create_team_plan_workflow_draft(sid: str, plan_id: str):
     from agent.teams.dynamic_plans import DynamicTeamPlanStore
     body = request.get_json(silent=True) or {}

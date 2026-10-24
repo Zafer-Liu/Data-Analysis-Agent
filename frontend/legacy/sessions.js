@@ -3,85 +3,144 @@ import { appendMsg, clearMessages, sysMsg, updateTokenBar } from "./msg.js";
 import { renderMd } from "./markdown.js";
 import { $, esc, hideWelcome } from "../core/dom.js";
 import { closeOverlay, openOverlay, toast } from "../core/overlay.js";
-import {
-  renderSourceList,
-  setSrc,
-} from "./datasource.js";
+import { renderSourceList, setSrc, uploadStoredFiles } from "./datasource.js";
 import { setLoadedName } from "./autosave.js";
+import {
+  deleteLocalSession,
+  filesForLocalSession,
+  getLocalSession,
+  isBrowserLocalMode,
+  listLocalSessions,
+  renameLocalSession,
+  saveLocalSession,
+} from "../core/local-data-store.js";
 
-  const state = window.BAA.state;
-  let activeLoad = null;
-  let renameTarget = null;
-  let deleteTarget = null;
+const state = window.BAA.state;
+let activeLoad = null;
+let renameTarget = null;
+let deleteTarget = null;
 
-  function escAttr(s) {
-    return esc(s).replace(/"/g, "&quot;");
-  }
+function escAttr(s) {
+  return esc(s).replace(/"/g, "&quot;");
+}
 
-  function openSaveDialog() {
-    $("save-name").value = "";
-    $("save-err").textContent = "";
-    openOverlay("ov-save");
-    setTimeout(() => $("save-name").focus(), 80);
-  }
+function openSaveDialog() {
+  $("save-name").value = "";
+  $("save-err").textContent = "";
+  openOverlay("ov-save");
+  setTimeout(() => $("save-name").focus(), 80);
+}
 
-  async function saveSession() {
-    const name  = $("save-name").value.trim();
-    const errEl = $("save-err");
-    errEl.textContent = "";
-    const r = await fetch(`/api/session/${state.SID}/save`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name }),
-    });
-    const d = await r.json();
-    if (d.error) { errEl.textContent = d.error; return; }
-    closeOverlay("ov-save");
-    toast(t('toast.saved', { name: d.name }), "ok");
-    window.BAA.sidebar?.setSessionName?.(d.name, d.filename || "");
-    await loadSavedList();
-  }
-
-  function openRenameDialog(filename, name) {
-    renameTarget = { filename, name };
-    const input = $("rename-name");
-    const errEl = $("rename-err");
-    if (input) input.value = name || "";
-    if (errEl) errEl.textContent = "";
-    openOverlay("ov-rename");
-    setTimeout(() => {
-      if (!input) return;
-      input.focus();
-      input.select();
-    }, 80);
-  }
-
-  async function loadSavedList() {
-    const box = $("saved-list");
-    const r = await fetch("/api/saved-sessions");
-    const list = await r.json();
-    if (!list.length) {
-      box.innerHTML = `<div class="saved-empty">${t('saved_empty')}</div>`;
-      return;
+async function saveSession() {
+  const name = $("save-name").value.trim();
+  const errEl = $("save-err");
+  errEl.textContent = "";
+  if (isBrowserLocalMode()) {
+    try {
+      const r = await fetch(`/api/session/${state.SID}/snapshot`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      const d = await r.json();
+      if (!r.ok || d.error) throw new Error(d.error || "无法读取当前对话");
+      const filename = `conversation_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.json`;
+      const record = await saveLocalSession({
+        filename,
+        name: d.payload.name,
+        payload: d.payload,
+        isAutosave: false,
+      });
+      closeOverlay("ov-save");
+      toast(t("toast.saved", { name: record.name }), "ok");
+      window.BAA.sidebar?.setSessionName?.(record.name, record.filename);
+      setLoadedName(record.name, record.filename);
+      await loadSavedList();
+    } catch (error) {
+      errEl.textContent = error.message || String(error);
     }
-    box.innerHTML = list.map(s => {
+    return;
+  }
+  const r = await fetch(`/api/session/${state.SID}/save`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  const d = await r.json();
+  if (d.error) {
+    errEl.textContent = d.error;
+    return;
+  }
+  closeOverlay("ov-save");
+  toast(t("toast.saved", { name: d.name }), "ok");
+  window.BAA.sidebar?.setSessionName?.(d.name, d.filename || "");
+  await loadSavedList();
+}
+
+function openRenameDialog(filename, name) {
+  renameTarget = { filename, name };
+  const input = $("rename-name");
+  const errEl = $("rename-err");
+  if (input) input.value = name || "";
+  if (errEl) errEl.textContent = "";
+  openOverlay("ov-rename");
+  setTimeout(() => {
+    if (!input) return;
+    input.focus();
+    input.select();
+  }, 80);
+}
+
+async function loadSavedList() {
+  const box = $("saved-list");
+  let list;
+  try {
+    if (isBrowserLocalMode()) {
+      const records = await listLocalSessions();
+      list = records.map((record) => ({
+        filename: record.filename,
+        name: record.name,
+        saved_at: record.saved_at,
+        msg_count: (record.payload?.history || []).filter(
+          (message) =>
+            ["user", "assistant"].includes(message?.role) &&
+            message?.content &&
+            !message?.tool_calls,
+        ).length,
+        ds_name: record.payload?.data_source?.display_name || "",
+        is_autosave: record.is_autosave,
+        session_id: record.session_id,
+      }));
+    } else {
+      const r = await fetch("/api/saved-sessions");
+      list = await r.json();
+    }
+  } catch (error) {
+    box.innerHTML = `<div class="saved-empty">本地对话读取失败：${esc(error.message || String(error))}</div>`;
+    return;
+  }
+  if (!list.length) {
+    box.innerHTML = `<div class="saved-empty">${t("saved_empty")}</div>`;
+    return;
+  }
+  box.innerHTML = list
+    .map((s) => {
       const date = s.saved_at ? s.saved_at.slice(0, 16).replace("T", " ") : "";
       // Unified card: same structure for manual and autosave
       // Only difference: autosave shows a small badge in the meta line
       const rawName = String(s.name || "");
-      const isAutoGeneratedName = s.is_autosave && (
-        !rawName ||
-        rawName.startsWith("自动保存_") ||
-        rawName.startsWith("自动保存 ") ||
-        rawName === date
-      );
+      const isAutoGeneratedName =
+        s.is_autosave &&
+        (!rawName ||
+          rawName.startsWith("自动保存_") ||
+          rawName.startsWith("自动保存 ") ||
+          rawName === date);
       const displayName = esc(
         s.is_autosave && isAutoGeneratedName
-          ? (date || rawName || s.filename)
-          : (rawName || date || s.filename)
+          ? date || rawName || s.filename
+          : rawName || date || s.filename,
       );
-      const badge = s.is_autosave
-        ? `<span class="saved-badge">自动保存</span>`
-        : "";
+      const badge = s.is_autosave ? `<span class="saved-badge">自动保存</span>` : "";
       const metaParts = [date, `${s.msg_count} 条`];
       if (s.ds_name) metaParts.push(esc(s.ds_name));
       const meta = metaParts.filter(Boolean).join(" · ");
@@ -92,276 +151,345 @@ import { setLoadedName } from "./autosave.js";
             <div class="saved-name">${displayName}${badge}</div>
             <div class="saved-meta">${meta}</div>
           </div>
-          <button class="saved-rename" title="${t('saved.rename')}" data-action="renameSession"
+          <button class="saved-rename" title="${t("saved.rename")}" data-action="renameSession"
                   data-filename="${escAttr(s.filename)}" data-name="${escAttr(s.name)}">✎</button>
-          <button class="saved-del" title="${t('saved.delete') || '归档'}" data-action="deleteSession"
+          <button class="saved-del" title="${isBrowserLocalMode() ? "删除本地记录" : t("saved.delete") || "归档"}" data-action="deleteSession"
                   data-filename="${escAttr(s.filename)}" data-name="${escAttr(s.name)}">✕</button>
         </div>`;
-    }).join("");
+    })
+    .join("");
+}
+
+function _elapsedLabel(startedAt) {
+  const seconds = Math.floor((Date.now() - startedAt) / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}m ${String(seconds % 60).padStart(2, "0")}s`;
+}
+
+function showLoadMask(name, controller) {
+  const ui = window.BAA.ui;
+  if (ui && ui.isVue && typeof ui.showLoading === "function") {
+    const loadingId = ui.showLoading({
+      id: "session-load",
+      title: t("session_load.title"),
+      name: name || "",
+      message: t("session_load.sub"),
+      elapsedLabel: t("session_load.elapsed_label"),
+      cancelText: t("session_load.cancel"),
+      cancellable: true,
+      onCancel: cancelLoadSession,
+      startedAt: Date.now(),
+    });
+    activeLoad = { controller, timer: null, loadingId };
+    return null;
   }
 
-  function _elapsedLabel(startedAt) {
-    const seconds = Math.floor((Date.now() - startedAt) / 1000);
-    if (seconds < 60) return `${seconds}s`;
-    const minutes = Math.floor(seconds / 60);
-    return `${minutes}m ${String(seconds % 60).padStart(2, "0")}s`;
-  }
-
-  function showLoadMask(name, controller) {
-    const ui = window.BAA.ui;
-    if (ui && ui.isVue && typeof ui.showLoading === "function") {
-      const loadingId = ui.showLoading({
-        id: "session-load",
-        title: t('session_load.title'),
-        name: name || "",
-        message: t('session_load.sub'),
-        elapsedLabel: t('session_load.elapsed_label'),
-        cancelText: t('session_load.cancel'),
-        cancellable: true,
-        onCancel: cancelLoadSession,
-        startedAt: Date.now(),
-      });
-      activeLoad = { controller, timer: null, loadingId };
-      return null;
-    }
-
-    const mask = $("session-load-mask");
-    const nameEl = $("session-load-name");
-    const elapsedEl = $("session-load-elapsed");
-    if (!mask || !elapsedEl) return null;
-    if (nameEl) nameEl.textContent = name || "";
-    const startedAt = Date.now();
+  const mask = $("session-load-mask");
+  const nameEl = $("session-load-name");
+  const elapsedEl = $("session-load-elapsed");
+  if (!mask || !elapsedEl) return null;
+  if (nameEl) nameEl.textContent = name || "";
+  const startedAt = Date.now();
+  elapsedEl.textContent = _elapsedLabel(startedAt);
+  mask.hidden = false;
+  mask.classList.add("open");
+  const timer = setInterval(() => {
     elapsedEl.textContent = _elapsedLabel(startedAt);
-    mask.hidden = false;
-    mask.classList.add("open");
-    const timer = setInterval(() => {
-      elapsedEl.textContent = _elapsedLabel(startedAt);
-    }, 500);
-    activeLoad = { controller, timer };
-    return timer;
+  }, 500);
+  activeLoad = { controller, timer };
+  return timer;
+}
+
+function hideLoadMask(timer) {
+  if (
+    activeLoad &&
+    activeLoad.loadingId &&
+    window.BAA.ui &&
+    window.BAA.ui.isVue &&
+    typeof window.BAA.ui.hideLoading === "function"
+  ) {
+    window.BAA.ui.hideLoading(activeLoad.loadingId);
+    return;
+  }
+  if (timer) clearInterval(timer);
+  const mask = $("session-load-mask");
+  if (!mask) return;
+  mask.classList.remove("open");
+  mask.hidden = true;
+}
+
+function cancelLoadSession() {
+  if (!activeLoad) return;
+  activeLoad.cancelled = true;
+  activeLoad.controller.abort();
+  hideLoadMask(activeLoad.timer);
+  activeLoad = null;
+  toast(t("toast.load_cancelled"));
+}
+
+async function loadSavedSession(filename, name) {
+  if (
+    !(await window.BAA.ui?.confirm?.({
+      title: t("confirm.title"),
+      message: t("confirm.load", { name }),
+    }))
+  )
+    return;
+  if (activeLoad) {
+    toast(t("toast.load_busy"), "err");
+    return;
   }
 
-  function hideLoadMask(timer) {
-    if (activeLoad && activeLoad.loadingId && window.BAA.ui && window.BAA.ui.isVue && typeof window.BAA.ui.hideLoading === "function") {
-      window.BAA.ui.hideLoading(activeLoad.loadingId);
-      return;
-    }
-    if (timer) clearInterval(timer);
-    const mask = $("session-load-mask");
-    if (!mask) return;
-    mask.classList.remove("open");
-    mask.hidden = true;
-  }
-
-  function cancelLoadSession() {
-    if (!activeLoad) return;
-    activeLoad.cancelled = true;
-    activeLoad.controller.abort();
-    hideLoadMask(activeLoad.timer);
-    activeLoad = null;
-    toast(t('toast.load_cancelled'));
-  }
-
-  async function loadSavedSession(filename, name) {
-    if (!await window.BAA.ui?.confirm?.({
-      title: t('confirm.title'), message: t('confirm.load', { name }),
-    })) return;
-    if (activeLoad) {
-      toast(t('toast.load_busy'), "err");
-      return;
-    }
-
-    // 告诉后端保留当前 session 已设的模型（keep_provider），
-    // 历史文件中的 model_provider 不会覆盖 session。
-    const controller = new AbortController();
-    const timer = showLoadMask(name, controller);
-    let d;
-    try {
-      const r = await fetch(`/api/session/${state.SID}/load`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
+  // 告诉后端保留当前 session 已设的模型（keep_provider），
+  // 历史文件中的 model_provider 不会覆盖 session。
+  const controller = new AbortController();
+  const timer = showLoadMask(name, controller);
+  let d;
+  try {
+    let r;
+    let localRecord = null;
+    if (isBrowserLocalMode()) {
+      localRecord = await getLocalSession(filename);
+      if (!localRecord?.payload) throw new Error("浏览器中的本地对话不存在或已被清理");
+      r = await fetch(`/api/session/${state.SID}/restore-local`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ payload: localRecord.payload, keep_provider: true }),
+        signal: controller.signal,
+      });
+    } else {
+      r = await fetch(`/api/session/${state.SID}/load`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ filename, keep_provider: true }),
         signal: controller.signal,
       });
-      d = await r.json();
-      if (d.error) { toast(d.error, "err"); return; }
-
-      clearMessages();
-      hideWelcome();
-
-      // Update sidebar datasource status + source list
-      if (d.ds_connected) {
-        setSrc(d.ds_name, 'src.restored', true);
-        toast(t('src.restored_toast', { name: d.ds_name }), "ok");
-      } else if (d.ds_lost) {
-        setSrc(d.ds_name + t('src.lost_suffix'), 'src.lost_hint', false);
-        toast(t('src.lost_hint'), "err");
-      } else {
-        setSrc(null, 'sidebar.hint.noconn', false);
-      }
-
-      // Re-fetch the source list from the server and render it.
-      // load_session rebuilds sess.data_source on the backend, so the /sources
-      // endpoint reflects the restored state. Without this, the sidebar source
-      // list stays stale (showing the previous session's sources or nothing).
-      try {
-        const sr = await fetch(`/api/session/${state.SID}/sources`, { signal: controller.signal });
-        const sd = await sr.json();
-        const sources = sd.sources || [];
-        renderSourceList(sources);
-        // If backend restored a source, sync the status bar to match the list.
-        // If the list is empty (e.g. SQL/GSheets can't be auto-restored),
-        // the status bar text set above (setSrc) already reflects ds_lost/none,
-        // so we only override when there actually are sources to show.
-        if (sources.length > 0) {
-          const active = sources.find(s => s.active);
-          if (active) {
-            setSrc(active.name, 'src.restored', true);
-          }
-        }
-      } catch (err) {
-        if (err && err.name === "AbortError") throw err;
-        /* non-critical — status bar already updated above */
-      }
-
-      // A restored session may mount a different Workspace, so refresh both
-      // independent extension catalogs and discard stale composer selections.
-      window.BAA.slash?.clearCmd?.();
-      window.BAA.skills?.clearSkill?.();
-      await Promise.all([
-        window.BAA.slash?.loadCommands?.(),
-        window.BAA.skills?.loadSkills?.(),
-      ]);
-
-      // 不再从历史文件恢复模型 — 前端选择与后端 session 均保持不变。
-
-      state.tokenState = {
-        promptTokens:  0,
-        totalInput:    d.total_input  || 0,
-        totalOutput:   d.total_output || 0,
-        contextWindow: state.tokenState.contextWindow,
-      };
-      updateTokenBar();
-
-      for (const msg of d.history) {
-        if (msg.role === "user") {
-          appendMsg("user", msg.content);
-        } else if (msg.role === "assistant" && msg.content) {
-          const el = appendMsg("assistant", null);
-          const bubble = el.querySelector(".msg-bubble");
-          bubble.innerHTML = renderMd(msg.content);
-          if (msg.reasoning) {
-            bubble.before(window.BAA.chatStream.buildReasoningBlock(msg.reasoning));
-          }
-          for (const cid of (msg.chart_ids || [])) {
-            const wrap = window.BAA.chatStream.buildChartFrame(cid);
-            bubble.before(wrap);
-          }
-        }
-      }
-
-      sysMsg(t('sys.loaded', { name: d.name }));
-      toast(t('toast.loaded', { name: d.name }), "ok");
-      window.BAA.sidebar?.setSessionName?.(d.name || name, filename);
-
-      // Tell autosave to overwrite this exact file (not create a new one)
-      setLoadedName(d.name || name, filename);
-    } catch (err) {
-      if (err && err.name === "AbortError") {
-        if (activeLoad && activeLoad.controller === controller) toast(t('toast.load_cancelled'));
-      } else {
-        toast(t('toast.load_failed', { error: String(err) }), "err");
-      }
-    } finally {
-      if (activeLoad && activeLoad.controller === controller) {
-        hideLoadMask(timer);
-        activeLoad = null;
-      }
     }
-  }
-
-  async function renameSavedSession(filename, name) {
-    openRenameDialog(filename, name);
-  }
-
-  async function submitRenameSession() {
-    if (!renameTarget) return;
-    const input = $("rename-name");
-    const errEl = $("rename-err");
-    const newName = (input ? input.value : "").trim();
-    if (errEl) errEl.textContent = "";
-    if (!newName) {
-      if (errEl) errEl.textContent = t('toast.rename_empty');
+    d = await r.json();
+    if (!r.ok || d.error) {
+      toast(d.error || "对话恢复失败", "err");
       return;
     }
-    const r = await fetch(`/api/saved-sessions/${encodeURIComponent(renameTarget.filename)}/rename`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: newName }),
-    });
-    const d = await r.json().catch(() => ({ error: t('toast.rename_failed') }));
-    if (d.error) {
-      if (errEl) errEl.textContent = d.error;
-      else toast(d.error, "err");
-      return;
-    }
-    closeOverlay("ov-rename");
-    toast(t('toast.renamed', { name: d.name }), "ok");
-    if (state.loadedSessionFilename === renameTarget.filename) {
-      window.BAA.sidebar?.setSessionName?.(d.name, renameTarget.filename);
-    }
-    setLoadedName(d.name, renameTarget.filename);
-    renameTarget = null;
-    await loadSavedList();
-  }
 
-  async function deleteSavedSession(filename, name) {
-    deleteTarget = { filename, name };
-    $("delete-session-name").textContent = name || filename;
-    $("delete-session-err").textContent = "";
-    $("delete-session-confirm").disabled = false;
-    openOverlay("ov-delete-session");
-  }
+    if (localRecord) {
+      const localFiles = await filesForLocalSession(localRecord);
+      if (localFiles.length) {
+        const restored = await uploadStoredFiles(localFiles, {
+          quiet: true,
+          signal: controller.signal,
+        });
+        if (!restored.ok) {
+          d.ds_lost = true;
+          d.ds_connected = false;
+          d.ds_name = localFiles.map((file) => file.name).join("、");
+          toast(`对话已恢复，但本地数据文件重新挂载失败：${restored.error}`, "err");
+        } else {
+          d.ds_connected = true;
+          d.ds_lost = false;
+          d.ds_name = restored.sourceName || localFiles[0].name;
+        }
+      }
+    }
 
-  async function confirmDeleteSavedSession() {
-    if (!deleteTarget) return;
-    const { filename, name } = deleteTarget;
-    const btn = $("delete-session-confirm");
-    const errEl = $("delete-session-err");
-    btn.disabled = true;
-    errEl.textContent = "";
+    clearMessages();
+    hideWelcome();
+
+    // Update sidebar datasource status + source list
+    if (d.ds_connected) {
+      setSrc(d.ds_name, "src.restored", true);
+      toast(t("src.restored_toast", { name: d.ds_name }), "ok");
+    } else if (d.ds_lost) {
+      setSrc(d.ds_name + t("src.lost_suffix"), "src.lost_hint", false);
+      toast(t("src.lost_hint"), "err");
+    } else {
+      setSrc(null, "sidebar.hint.noconn", false);
+    }
+
+    // Re-fetch the source list from the server and render it.
+    // load_session rebuilds sess.data_source on the backend, so the /sources
+    // endpoint reflects the restored state. Without this, the sidebar source
+    // list stays stale (showing the previous session's sources or nothing).
     try {
-      const r = await fetch(`/api/saved-sessions/${encodeURIComponent(filename)}`, { method: "DELETE" });
-      const d = await r.json();
-      if (d.error) { errEl.textContent = d.error; return; }
-      closeOverlay("ov-delete-session");
-      toast(t('toast.deleted', { name }));
-      deleteTarget = null;
-      await loadSavedList();
+      const sr = await fetch(`/api/session/${state.SID}/sources`, { signal: controller.signal });
+      const sd = await sr.json();
+      const sources = sd.sources || [];
+      renderSourceList(sources);
+      // If backend restored a source, sync the status bar to match the list.
+      // If the list is empty (e.g. SQL/GSheets can't be auto-restored),
+      // the status bar text set above (setSrc) already reflects ds_lost/none,
+      // so we only override when there actually are sources to show.
+      if (sources.length > 0) {
+        const active = sources.find((s) => s.active);
+        if (active) {
+          setSrc(active.name, "src.restored", true);
+        }
+      }
     } catch (err) {
-      errEl.textContent = String(err);
-    } finally {
-      btn.disabled = false;
+      if (err && err.name === "AbortError") throw err;
+      /* non-critical — status bar already updated above */
+    }
+
+    // A restored session may mount a different Workspace, so refresh both
+    // independent extension catalogs and discard stale composer selections.
+    window.BAA.slash?.clearCmd?.();
+    window.BAA.skills?.clearSkill?.();
+    await Promise.all([window.BAA.slash?.loadCommands?.(), window.BAA.skills?.loadSkills?.()]);
+
+    // 不再从历史文件恢复模型 — 前端选择与后端 session 均保持不变。
+
+    state.tokenState = {
+      promptTokens: 0,
+      totalInput: d.total_input || 0,
+      totalOutput: d.total_output || 0,
+      contextWindow: state.tokenState.contextWindow,
+    };
+    updateTokenBar();
+
+    for (const msg of d.history) {
+      if (msg.role === "user") {
+        appendMsg("user", msg.content);
+      } else if (msg.role === "assistant" && msg.content) {
+        const el = appendMsg("assistant", null);
+        const bubble = el.querySelector(".msg-bubble");
+        bubble.innerHTML = renderMd(msg.content);
+        if (msg.reasoning) {
+          window.BAA.chatStream.restoreReasoning(bubble, msg.reasoning);
+        }
+        for (const cid of msg.chart_ids || []) {
+          const wrap = window.BAA.chatStream.buildChartFrame(cid);
+          bubble.before(wrap);
+        }
+      }
+    }
+
+    sysMsg(t("sys.loaded", { name: d.name }));
+    toast(t("toast.loaded", { name: d.name }), "ok");
+    window.BAA.sidebar?.setSessionName?.(d.name || name, filename);
+
+    // Tell autosave to overwrite this exact file (not create a new one)
+    setLoadedName(d.name || name, filename);
+  } catch (err) {
+    if (err && err.name === "AbortError") {
+      if (activeLoad && activeLoad.controller === controller) toast(t("toast.load_cancelled"));
+    } else {
+      toast(t("toast.load_failed", { error: String(err) }), "err");
+    }
+  } finally {
+    if (activeLoad && activeLoad.controller === controller) {
+      hideLoadMask(timer);
+      activeLoad = null;
     }
   }
+}
 
-  export {
-    openSaveDialog,
-    openRenameDialog,
-    saveSession,
-    loadSavedList,
-    loadSavedSession,
-    cancelLoadSession,
-    renameSavedSession,
-    submitRenameSession,
-    deleteSavedSession,
-    confirmDeleteSavedSession,
-  };
+async function renameSavedSession(filename, name) {
+  openRenameDialog(filename, name);
+}
 
-  document.addEventListener("DOMContentLoaded", () => {
-    const input = $("rename-name");
-    if (!input) return;
-    input.addEventListener("keydown", e => {
-      if (e.key === "Enter") submitRenameSession();
-      if (e.key === "Escape") closeOverlay("ov-rename");
-    });
+async function submitRenameSession() {
+  if (!renameTarget) return;
+  const input = $("rename-name");
+  const errEl = $("rename-err");
+  const newName = (input ? input.value : "").trim();
+  if (errEl) errEl.textContent = "";
+  if (!newName) {
+    if (errEl) errEl.textContent = t("toast.rename_empty");
+    return;
+  }
+  let d;
+  if (isBrowserLocalMode()) {
+    try {
+      const record = await renameLocalSession(renameTarget.filename, newName);
+      d = { ok: true, filename: record.filename, name: record.name };
+    } catch (error) {
+      d = { error: error.message || String(error) };
+    }
+  } else {
+    const r = await fetch(
+      `/api/saved-sessions/${encodeURIComponent(renameTarget.filename)}/rename`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: newName }),
+      },
+    );
+    d = await r.json().catch(() => ({ error: t("toast.rename_failed") }));
+  }
+  if (d.error) {
+    if (errEl) errEl.textContent = d.error;
+    else toast(d.error, "err");
+    return;
+  }
+  closeOverlay("ov-rename");
+  toast(t("toast.renamed", { name: d.name }), "ok");
+  if (state.loadedSessionFilename === renameTarget.filename) {
+    window.BAA.sidebar?.setSessionName?.(d.name, renameTarget.filename);
+  }
+  setLoadedName(d.name, renameTarget.filename);
+  renameTarget = null;
+  await loadSavedList();
+}
+
+async function deleteSavedSession(filename, name) {
+  deleteTarget = { filename, name };
+  $("delete-session-name").textContent = name || filename;
+  $("delete-session-err").textContent = "";
+  $("delete-session-confirm").disabled = false;
+  openOverlay("ov-delete-session");
+}
+
+async function confirmDeleteSavedSession() {
+  if (!deleteTarget) return;
+  const { filename, name } = deleteTarget;
+  const btn = $("delete-session-confirm");
+  const errEl = $("delete-session-err");
+  btn.disabled = true;
+  errEl.textContent = "";
+  try {
+    let d;
+    if (isBrowserLocalMode()) {
+      await deleteLocalSession(filename);
+      d = { ok: true };
+    } else {
+      const r = await fetch(`/api/saved-sessions/${encodeURIComponent(filename)}`, {
+        method: "DELETE",
+      });
+      d = await r.json();
+    }
+    if (d.error) {
+      errEl.textContent = d.error;
+      return;
+    }
+    closeOverlay("ov-delete-session");
+    toast(t("toast.deleted", { name }));
+    deleteTarget = null;
+    await loadSavedList();
+  } catch (err) {
+    errEl.textContent = String(err);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+export {
+  openSaveDialog,
+  openRenameDialog,
+  saveSession,
+  loadSavedList,
+  loadSavedSession,
+  cancelLoadSession,
+  renameSavedSession,
+  submitRenameSession,
+  deleteSavedSession,
+  confirmDeleteSavedSession,
+};
+
+document.addEventListener("DOMContentLoaded", () => {
+  const input = $("rename-name");
+  if (!input) return;
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") submitRenameSession();
+    if (e.key === "Escape") closeOverlay("ov-rename");
   });
+});

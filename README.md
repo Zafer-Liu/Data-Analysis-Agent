@@ -70,7 +70,19 @@
 
 # 📝 更新日志
 
-> **当前开发版本 [`v1.3.0 LTS`](https://github.com/Zafer-Liu/Data-Analysis-Agent/releases/latest)** · 2026 年 8 月 21 日 · 发布安装包以前请以源码版本与更新日志为准。
+> **当前源码版本 `v1.4.0`** · 2026 年 10 月 16 日 · 安装包发布情况请查看 [Releases](https://github.com/Zafer-Liu/Data-Analysis-Agent/releases/latest)。
+
+本次将私有版现有功能同步至公版：包括只读运营后台、桌面云账号与模型网关、邀请与额度流水、浏览器和网页表格采集、网页版本地数据保存、PyTorch GRU/LSTM、图表主题与 PNG 导出、SQL 内存副本及数字溯源、画布保存重试、Skills 标签和 SSE 稳定性改进。
+
+直接运行 `python app.py` 仍无需云登录；云端与桌面功能需要对应服务配置。参见 [完整同步清单](./docs/feature-sync-1.4.md) 和 [托管配置说明](./docs/hosted-configuration.md)。
+
+### 本地模型与服务（源码新增）
+
+在设置 → 本地服务中，统一管理多个 HTTP / Docker 连接。自定义 HTTP 支持健康检查与手动 JSON 请求；OpenAI 兼容服务可发现模型并加入 LLM 列表；TimesFM 作为预测适配器，支持 `run_analysis`、回测、结果表及图表导出。连接、配置与能力边界见 [本地服务说明](deploy/local-services/README.md)。默认不下载模型、不安装模型依赖、不拉取镜像。
+
+TimesFM 的已有模型目录、主动下载、Docker 模板与三商品示例见 [TimesFM 接入说明](deploy/timesfm/README.md)。应用主环境保持轻量；TimesFM 权重限非商业、非生产研究。
+
+### v1.3.0 更新记录
 
 v1.3.0 参加飞书 AI 绝活黑客松，接入飞书机器人，内置多维表格分析功能，同时优化部分功能。
 
@@ -224,7 +236,7 @@ https://github.com/user-attachments/assets/4cc6f9d7-52d9-42c5-b3e7-059019f67275
 
 ## 3️⃣ 智能图表系统
 
-系统会根据查询结果，从以下 **6 大类 43 种图表**中自动推荐最合适的一种：
+系统会根据查询结果，从以下 **6 大类 41 种图表**中自动推荐最合适的一种：
 
 | 分类 | 图表类型 |
 |---|---|

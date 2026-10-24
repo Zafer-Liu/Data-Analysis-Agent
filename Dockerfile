@@ -29,6 +29,13 @@ COPY deploy/samples/ /app/deploy_samples/
 # Railway injects PORT env var; app.py already reads it
 ENV BAA_HOST=0.0.0.0
 ENV BAA_SKIP_DEPENDENCY_CHECK=1
+ENV BAA_WSGI=gunicorn
+# Runtime sessions are intentionally memory-only in the privacy-first Web
+# edition.  Keep a single worker until session coordination is externalized.
+# gthread workers allow concurrent LLM streams within that single worker so
+# one slow SSE response no longer blocks all other requests.
+ENV BAA_WORKERS=1
+ENV BAA_THREADS=8
 ENV PYTHONUNBUFFERED=1
 
 EXPOSE 5001

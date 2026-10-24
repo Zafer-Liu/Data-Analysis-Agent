@@ -82,6 +82,7 @@ def get_workflow_metrics(sid: str):
 @bp.post(
     "/api/session/<sid>/workflow-optimization-suggestions/<suggestion_id>/draft"
 )
+@require_session_ownership
 def create_workflow_optimization_draft(sid: str, suggestion_id: str):
     from agent.workflows.metrics import create_suggestion_draft
 

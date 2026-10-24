@@ -32,7 +32,14 @@ const TEMPLATE_ICONS = {
   business_model_canvas:  "🗺",
   bcg_matrix:             "📊",
   swot_analysis:          "🔲",
+  value_proposition:      "💎",
 };
+
+function _templateField(tpl, field) {
+  const lang = (window.getLang?.() || "zh").toLowerCase();
+  const en = lang.startsWith("en") ? tpl[`${field}_en`] : null;
+  return en || tpl[field];
+}
 
 export function mountBusinessCanvasUi() {
   window.BAA = window.BAA || {};
@@ -57,8 +64,6 @@ export function mountBusinessCanvasUi() {
     editingTitle:   false,
     draftTitle:     "",
     editingProjectId: null,
-    editingProjectTitle: "",
-    editingProjectId:   null,
     editingProjectTitle: "",
   });
 
@@ -226,7 +231,8 @@ export function mountBusinessCanvasUi() {
         onClick: () => window.BAA.businessCanvas?.createProject?.(tpl.id),
       }, [
         h("span", { class: "dw-tpl-icon" }, TEMPLATE_ICONS[tpl.id] || "📋"),
-        h("span", { class: "dw-tpl-name" }, tpl.name),
+        h("span", { class: "dw-tpl-name", title: _templateField(tpl, "description") },
+          _templateField(tpl, "name")),
       ])
     );
 
@@ -248,10 +254,11 @@ export function mountBusinessCanvasUi() {
                     onInput: (e) => { state.editingProjectTitle = e.target.value; },
                     onKeydown: (e) => {
                       if (e.key === "Enter") {
+                        e.preventDefault();
                         const t = state.editingProjectTitle.trim();
-                        if (t) window.BAA.businessCanvas?.renameProject?.(p.id, t);
                         state.editingProjectId = null;
                         state.editingProjectTitle = "";
+                        if (t) window.BAA.businessCanvas?.renameProject?.(p.id, t);
                         _render();
                       } else if (e.key === "Escape") {
                         state.editingProjectId = null;
@@ -260,10 +267,12 @@ export function mountBusinessCanvasUi() {
                       }
                     },
                     onBlur: () => {
+                      // Enter/Escape already closed the editor — skip duplicate save.
+                      if (state.editingProjectId !== p.id) return;
                       const t = state.editingProjectTitle.trim();
-                      if (t) window.BAA.businessCanvas?.renameProject?.(p.id, t);
                       state.editingProjectId = null;
                       state.editingProjectTitle = "";
+                      if (t) window.BAA.businessCanvas?.renameProject?.(p.id, t);
                       _render();
                     },
                   })
@@ -310,10 +319,15 @@ export function mountBusinessCanvasUi() {
               key: "btn-clear",
               title: text("canvas.clear_all", "清空全部"),
               onClick: async () => {
-                if (window.confirm(text("canvas.clear_confirm", "确定要清空全部最近项目？此操作不可撤销。"))) {
-                  for (const p of [...projects]) {
-                    await window.BAA.businessCanvas?.deleteProject?.(p.id);
-                  }
+                const ok = await window.BAA.ui?.confirm?.({
+                  title: text("canvas.clear_all", "清空全部"),
+                  message: text("canvas.clear_confirm", "确定要清空全部最近项目？此操作不可撤销。"),
+                  danger: true,
+                });
+                if (ok) {
+                  await Promise.all(projects.map(p =>
+                    window.BAA.businessCanvas?.deleteProject?.(p.id)));
+                  window.BAA.businessCanvas?.refresh?.();
                 }
               },
             }, text("canvas.clear", "清空"))
@@ -339,12 +353,13 @@ export function mountBusinessCanvasUi() {
           onInput: (e) => { state.draftTitle = e.target.value; },
           onKeydown: (e) => {
             if (e.key === "Enter") {
+              e.preventDefault();
               const newTitle = state.draftTitle.trim();
+              state.editingTitle = false;
+              state.draftTitle = "";
               if (newTitle && state.currentProject?.id) {
                 window.BAA.businessCanvas?.renameProject?.(state.currentProject.id, newTitle);
               }
-              state.editingTitle = false;
-              state.draftTitle = "";
               _render();
             } else if (e.key === "Escape") {
               state.editingTitle = false;
@@ -353,12 +368,14 @@ export function mountBusinessCanvasUi() {
             }
           },
           onBlur: () => {
+            // Enter/Escape already closed the editor — skip duplicate save.
+            if (!state.editingTitle) return;
             const newTitle = state.draftTitle.trim();
+            state.editingTitle = false;
+            state.draftTitle = "";
             if (newTitle && state.currentProject?.id) {
               window.BAA.businessCanvas?.renameProject?.(state.currentProject.id, newTitle);
             }
-            state.editingTitle = false;
-            state.draftTitle = "";
             _render();
           },
         })
@@ -480,7 +497,6 @@ export function mountBusinessCanvasUi() {
     setFullscreen: v  => { state.fullscreen = !!v; _render(); },
     setState,
     loadXml,
-    getXml: () => (_protocol && state.drawioReady ? null : null),
   };
 
   registerUiIsland("businessCanvas", api);

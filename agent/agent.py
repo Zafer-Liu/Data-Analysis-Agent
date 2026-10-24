@@ -13,6 +13,9 @@ import logging
 import time
 import ast
 import copy
+import os
+import urllib.parse
+from infrastructure.paths import content_data_path
 import re
 from typing import Iterator, List, Dict, Any, Optional, Tuple
 
@@ -20,8 +23,10 @@ from .prompts      import (
     PromptContext,
     build_temp_prompt_section,
     get_system_prompt,
-    message_needs_chart_rules,
-    message_needs_diagram_rules,
+   message_needs_chart_rules,
+    message_needs_browser_rules,
+    message_needs_ingest_rules,
+   message_needs_diagram_rules,
     message_needs_hooks_rules,
     message_needs_knowledge,
     message_needs_workspace_rules,
@@ -35,9 +40,14 @@ from dataclasses import replace
 from .skills       import SkillDef, SkillExecutor, SkillLoader
 from .tools.schemas import AGENT_TOOLS, get_tools_with_mcp
 from .tools.business import DataToolsMixin, ExportToolsMixin
-from .tools.exposure import filter_tools_for_turn
-from .tools.results import make_tool_result, read_tool_result_artifact
+from .tools.exposure import filter_tools_for_turn, limit_tools_for_turn
+from .tools.results import make_tool_result, read_tool_result_artifact, classify_tool_error
 from .tools.parallel import should_parallelize_batch
+from .number_audit import (
+    NUMBER_EVIDENCE_TOOLS,
+    audit_report_numbers,
+    collect_number_evidence,
+)
 from .tools.workspace import (
     WorkspaceBashService,
     WorkspaceTaskStore,
@@ -45,7 +55,14 @@ from .tools.workspace import (
     WorkspaceToolService,
     structured_output,
 )
-from .tools.web import browse_webpage
+from .tools.web import browse_webpage, _validate_url
+from .tools.browser import (
+    browser_search, browser_navigate, browser_click, browser_fill,
+    browser_extract, browser_extract_tables, browser_screenshot,
+    browser_close,
+    browser_check_verification,
+    browser_recheck,
+)
 from .tools.hooks_config import configure_hooks_from_agent
 from .mcp_manager  import get_mcp_manager
 from data.workspace import workspace_manager
@@ -64,12 +81,17 @@ from .retry        import (
 )
 from .validate     import (
     normalize_ask_user_args as _normalize_ask_user_args,
+    normalize_report_outline_args as _normalize_report_outline_args,
+    validate_ask_user_args as _validate_ask_user_args,
     validate_tool_args as _validate_tool_args,
+    validate_sql_structured as _validate_sql_structured,
+    SQL_TOOLS as _SQL_TOOLS,
 )
 from .reasoning    import ThinkTagStreamParser, split_reasoning_tags
 from .hooks.models import HookContext
 from .token_metrics import build_prompt_breakdown, finalize_prompt_breakdown
 from .instructions import load_instruction_section
+from .model_call_audit import audit_model_call
 from .memory import read_memory, render_memory_section
 from .mcp_discovery import (
     build_mcp_catalog,
@@ -418,6 +440,91 @@ def _tool_detail_value(value: Any, *, key: str = "") -> Any:
     return value
 
 
+_SQL_PURPOSE_OPS = {
+    "查询": "query",
+    "建表/写入": "create/write",
+    "写入": "insert",
+    "更新": "update",
+    "删除": "delete",
+    "聚合统计": "aggregate",
+    "关联查询": "join",
+    "筛选查询": "filter",
+}
+
+
+def _infer_sql_purpose(sql: str, fallback_label: str = "查询", lang: str = "zh") -> str:
+    """Derive a short purpose label from a SQL string when the LLM did not fill `purpose`.
+
+    Reuses the table-name extraction regex from data.py:_data_refs_for_sql so the
+    fallback stays consistent with the data-source refs shown elsewhere.
+    """
+    sql_text = str(sql or "").strip()
+    if not sql_text:
+        return fallback_label
+    tables: list[str] = []
+    import re as _re
+    for pattern in (
+        r'(?i)\bfrom\s+"([^"]+)"',
+        r'(?i)\bjoin\s+"([^"]+)"',
+        r'(?i)\bfrom\s+([A-Za-z_][\w$]*)',
+        r'(?i)\bjoin\s+([A-Za-z_][\w$]*)',
+    ):
+        tables.extend(_re.findall(pattern, sql_text))
+    seen: set[str] = set()
+    clean: list[str] = []
+    for t in tables:
+        if t.lower() in {"select", "where", "group", "order"}:
+            continue
+        if t not in seen:
+            seen.add(t)
+            clean.append(t)
+    # Detect operation flavour (A6: distinguish writes from reads)
+    lower = sql_text.lower()
+    op = "查询"
+    stripped = lower.lstrip(" (")
+    if stripped.startswith("create") or stripped.startswith("merge"):
+        op = "建表/写入"
+    elif stripped.startswith("insert"):
+        op = "写入"
+    elif stripped.startswith("update"):
+        op = "更新"
+    elif stripped.startswith("delete") or stripped.startswith("drop") or stripped.startswith("truncate"):
+        op = "删除"
+    elif "group by" in lower:
+        op = "聚合统计"
+    elif "join" in lower:
+        op = "关联查询"
+    elif "where" in lower:
+        op = "筛选查询"
+    if lang == "en":
+        op = _SQL_PURPOSE_OPS.get(op, op)
+    if clean:
+        return f"{op} {', '.join(clean[:3])}"
+    return op
+
+
+def _sql_validation_event(name: str, args: Dict[str, Any], allowed_roots, workspace_auth) -> dict | None:
+    """Build a validation badge payload for SQL_TOOLS, or None for non-SQL tools.
+
+    Runs the structured SQL validator (without blocking) so tool_start can show
+    passed/failed/degraded before dispatch. The blocking decision is still made
+    by ``_validate_tool_args`` upstream.
+    """
+    if name not in _SQL_TOOLS:
+        return None
+    sql = str(args.get("sql") or "").strip()
+    if not sql:
+        return None
+    roots = list(workspace_auth.allowed_roots) if workspace_auth is not None else allowed_roots
+    result = _validate_sql_structured(sql, allowed_roots=roots)
+    return {
+        "status": result.status,
+        "message": result.message,
+        "used_heuristic": result.used_heuristic,
+        "code": result.code,
+    }
+
+
 def _format_tool_detail(
     tool_name: str,
     args: Dict[str, Any],
@@ -570,6 +677,17 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
             ),
         )
 
+    def _new_model_audit(self, purpose: str, billing_scope: str = "platform"):
+        return audit_model_call(
+            user_id=self._user_id,
+            session_id=self._session_id,
+            source="web",
+            purpose=purpose,
+            billing_scope=billing_scope,
+            provider=self._provider,
+            model=self.model,
+        )
+
     def _apply_prompt_cache(
         self,
         call_kwargs: Dict[str, Any],
@@ -628,6 +746,86 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
             "role": "system",
             "content": "[Hook Prompt]\n" + "\n\n".join(cleaned)[:8000],
         }
+
+    def _tool_register_extracted_source(self, grids, source_name: str, origin_label: str) -> str:
+        """Register extracted table grids as a new session data source and
+        live-refresh this turn's source view (load_feishu_bitable pattern)."""
+        from api.state import session_manager
+        from data.sources.extracted import ExtractedTableDataSource
+        from data.table_extract import normalize_grids
+
+        tables, meta = normalize_grids(grids)
+        if not tables:
+            return json.dumps({
+                "ok": False,
+                "error_code": "FETCH-001",
+                "message": (
+                    "未发现可用表格（少于 2 行或 2 列的表已被过滤）。"
+                    "若是 JavaScript 渲染页面，请先 browser_navigate 打开页面，"
+                    "再调用 browser_extract_tables。"
+                ),
+            }, ensure_ascii=False)
+        source = ExtractedTableDataSource(source_name or origin_label, tables)
+        session = session_manager.get(self._session_id)
+        if session is None:
+            raise RuntimeError("当前会话已失效，请刷新页面后重试")
+        source_id = session.add_source(source)
+        # This turn began before the tables were registered, so refresh the
+        # agent's source view as well — the next tool round can immediately
+        # use normal SQL/analysis tools; later turns rebuild from the session.
+        self.data_source = source
+        self._all_sources = [*self._all_sources, source]
+        self._combined_schema = session.get_combined_schema()
+        self._schema_cache = self._combined_schema
+        self._merged_source = session.get_merged_source()
+        previews = []
+        for entry in meta.get("tables", []):
+            frame = tables.get(entry.get("name"))
+            if frame is None:
+                continue
+            sample = [
+                ["" if v is None or v != v else str(v) for v in row]
+                for row in frame.head(3).to_numpy().tolist()
+            ]
+            previews.append({
+                "name": entry.get("name"),
+                "rows": entry.get("rows"),
+                "cols": entry.get("cols"),
+                "truncated": bool(entry.get("truncated")),
+                "columns": [str(c) for c in frame.columns],
+                "sample_rows": sample,
+            })
+        return json.dumps({
+            "ok": True,
+            "message": "表格已接入当前对话，可直接用 SQL 查询与分析。",
+            "source_id": source_id,
+            "source_name": source.name,
+            "tables": previews,
+            "dropped_tables": meta.get("dropped", 0),
+            "schema": self._combined_schema,
+        }, ensure_ascii=False)
+
+    def _handle_browser_verification(self, name, args, tool_result):
+        """If browser tool hit a verification page, notify user and wait."""
+        try:
+            data = json.loads(tool_result) if isinstance(tool_result, str) else {}
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if not data.get("verification_needed"):
+            return None
+        yield {"type": "agent_activity",
+               "message": "\u26a0\ufe0f \u68c0\u6d4b\u5230\u4eba\u673a\u9a8c\u8bc1\uff0c\u8bf7\u5728\u5f39\u51fa\u7684\u6d4f\u89c8\u5668\u7a97\u53e3\u4e2d\u624b\u52a8\u5b8c\u6210\u9a8c\u8bc1\uff08\u6700\u591a\u7b49\u5f85 60 \u79d2\uff09"}
+        wait_result = browser_check_verification()
+        try:
+            wait_data = json.loads(wait_result) if isinstance(wait_result, str) else {}
+        except (json.JSONDecodeError, TypeError):
+            wait_data = {}
+        if not wait_data.get("resolved"):
+            yield {"type": "agent_activity",
+                   "message": "\u9a8c\u8bc1\u7b49\u5f85\u8d85\u65f6\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u6216\u6362\u7528\u5176\u4ed6\u641c\u7d22\u5f15\u64ce"}
+            return tool_result
+        yield {"type": "agent_activity", "message": "\u9a8c\u8bc1\u901a\u8fc7\uff0c\u6b63\u5728\u63d0\u53d6\u7ed3\u679c\u2026"}
+        return browser_recheck(tool_name=name, **args)
 
     def _run_post_tool_hooks(self, tool_name: str, args: Dict[str, Any], envelope) -> tuple[list[dict], list[str]]:
         if not self._hook_engine:
@@ -781,8 +979,11 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                 "prompt_cache_retention": cache_metadata["retention"],
                 "prompt_cache_scope_isolated": cache_metadata["scope_isolated"],
             })
+            delegated_audit = self._new_model_audit("team_delegate")
             try:
-                response = self.client.chat.completions.create(
+                response = _call_with_retry(
+                    self.client.chat.completions.create,
+                    on_attempt=delegated_audit.attempt,
                     **kwargs,
                     timeout=max(10, min(self.DELEGATED_TIMEOUT_SECONDS, int(
                         timeout_seconds or self.DELEGATED_TIMEOUT_SECONDS
@@ -790,8 +991,20 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                 )
             except TypeError:
                 kwargs.pop("timeout", None)
-                response = self.client.chat.completions.create(**kwargs)
+                try:
+                    response = _call_with_retry(
+                        self.client.chat.completions.create,
+                        on_attempt=delegated_audit.attempt,
+                        **kwargs,
+                    )
+                except Exception as exc:
+                    delegated_audit.fail(exc)
+                    raise
+            except Exception as exc:
+                delegated_audit.fail(exc)
+                raise
             delegated_usage = getattr(response, "usage", None)
+            delegated_audit.succeed(delegated_usage)
             _capture_usage(response)
             usage_recorder = getattr(self, "_usage_recorder", None)
             if delegated_usage is not None and usage_recorder is not None:
@@ -901,8 +1114,12 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                 workflow_stage="team_delegate_final",
                 tools=[],
             )
+            final_audit = self._new_model_audit("team_delegate_final")
+            response = None
             try:
-                response = self.client.chat.completions.create(
+                response = _call_with_retry(
+                    self.client.chat.completions.create,
+                    on_attempt=final_audit.attempt,
                     **final_kwargs,
                     timeout=max(10, min(self.DELEGATED_TIMEOUT_SECONDS, int(
                         timeout_seconds or self.DELEGATED_TIMEOUT_SECONDS
@@ -910,10 +1127,20 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                 )
             except TypeError:
                 final_kwargs.pop("timeout", None)
-                response = self.client.chat.completions.create(**final_kwargs)
+                try:
+                    response = _call_with_retry(
+                        self.client.chat.completions.create,
+                        on_attempt=final_audit.attempt,
+                        **final_kwargs,
+                    )
+                except Exception as exc:
+                    final_audit.fail(exc)
+                    raise
             except Exception as exc:
+                final_audit.fail(exc)
                 log.warning("[team] delegated final synthesis failed: %s", exc)
-            else:
+            if response is not None:
+                final_audit.succeed(getattr(response, "usage", None))
                 _capture_usage(response)
                 final_content = _visible_text(getattr(response.choices[0].message, "content", "") or "")
         if not final_content:
@@ -1045,6 +1272,10 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
             return f"Unsupported delegated tool: {name}"
         except Exception as exc:
             return f"Delegated tool error [{name}]: {exc}"
+
+    def _tt(self, zh: str, en: str) -> str:
+        """Pick a user-facing string in the UI language (A7 i18n)."""
+        return en if getattr(self, "_ui_lang", "zh") == "en" else zh
 
     def _workspace_runtime(self):
         """Resolve only the runtime frozen for this Agent turn (C5)."""
@@ -1242,15 +1473,17 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
         teams_enabled: bool = False,
         auto_match_skill: bool = True,
         memory_enabled: bool = True,
-        discovered_tools: frozenset[str] | set[str] | None = None,
+        discovered_tools: list[str] | tuple[str, ...] | frozenset[str] | set[str] | None = None,
         discovered_mcp_tools: list[str] | tuple[str, ...] | None = None,
         mcp_catalog_version_seen: str = "",
         tool_result_artifacts: list[dict] | None = None,
+        lang: str = "zh",
     ) -> Iterator[Dict]:
         """
         Yields event dicts consumed by the Flask SSE stream:
           {"type": "tool_start",    "tool": str, "display": str}
           {"type": "text_delta",    "content": str}
+          {"type": "reasoning_delta","content": str}
           {"type": "chart_html",    "html": str}
           {"type": "text",          "content": str}
           {"type": "ppt_outline",   "title": str, "slides": list, "markdown": str}
@@ -1275,13 +1508,14 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
 
         command_name = activation.command_name
         action_name = activation.internal_action
+        # UI language for user-facing timeline labels / activity messages.
+        self._ui_lang = "en" if str(lang or "zh").lower() == "en" else "zh"
         # Existing guarded business-flow branches use one policy token. It is
         # derived from typed activation rather than accepting a mixed namespace.
         command = command_name or action_name
-        _msg_preview = user_message[:120].replace("\n", " ")
         log.info(
-            "[run] activation=%s:%r  msg=%r  model=%s  auto_match_skill=%s",
-            activation.kind, activation.name or "(none)", _msg_preview, self.model,
+            "[run] activation=%s:%r  message_chars=%d  model=%s  auto_match_skill=%s",
+            activation.kind, activation.name or "(none)", len(user_message), self.model,
             auto_match_skill,
         )
 
@@ -1300,7 +1534,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                 yield {
                     "type": "tool_start",
                     "tool": tool_name,
-                    "display": f"创建 Workflow：{workflow_args['name']}",
+                    "display": f"{self._tt('创建 Workflow', 'Create Workflow')}: {workflow_args['name']}",
                 }
                 try:
                     tool_result = execute_workflow_tool(
@@ -1354,9 +1588,11 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
         if command == "ppt_confirm":
             slides = ppt_slides or []
             yield {"type": "tool_start", "tool": "generate_ppt",
-                   "display": f"生成 PPT：{ppt_title}（{len(slides)} 张）..."}
+                   "display": f"{self._tt('生成 PPT', 'Generate PPT')}: {ppt_title} ({len(slides)} {self._tt('张', 'slides')})..."}
             try:
-                result = self._tool_generate_ppt(ppt_title, slides, "")
+                result = yield from self._tool_generate_ppt_with_jobs(
+                    title=ppt_title, slides=slides, filename="",
+                )
             except Exception as exc:
                 yield {"type": "error", "message": f"PPT 生成失败: {exc}"}
                 yield {"type": "done"}
@@ -1368,9 +1604,11 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
         if command == "excel_confirm":
             tables = excel_tables or ["*"]
             yield {"type": "tool_start", "tool": "export_excel",
-                   "display": f"导出 Excel → {', '.join(tables)[:50]}..."}
+                   "display": f"{self._tt('导出 Excel', 'Export Excel')} → {', '.join(tables)[:50]}..."}
             try:
-                result = self._tool_export_excel(tables=tables, filename=excel_filename)
+                result = yield from self._tool_export_excel_with_jobs(
+                    tables=tables, filename=excel_filename,
+                )
             except Exception as exc:
                 yield {"type": "error", "message": f"Excel 导出失败: {exc}"}
                 yield {"type": "done"}
@@ -1382,7 +1620,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
         if command == "report_confirm":
             sections = report_sections or []
             yield {"type": "tool_start", "tool": "export_report",
-                   "display": f"生成报告：{report_title}（{len(sections)} 个章节）..."}
+                   "display": f"{self._tt('生成报告', 'Generate report')}: {report_title} ({len(sections)} {self._tt('个章节', 'sections')})..."}
             try:
                 result = yield from self._tool_export_report_with_jobs(
                     title=report_title, sections=sections,
@@ -1398,7 +1636,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
         if command == "dashboard_confirm":
             widgets = dashboard_widgets or []
             yield {"type": "tool_start", "tool": "generate_dashboard",
-                   "display": f"生成看板：{dashboard_name}（{len(widgets)} 个组件）..."}
+                   "display": f"{self._tt('生成看板', 'Generate dashboard')}: {dashboard_name} ({len(widgets)} {self._tt('个组件', 'widgets')})..."}
             try:
                 result = yield from self._tool_generate_dashboard_with_jobs(
                     name=dashboard_name, widgets=widgets
@@ -1490,7 +1728,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
             yield {
                 "type": "tool_start",
                 "tool": "query_knowledge",
-                "display": f"查询知识库: {kb_question[:40]}",
+                "display": f"{self._tt('查询知识库', 'Search knowledge base')}: {kb_question[:40]}",
                 "detail": f"查询知识库: {kb_question}",
             }
             kb_result, kb_refs = self._tool_query_knowledge_with_refs(kb_question)
@@ -1549,6 +1787,17 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
             needs_hooks=(
                 bool(_requested_tools.intersection({"browse_webpage", "configure_hooks"}))
                 or message_needs_hooks_rules(user_message)
+            ),
+            needs_browser=(
+                bool(_requested_tools.intersection({
+                    "browser_search", "browser_navigate", "browser_click",
+                    "browser_fill", "browser_extract", "browser_screenshot",
+                }))
+                or message_needs_browser_rules(user_message)
+            ),
+            needs_ingest=(
+                bool(_requested_tools.intersection({"fetch_table", "browser_extract_tables"}))
+                or message_needs_ingest_rules(user_message)
             ),
             # This adds capability guidance only; no knowledge content is read.
             has_knowledge=True,
@@ -1673,6 +1922,15 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                 ),
             }]
 
+        if self._ui_lang == "en":
+            system += (
+                "\n[UI LANGUAGE]\nThe user's interface language is English. "
+                "Default to English for all user-visible output — final answers, "
+                "chart titles, table names you invent, and tool `purpose` "
+                "arguments — even if a message is written in another language. "
+                "Exception: if the user explicitly asks for a different language "
+                "(e.g. \"用中文回答\"), follow that request for the reply."
+            )
         _system_msg = {"role": "system", "content": system}
         _user_msg = {"role": "user", "content": user_message}
         _ctx_window = self._get_context_window()
@@ -1721,13 +1979,14 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
             yield {
                 "type": "tool_start",
                 "tool": "compaction",
-                "display": "压缩对话历史…",
+                "display": self._tt("压缩对话历史…", "Compacting history…"),
                 "detail": f"上下文使用已达 {_pct}%，正在语义压缩以节省上下文空间",
             }
             _working_history, _compacted = compact_history(
                 history=history,
                 client=self.client,
                 model=self.model,
+                audit_factory=lambda: self._new_model_audit("compaction"),
             )
             record_compaction_result(
                 self._compaction_state,
@@ -1735,7 +1994,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                 error_type="" if _compacted else "auto_compaction_failed",
             )
             yield {"type": "tool_end", "tool": "compaction"}
-            yield {"type": "agent_activity", "message": "正在思考下一步…"}
+            yield {"type": "agent_activity", "message": self._tt("正在思考下一步…", "Thinking…")}
             hook_events, _hook_prompts = self._run_hook_event(
                 "post_compact",
                 message=user_message,
@@ -1834,8 +2093,8 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
         _successful_tool_names: set[str] = set()
         _last_missing_response_contract: tuple[str, ...] = ()
         _force_text_only = False
-        all_reasoning: List[str] = []
         _consecutive_errors = 0
+        _ask_user_repair_attempted = False
         _run_start = time.monotonic()
         _MAX_RUN_SECONDS = self.MAX_RUN_SECONDS
         _MAX_CONSECUTIVE_ERRORS = 3
@@ -1853,6 +2112,10 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
         _force_propose = False
         _force_propose_retries = 0
         _MAX_FORCE_PROPOSE_RETRIES = 3
+        # Numeric provenance gate: one repair round for unsupported numbers,
+        # then disclose whatever still fails verification.
+        _number_gate_retries = 0
+        _MAX_NUMBER_GATE_RETRIES = 1
         for _iteration in range(self.MAX_ITERATIONS):
             # ── Hard exit guards ──────────────────────────────────────────────
             # _run_start is reset after every job completes (see _run_job), so
@@ -1983,6 +2246,17 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                 _force_text_only = True
             if _force_text_only:
                 _available_tools = []
+            else:
+                _available_tools = limit_tools_for_turn(
+                    _available_tools,
+                    user_message=user_message,
+                    recent_discovered_tools=list(discovered_tools or ()),
+                    command=command,
+                    trusted_skill=trusted_skill_name,
+                    required_tools=(
+                        {"team_plan_create"} if _explicit_team_plan_create else set()
+                    ),
+                )
             messages, _stage_archive_stats = compact_completed_stage_results(
                 messages,
                 stage=_stage_context.stage,
@@ -2035,7 +2309,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                 yield {
                     "type": "tool_start",
                     "tool": "compaction",
-                    "display": "压缩本轮上下文…",
+                    "display": self._tt("压缩本轮上下文…", "Compacting context…"),
                     "detail": (
                         f"本轮 ReAct Payload 约 {_payload_tokens:,} Token，"
                         "已接近模型上下文上限"
@@ -2045,6 +2319,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                     history=messages[1:],
                     client=self.client,
                     model=self.model,
+                    audit_factory=lambda: self._new_model_audit("compaction"),
                 )
                 record_compaction_result(
                     self._compaction_state,
@@ -2172,23 +2447,30 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
             call_kwargs["stream"] = True
             call_kwargs["stream_options"] = {"include_usage": True}
             _t0 = time.monotonic()
-            yield {"type": "agent_activity", "message": "正在分析…"}
+            yield {"type": "agent_activity", "message": self._tt("正在分析…", "Analyzing…")}
+            _model_audit = self._new_model_audit("chat", billing_scope="user")
             try:
-                stream = _call_with_retry(self.client.chat.completions.create, **call_kwargs)
+                stream = _call_with_retry(
+                    self.client.chat.completions.create,
+                    on_attempt=_model_audit.attempt,
+                    **call_kwargs,
+                )
             except Exception as exc:
+                _model_audit.fail(exc)
                 log.error("[llm] API call failed after retries: %s", exc)
                 if _is_context_length_error(exc) and not _emergency_compaction_used:
                     _emergency_compaction_used = True
                     yield {
                         "type": "tool_start",
                         "tool": "compaction",
-                        "display": "上下文超限，正在紧急压缩…",
+                        "display": self._tt("上下文超限，正在紧急压缩…", "Context limit reached, compacting…"),
                         "detail": "模型拒绝了过长请求；压缩后将只重试一次。",
                     }
                     _candidate_history, _did_compact = compact_history(
                         history=messages[1:],
                         client=self.client,
                         model=self.model,
+                        audit_factory=lambda: self._new_model_audit("compaction"),
                     )
                     record_compaction_result(
                         self._compaction_state,
@@ -2224,41 +2506,52 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
             usage_data = None
             finish_reason = None
 
-            for chunk in stream:
-                if getattr(chunk, "usage", None):
-                    usage_data = chunk.usage
-                if not chunk.choices:
-                    continue
-                choice = chunk.choices[0]
-                if choice.finish_reason:
-                    finish_reason = choice.finish_reason
-                delta = choice.delta
+            try:
+                for chunk in stream:
+                    if getattr(chunk, "usage", None):
+                        usage_data = chunk.usage
+                    if not chunk.choices:
+                        continue
+                    choice = chunk.choices[0]
+                    if choice.finish_reason:
+                        finish_reason = choice.finish_reason
+                    delta = choice.delta
 
-                if delta.content:
-                    visible_delta, tagged_reasoning = think_parser.feed(delta.content)
-                    if visible_delta:
-                        content_parts.append(visible_delta)
-                        if command not in _PROPOSE_CMDS:
-                            yield {"type": "text_delta", "content": visible_delta}
-                    if tagged_reasoning:
-                        reasoning_parts.append(tagged_reasoning)
+                    if delta.content:
+                        visible_delta, tagged_reasoning = think_parser.feed(delta.content)
+                        if visible_delta:
+                            content_parts.append(visible_delta)
+                            if command not in _PROPOSE_CMDS:
+                                yield {"type": "text_delta", "content": visible_delta}
+                        if tagged_reasoning:
+                            reasoning_parts.append(tagged_reasoning)
+                            yield {"type": "reasoning_delta", "content": tagged_reasoning}
 
-                rc = getattr(delta, "reasoning_content", None)
-                if rc:
-                    reasoning_parts.append(rc)
+                    rc = getattr(delta, "reasoning_content", None)
+                    if rc:
+                        reasoning_parts.append(rc)
+                        yield {"type": "reasoning_delta", "content": rc}
 
-                if delta.tool_calls:
-                    for tcd in delta.tool_calls:
-                        idx = tcd.index
-                        if idx not in tc_acc:
-                            tc_acc[idx] = {"id": "", "name": "", "args": ""}
-                        if tcd.id:
-                            tc_acc[idx]["id"] = tcd.id
-                        if tcd.function:
-                            if tcd.function.name:
-                                tc_acc[idx]["name"] += tcd.function.name
-                            if tcd.function.arguments:
-                                tc_acc[idx]["args"] += tcd.function.arguments
+                    if delta.tool_calls:
+                        for tcd in delta.tool_calls:
+                            idx = tcd.index
+                            if idx not in tc_acc:
+                                tc_acc[idx] = {"id": "", "name": "", "args": ""}
+                            if tcd.id:
+                                tc_acc[idx]["id"] = tcd.id
+                            if tcd.function:
+                                if tcd.function.name:
+                                    tc_acc[idx]["name"] += tcd.function.name
+                                if tcd.function.arguments:
+                                    tc_acc[idx]["args"] += tcd.function.arguments
+            except BaseException as exc:
+                _model_audit.cancel() if isinstance(exc, GeneratorExit) else _model_audit.fail(exc)
+                raise
+
+            if usage_data:
+                _model_audit.succeed(usage_data)
+            else:
+                _model_audit.missing_usage()
 
             visible_tail, reasoning_tail = think_parser.finish()
             if visible_tail:
@@ -2267,6 +2560,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                     yield {"type": "text_delta", "content": visible_tail}
             if reasoning_tail:
                 reasoning_parts.append(reasoning_tail)
+                yield {"type": "reasoning_delta", "content": reasoning_tail}
 
             full_content = "".join(content_parts).strip()
             has_tool_calls = bool(tc_acc) and finish_reason == "tool_calls"
@@ -2306,6 +2600,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                     "cached_input_tokens": _prompt_breakdown["cached_input_tokens"],
                     "cache_write_tokens": _prompt_breakdown["cache_write_tokens"],
                     "prompt_breakdown": _prompt_breakdown,
+                    "model_call_id": _model_audit.request_id,
                     # context_window lets the frontend draw the context bar and
                     # keeps the % shown there consistent with the compaction
                     # trigger (both use _get_context_window()).
@@ -2346,7 +2641,6 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                 }
                 if reasoning_content:
                     asst_entry["reasoning_content"] = reasoning_content
-                    all_reasoning.append(reasoning_content)
                 messages.append(asst_entry)
 
                 _outline_proposed = False
@@ -2431,6 +2725,8 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                         args = _normalize_chart_call_args(args)
                     elif name == "ask_user":
                         args = _normalize_ask_user_args(args)
+                    elif name in ("propose_report_outline", "export_report"):
+                        args = _normalize_report_outline_args(args)
 
                     # Pre-dispatch validation: catch obviously bad args early
                     # A4：把 workspace 的 allowed_roots 传入，让 SQL 路径白名单生效
@@ -2439,6 +2735,14 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                     # A fixed but unavailable Workspace must fail closed instead
                     # of silently falling back to global uploads/Information.
                     _allowed_roots = [] if self._workspace_id and _workspace_auth is None else None
+                    # Structured SQL validation for the UI badge (passed/failed/degraded).
+                    # Computed before the blocking _validate_tool_args so both paths can surface it.
+                    _sql_validation = _sql_validation_event(name, args, _allowed_roots, _workspace_auth)
+                    _sql_purpose = None
+                    if name in _SQL_TOOLS and args.get("sql"):
+                        _sql_purpose = (args.get("purpose") or "").strip() or _infer_sql_purpose(
+                            args.get("sql", ""), lang=self._ui_lang,
+                        )
                     _val_err = _validate_tool_args(
                         name,
                         args,
@@ -2446,7 +2750,91 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                         workspace_authorization=_workspace_auth,
                     )
                     if _val_err:
+                        _ask_user_error = (
+                            _validate_ask_user_args(args)
+                            if name == "ask_user" else None
+                        )
+                        _ask_question = str(args.get("question") or "").strip()
+                        if _ask_user_error and _ask_question:
+                            _ask_error_code = _ask_user_error[0]
+                            _ask_option_count = len(args.get("options", []))
+                            if not _ask_user_repair_attempted:
+                                _ask_user_repair_attempted = True
+                                log.warning(
+                                    "[ask-user] invalid options code=%s count=%d retry=1",
+                                    _ask_error_code,
+                                    _ask_option_count,
+                                )
+                                messages.append({
+                                    "role": "tool",
+                                    "tool_call_id": tc.id,
+                                    "content": (
+                                        f"[ASK_USER_RETRY {_ask_error_code}] options 无效。"
+                                        "请立即重新调用 ask_user，保留原问题并提供 "
+                                        "2-6 个与问题直接相关的简短选项。"
+                                        "不要调用其他工具，不要输出普通文本。"
+                                    ),
+                                })
+                                yield {
+                                    "type": "agent_activity",
+                                    "message": self._tt("正在完善可选项…", "Refining choices…"),
+                                }
+                                continue
+
+                            log.warning(
+                                "[ask-user] invalid options code=%s count=%d retry=2 fallback=free-text",
+                                _ask_error_code,
+                                _ask_option_count,
+                            )
+                            yield {
+                                "type": "tool_start",
+                                "tool": name,
+                                "display": self._tt("向用户提问", "Ask user"),
+                            }
+                            yield {
+                                "type": "ask_user",
+                                "question": _ask_question,
+                                "options": [],
+                                "multi_select": False,
+                                "free_text_only": True,
+                            }
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc.id,
+                                "content": (
+                                    "选项二次校验失败，已降级为自由输入问题并等待用户回答。"
+                                    "请不要输出任何文字。"
+                                ),
+                            })
+                            yield {"type": "tool_end", "tool": name}
+                            _ask_user_issued = True
+                            continue
+
                         log.warning("[tool] %s: arg validation failed: %s", name, _val_err)
+                        # Surface the blocked SQL on the timeline so the user sees it
+                        # instead of silently injecting a synthetic tool result.
+                        _fail_display = _sql_purpose or name
+                        yield {
+                            "type": "tool_start",
+                            "tool": name,
+                            "display": _fail_display[:60] + ("…" if len(_fail_display) > 60 else ""),
+                            "detail": _val_err if name in _SQL_TOOLS else _format_tool_detail(name, args, name),
+                            "validation": {**_sql_validation, "status": "failed"} if _sql_validation else None,
+                            "purpose": _sql_purpose,
+                        }
+                        yield {
+                            "type": "tool_audit",
+                            "tool": name,
+                            "ok": False,
+                            "error": "arg_validation",
+                            "summary": _val_err,
+                            "content": _val_err,
+                            "sources": [],
+                            "artifacts": [],
+                            "elapsed_seconds": 0.0,
+                            "args_preview": {k: str(v)[:80] for k, v in args.items() if k != "slides"},
+                            "validation": {"status": "failed", "message": _val_err, "used_heuristic": False} if _sql_validation else None,
+                        }
                         # Inject as a synthetic tool result so the model can self-correct
                         messages.append({
                             "role": "tool",
@@ -2454,62 +2842,76 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                             "content": f"[ARG ERROR] {_val_err}",
                         })
                         yield {"type": "tool_end", "tool": name}
-                        yield {"type": "agent_activity", "message": "正在思考下一步…"}
+                        yield {"type": "agent_activity", "message": self._tt("正在思考下一步…", "Thinking…")}
                         _consecutive_errors += 1
                         continue
+                    _tt = self._tt  # A7: bilingual timeline labels
                     display_map = {
-                        "query_knowledge":       f"查询知识库: {args.get('question', '')}",
-                        "get_schema":            "读取数据结构",
-                        "get_table_detail":      f"查看表结构: {args.get('table_name', '?')}",
-                        "create_analysis_table": f"提取字段 → {args.get('table_name', 'analysis_data')}",
-                        "select_chart":          f"查询图表注册表: {args.get('user_intent', '?')[:40]}",
-                        "query_data":            f"执行查询: {args.get('sql', '')}",
-                        "run_analysis":          f"运行分析: {args.get('analysis_name', '?')} · 目标列: {args.get('target_column', '?')}",
-                        "generate_chart":        (
-                            f"生成图表：{args.get('title')} "
-                            f"（{args.get('chart_type')}）"
+                        "query_knowledge":       f"{_tt('查询知识库', 'Search knowledge base')}: {args.get('question', '')}",
+                        "get_schema":            _tt("读取数据结构", "Read schema"),
+                        "get_table_detail":      f"{_tt('查看表结构', 'Inspect table')}: {args.get('table_name', '?')}",
+                        "create_analysis_table": (
+                            f"{_tt('建表', 'Create table')} → {args.get('table_name', 'analysis_data')}"
+                            + (f"：{args.get('purpose')}" if args.get("purpose") else "")
                         ),
-                        "profile_data":          f"分析数据概况: {args.get('table_name', '自动检测')}",
-                        "clean_data":            f"数据清洗 [{args.get('operation', '?')}]: {args.get('table_name', '自动检测')}",
-                        "export_excel":          f"导出 Excel → {', '.join(args.get('tables', []))}",
-                        "export_report":         f"生成 Word 报告: {args.get('title', '?')}",
-                        "propose_excel_export":  f"预览 Excel 导出：{', '.join(args.get('tables', ['*']))}",
-                        "propose_report_outline": f"生成报告大纲：{args.get('title', '?')}（{len(args.get('sections', []))} 章节）",
-                        "propose_ppt_outline":   f"生成 PPT 大纲：{args.get('title', '?')} ({len(args.get('slides', []))} 张)",
-                        "generate_ppt":          f"生成 PPT: {args.get('title', '?')} ({len(args.get('slides', []))} 张)",
-                        "set_ppt_color_scheme":  f"切换配色方案 → {args.get('scheme', '?')}",
-                        "propose_dashboard_outline": f"生成看板大纲：{args.get('name', '?')} ({len(args.get('widgets', []))} 个)",
-                        "generate_dashboard":    f"生成看板：{args.get('name', '?')} ({len(args.get('widgets', []))} 个组件)",
-                        "ask_user":              f"向用户提问：{args.get('question', '?')[:40]}",
-                        "workspace_glob":        f"查找工作目录文件: {args.get('pattern', '**/*')}",
-                        "workspace_grep":        f"搜索工作目录内容: {args.get('pattern', '')[:40]}",
-                        "workspace_read_file":   f"读取工作目录文件: {args.get('file_path', '?')}",
-                        "workspace_write_file":  f"写入工作目录文件: {args.get('file_path', '?')}",
-                        "workspace_edit_file":   f"编辑工作目录文件: {args.get('file_path', '?')}",
-                        "workspace_delete_file": f"删除工作目录文件: {args.get('file_path', '?')}",
-                        "workspace_move_file":   f"移动工作目录文件: {args.get('source_path', '?')} → {args.get('destination_path', '?')}",
-                        "workspace_bash":        f"执行受限工作目录命令: {args.get('command', '')[:80]}",
-                        "workspace_command":     f"执行受控操作: {args.get('operation', '?')}",
-                        "browse_webpage":        f"浏览网页: {args.get('url', '')[:70]}",
-                        "configure_hooks":       "配置 Hooks 自动化",
-                        "read_tool_result":      f"读取工具结果: {args.get('artifact_id', '?')}",
-                        "structured_output":     "校验结构化输出",
-                        "load_analysis_skill":  f"加载分析技能: {args.get('name', '?')}",
-                        "task_create":          f"创建工作区任务: {args.get('title', '?')}",
-                        "task_get":             f"查看工作区任务: {args.get('task_id', '?')}",
-                        "task_list":            "列出工作区任务",
-                        "task_update":          f"更新工作区任务: {args.get('task_id', '?')}",
-                        "team_create":          f"创建分析团队: {args.get('name', '?')}",
-                        "team_delete":          f"删除分析团队: {args.get('name', '?')}",
-                        "team_list":            "列出分析团队",
-                        "team_status":          f"查看分析团队状态: {args.get('name', '?')}",
-                        "send_message":         f"发送团队消息: {args.get('recipient', '?')}",
-                        "agent_delegate":       f"委派分析任务: {args.get('description', '')[:40]}",
-                        "plan_complete":        "提交结构化计划",
-                        "display_diagram":      f"生成图表画布：{args.get('title', '分析框架')}",
-                        "edit_diagram":         f"编辑图表画布：{args.get('project_id', '?')}",
-                        "get_diagram":          "获取当前图表",
-                        "get_shape_library":    f"查询形状库：{args.get('library', '?')}",
+                        "select_chart":          f"{_tt('查询图表注册表', 'Match chart type')}: {args.get('user_intent', '?')[:40]}",
+                        "query_data":            f"{_tt('执行查询', 'Query')}: {_sql_purpose or _tt('查询数据', 'query data')}",
+                        "run_analysis":          (
+                            f"{_tt('运行分析', 'Run analysis')}: {args.get('analysis_name', '?')} · {_tt('目标列', 'target')}: {args.get('target_column', '?')}"
+                            + (f"：{args.get('purpose')}" if args.get("purpose") else "")
+                        ),
+                        "generate_chart":        (
+                            f"{_tt('生成图表', 'Generate chart')}: {args.get('title')} "
+                            f"({args.get('chart_type')})"
+                        ),
+                        "profile_data":          f"{_tt('分析数据概况', 'Profile data')}: {args.get('table_name', _tt('自动检测', 'auto'))}",
+                        "clean_data":            f"{_tt('数据清洗', 'Clean data')} [{args.get('operation', '?')}]: {args.get('table_name', _tt('自动检测', 'auto'))}",
+                        "export_excel":          f"{_tt('导出 Excel', 'Export Excel')} → {', '.join(args.get('tables', []))}",
+                        "export_report":         f"{_tt('生成 Word 报告', 'Generate Word report')}: {args.get('title', '?')}",
+                        "propose_excel_export":  f"{_tt('预览 Excel 导出', 'Preview Excel export')}: {', '.join(args.get('tables', ['*']))}",
+                        "propose_report_outline": f"{_tt('生成报告大纲', 'Report outline')}: {args.get('title', '?')} ({len(args.get('sections', []))} {_tt('章节', 'sections')})",
+                        "propose_ppt_outline":   f"{_tt('生成 PPT 大纲', 'PPT outline')}: {args.get('title', '?')} ({len(args.get('slides', []))} {_tt('张', 'slides')})",
+                        "generate_ppt":          f"{_tt('生成 PPT', 'Generate PPT')}: {args.get('title', '?')} ({len(args.get('slides', []))} {_tt('张', 'slides')})",
+                        "set_ppt_color_scheme":  f"{_tt('切换配色方案', 'Switch color scheme')} → {args.get('scheme', '?')}",
+                        "propose_dashboard_outline": f"{_tt('生成看板大纲', 'Dashboard outline')}: {args.get('name', '?')} ({len(args.get('widgets', []))})",
+                        "generate_dashboard":    f"{_tt('生成看板', 'Generate dashboard')}: {args.get('name', '?')} ({len(args.get('widgets', []))} {_tt('个组件', 'widgets')})",
+                        "ask_user":              f"{_tt('向用户提问', 'Ask user')}: {args.get('question', '?')[:40]}",
+                        "workspace_glob":        f"{_tt('查找工作目录文件', 'Glob workspace')}: {args.get('pattern', '**/*')}",
+                        "workspace_grep":        f"{_tt('搜索工作目录内容', 'Grep workspace')}: {args.get('pattern', '')[:40]}",
+                        "workspace_read_file":   f"{_tt('读取工作目录文件', 'Read file')}: {args.get('file_path', '?')}",
+                        "workspace_write_file":  f"{_tt('写入工作目录文件', 'Write file')}: {args.get('file_path', '?')}",
+                        "workspace_edit_file":   f"{_tt('编辑工作目录文件', 'Edit file')}: {args.get('file_path', '?')}",
+                        "workspace_delete_file": f"{_tt('删除工作目录文件', 'Delete file')}: {args.get('file_path', '?')}",
+                        "workspace_move_file":   f"{_tt('移动工作目录文件', 'Move file')}: {args.get('source_path', '?')} → {args.get('destination_path', '?')}",
+                        "workspace_bash":        f"{_tt('执行受限工作目录命令', 'Run sandboxed command')}: {args.get('command', '')[:80]}",
+                       "browse_webpage":        f"{_tt('浏览网页', 'Browse page')}: {args.get('url', '')[:70]}",
+                        "browser_search":        f"{_tt('浏览器搜索', 'Browser search')}: {args.get('query', '')[:50]}",
+                        "browser_navigate":      f"{_tt('打开网页', 'Navigate')}: {args.get('url', '')[:70]}",
+                        "browser_click":         f"{_tt('点击', 'Click')}: {args.get('text', '') or args.get('selector', '?')[:50]}",
+                        "browser_fill":          f"{_tt('输入', 'Fill')} {args.get('value', '')[:30]} -> {args.get('selector', '?')[:40]}",
+                        "browser_extract":       _tt("提取网页内容", "Extract page content"),
+                        "browser_extract_tables": _tt("提取网页表格", "Extract page tables"),
+                        "fetch_table":           f"{_tt('抓取网页表格', 'Fetch web tables')}: {args.get('url', '')[:70]}",
+                        "browser_screenshot":     _tt("网页截图", "Screenshot"),
+                        "browser_close":         _tt("关闭浏览器", "Close browser"),
+                       "configure_hooks":       _tt("配置 Hooks 自动化", "Configure Hooks"),
+                        "read_tool_result":      f"{_tt('读取工具结果', 'Read tool result')}: {args.get('artifact_id', '?')}",
+                        "structured_output":     _tt("校验结构化输出", "Validate structured output"),
+                        "load_analysis_skill":  f"{_tt('加载分析技能', 'Load skill')}: {args.get('name', '?')}",
+                        "task_create":          f"{_tt('创建工作区任务', 'Create task')}: {args.get('title', '?')}",
+                        "task_get":             f"{_tt('查看工作区任务', 'Get task')}: {args.get('task_id', '?')}",
+                        "task_list":            _tt("列出工作区任务", "List tasks"),
+                        "task_update":          f"{_tt('更新工作区任务', 'Update task')}: {args.get('task_id', '?')}",
+                        "team_create":          f"{_tt('创建分析团队', 'Create team')}: {args.get('name', '?')}",
+                        "team_delete":          f"{_tt('删除分析团队', 'Delete team')}: {args.get('name', '?')}",
+                        "team_list":            _tt("列出分析团队", "List teams"),
+                        "team_status":          f"{_tt('查看分析团队状态', 'Team status')}: {args.get('name', '?')}",
+                        "send_message":         f"{_tt('发送团队消息', 'Send message')}: {args.get('recipient', '?')}",
+                        "agent_delegate":       f"{_tt('委派分析任务', 'Delegate task')}: {args.get('description', '')[:40]}",
+                        "plan_complete":        _tt("提交结构化计划", "Submit plan"),
+                        "display_diagram":      f"{_tt('生成图表画布', 'Create diagram')}: {args.get('title', _tt('分析框架', 'framework'))}",
+                        "edit_diagram":         f"{_tt('编辑图表画布', 'Edit diagram')}: {args.get('project_id', '?')}",
+                        "get_diagram":          _tt("获取当前图表", "Get diagram"),
                     }
                     full_display = display_map.get(name, name)
                     expanded_detail = _format_tool_detail(
@@ -2537,8 +2939,10 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                             yield {
                                 "type": "tool_start",
                                 "tool": name,
-                                "display": f"Hook 拦截: {name}",
+                                "display": f"{self._tt('Hook 拦截', 'Hook blocked')}: {name}",
                                 "detail": reason,
+                                "validation": _sql_validation,
+                                "purpose": _sql_purpose,
                             }
                             envelope = make_tool_result(
                                 name,
@@ -2565,6 +2969,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                 "artifacts": envelope.artifacts,
                                 "elapsed_seconds": envelope.debug.get("elapsed_seconds"),
                                 "args_preview": envelope.debug.get("args_preview", {}),
+                                "validation": _sql_validation,
                             }
                             messages.append({
                                 "role": "tool",
@@ -2572,7 +2977,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                 "content": envelope.to_model_text(),
                             })
                             yield {"type": "tool_end", "tool": name}
-                            yield {"type": "agent_activity", "message": "正在思考下一步…"}
+                            yield {"type": "agent_activity", "message": self._tt("正在思考下一步…", "Thinking…")}
                             _consecutive_errors += 1
                             continue
                     yield {
@@ -2580,6 +2985,8 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                         "tool": name,
                         "display": full_display[:60] + ("…" if len(full_display) > 60 else ""),
                         "detail": expanded_detail,
+                        "validation": _sql_validation,
+                        "purpose": _sql_purpose,
                     }
                     _parsed_tools.append((tc, name, args))
 
@@ -2670,6 +3077,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                             "elapsed_seconds": envelope.debug.get("elapsed_seconds"),
                             "args_preview": envelope.debug.get("args_preview", {}),
                             "parallel": True,
+                            "validation": None,
                         }
                         messages.append({
                             "role": "tool",
@@ -2681,7 +3089,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                             yield hook_event
                         _hook_prompt_backlog.extend(hook_prompts)
                         yield {"type": "tool_end", "tool": name}
-                        yield {"type": "agent_activity", "message": "正在思考下一步…"}
+                        yield {"type": "agent_activity", "message": self._tt("正在思考下一步…", "Thinking…")}
                     hook_msg = self._hook_prompt_system_message(_hook_prompt_backlog)
                     if hook_msg:
                         messages.append(hook_msg)
@@ -2765,12 +3173,29 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                 sql=args.get("sql", ""),
                                 field_mapping=args.get("field_mapping", {}),
                                 title=args.get("title", ""),
+                                highlight=args.get("highlight", ""),
+                                size=args.get("size", ""),
+                                color_scheme=args.get("color_scheme", ""),
                             )
                             if "html" in chart:
+                                # spec 边车：记录可复现的完整生成参数。chat.py 落盘
+                                # {cid}.spec.json，供 PNG 导出取默认尺寸、图表迭代
+                                # 与审计复现使用
+                                chart_spec = {
+                                    "chart_type": str(args.get("chart_type") or ""),
+                                    "sql": str(args.get("sql") or ""),
+                                    "field_mapping": args.get("field_mapping") or {},
+                                    "title": str(args.get("title") or ""),
+                                    "highlight": str(args.get("highlight") or ""),
+                                    "size": str(args.get("size") or "chat"),
+                                    "color_scheme": str(chart.get("color_scheme") or "mckinsey"),
+                                    "rows": chart.get("rows"),
+                                }
                                 pending_charts.append({
                                     "html": chart["html"],
                                     "title": args["title"],
                                     "chart_type": args["chart_type"],
+                                    "spec": chart_spec,
                                 })
                                 yield {
                                     "type": "chart_placeholder",
@@ -2781,6 +3206,13 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                     f"({args['chart_type']}). "
                                     "It is displayed to the user."
                                 )
+                                # QC 警告回传：LLM 可据此自我修正（top-N 聚合、
+                                # 过滤 NULL、重命名重复系列）并重新 generate_chart
+                                if chart.get("warnings"):
+                                    tool_result += " QC warnings (fix with a new "
+                                    "generate_chart call if meaningful): " + "; ".join(
+                                        str(w) for w in chart["warnings"]
+                                    )
                                 tool_artifacts = [{
                                     "type": "chart",
                                     "name": args["title"],
@@ -2799,6 +3231,11 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                     "html": html,
                                     "title": f"数据概况分布图 {len(pending_charts) + 1}",
                                     "chart_type": "profile",
+                                    "spec": {
+                                        "chart_type": "profile",
+                                        "table_name": str(args.get("table_name") or ""),
+                                        "columns": args.get("columns") or [],
+                                    },
                                 })
                                 yield {
                                     "type": "chart_placeholder",
@@ -2819,7 +3256,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                 output_table=args.get("output_table", "cleaned_data"),
                             )
                         elif name == "export_excel":
-                            tool_result = self._tool_export_excel(
+                            tool_result = yield from self._tool_export_excel_with_jobs(
                                 tables=args.get("tables", []),
                                 filename=args.get("filename", ""),
                             )
@@ -2886,7 +3323,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                 tool_result = "大纲已展示给用户，等待其通过按钮确认或修改。"
                                 _outline_proposed = True
                         elif name == "generate_ppt":
-                            tool_result = self._tool_generate_ppt(
+                            tool_result = yield from self._tool_generate_ppt_with_jobs(
                                 title=args.get("title", "Presentation"),
                                 slides=args.get("slides", []),
                                 filename=args.get("filename", ""),
@@ -2999,10 +3436,109 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                 )
                             _ask_user_issued = True
                         elif name == "browse_webpage":
-                            tool_result = browse_webpage(
-                                args.get("url", ""),
-                                max_chars=int(args.get("max_chars", 12000) or 12000),
+                           tool_result = browse_webpage(
+                               args.get("url", ""),
+                               max_chars=int(args.get("max_chars", 12000) or 12000),
+                           )
+                        elif name == "browser_search":
+                            tool_result = browser_search(
+                                args.get("query", ""),
+                                engine=args.get("engine", "google"),
                             )
+                        elif name == "browser_navigate":
+                            tool_result = browser_navigate(args.get("url", ""))
+                        elif name == "browser_click":
+                            tool_result = browser_click(
+                                args.get("selector", ""),
+                                text=args.get("text", ""),
+                            )
+                        elif name == "browser_fill":
+                            tool_result = browser_fill(
+                                args.get("selector", ""),
+                                args.get("value", ""),
+                            )
+                        elif name == "browser_extract":
+                            tool_result = browser_extract(
+                                max_chars=int(args.get("max_chars", 8000) or 8000),
+                            )
+                        elif name == "browser_extract_tables":
+                            _raw_tables = browser_extract_tables()
+                            try:
+                                _page_data = json.loads(_raw_tables) if isinstance(_raw_tables, str) else {}
+                            except (json.JSONDecodeError, TypeError):
+                                _page_data = {}
+                            if not _page_data.get("tables"):
+                                tool_result = json.dumps({
+                                    "ok": False,
+                                    "error_code": "FETCH-001",
+                                    "message": (
+                                        "当前页面未检测到 <table> 元素。"
+                                        "请先 browser_navigate 到目标页面并确认表格已渲染，"
+                                        "或改用 fetch_table 抓取静态页面。"
+                                    ),
+                                }, ensure_ascii=False)
+                            else:
+                                _src_title = str(_page_data.get("title") or "").strip()
+                                _src_host = str(_page_data.get("url") or "")
+                                try:
+                                    _src_host = urllib.parse.urlparse(_src_host).netloc
+                                except Exception:
+                                    pass
+                                tool_result = self._tool_register_extracted_source(
+                                    _page_data["tables"],
+                                    str(args.get("source_name") or "").strip(),
+                                    _src_title or _src_host or "网页表格",
+                                )
+                                if json.loads(tool_result).get("ok"):
+                                    _has_sources = True
+                        elif name == "fetch_table":
+                            from data.table_extract import fetch_url_tables, TableExtractError
+
+                            _url = str(args.get("url") or "").strip()
+                            try:
+                                _validated_url = _validate_url(_url)
+                                _grids = fetch_url_tables(
+                                    _validated_url,
+                                    timeout=int(args.get("timeout", 30) or 30),
+                                )
+                            except ValueError as _exc:
+                                tool_result = json.dumps({
+                                    "ok": False,
+                                    "error_code": "FETCH-001",
+                                    "message": f"链接不可用: {_exc}",
+                                }, ensure_ascii=False)
+                            except TableExtractError as _exc:
+                                tool_result = json.dumps({
+                                    "ok": False,
+                                    "error_code": _exc.code,
+                                    "message": _exc.message,
+                                }, ensure_ascii=False)
+                            else:
+                                if not _grids:
+                                    tool_result = json.dumps({
+                                        "ok": False,
+                                        "error_code": "FETCH-001",
+                                        "message": (
+                                            "链接内容中未检测到表格。若是 JavaScript 渲染页面，"
+                                            "请先 browser_navigate 打开页面，再调用 browser_extract_tables。"
+                                        ),
+                                    }, ensure_ascii=False)
+                                else:
+                                    tool_result = self._tool_register_extracted_source(
+                                        _grids,
+                                        str(args.get("source_name") or "").strip(),
+                                        _url,
+                                    )
+                                    if json.loads(tool_result).get("ok"):
+                                        _has_sources = True
+                        elif name == "browser_screenshot":
+                            _ss_dir = content_data_path("outputs", "browser_screenshots")
+                            os.makedirs(_ss_dir, exist_ok=True)
+                            _ss_path = os.path.join(
+                                _ss_dir, f"browser_{int(time.time())}.png")
+                            tool_result = browser_screenshot(_ss_path)
+                        elif name == "browser_close":
+                            tool_result = browser_close()
                         elif name == "configure_hooks":
                             tool_result = configure_hooks_from_agent(
                                 args.get("settings"),
@@ -3184,11 +3720,6 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                 ).execute(
                                     args.get("command", ""), args.get("timeout", 30),
                                     confirm=_as_bool_arg(args.get("confirm", False)),
-                                )
-                            elif name == "workspace_command":
-                                tool_result = ws_tools.command(
-                                    args.get("operation", ""), args.get("path", "."),
-                                    timeout=args.get("timeout", 30),
                                 )
                             else:
                                 tool_result = "Unknown workspace tool"
@@ -4186,7 +4717,10 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                             }
                         elif name == "display_diagram":
                             from agent.tools.business.diagram import handle_display_diagram
-                            result = handle_display_diagram(args, session_id=self._session_id)
+                            result = handle_display_diagram(
+                                args, session_id=self._session_id,
+                                color_scheme=self.ppt_color_scheme,
+                            )
                             tool_result = result
                             if result.get("ok"):
                                 yield {
@@ -4197,7 +4731,10 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                 }
                         elif name == "edit_diagram":
                             from agent.tools.business.diagram import handle_edit_diagram
-                            result = handle_edit_diagram(args, session_id=self._session_id)
+                            result = handle_edit_diagram(
+                                args, session_id=self._session_id,
+                                color_scheme=self.ppt_color_scheme,
+                            )
                             tool_result = result
                             if result.get("ok"):
                                 yield {
@@ -4209,9 +4746,6 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                         elif name == "get_diagram":
                             from agent.tools.business.diagram import handle_get_diagram
                             tool_result = handle_get_diagram(args, session_id=self._session_id)
-                        elif name == "get_shape_library":
-                            from agent.tools.business.diagram import handle_get_shape_library
-                            tool_result = handle_get_shape_library(args, session_id=self._session_id)
                         elif name.startswith("mcp__"):
                             tool_result = self._mcp_manager.call_tool(name, args)
                             recorder = getattr(self, "_mcp_discovery_recorder", None)
@@ -4244,6 +4778,11 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                         _result_preview = str(tool_result)[:120].replace("\n", " ")
                         log.info("[tool] %s OK  %.2fs  result=%r", name, time.monotonic() - _tool_t0, _result_preview)
 
+                    if name.startswith("browser_") and name not in ("browser_close", "browser_screenshot"):
+                        _vr = yield from self._handle_browser_verification(name, args, tool_result)
+                        if _vr is not None:
+                            tool_result = _vr
+
                     envelope = make_tool_result(
                         name,
                         tool_result,
@@ -4262,6 +4801,19 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                         envelope.artifacts,
                         session_id=self._session_id,
                     )
+                    # SQL execution errors (column/table not found, syntax, engine
+                    # errors) are real errors even when the AST security check
+                    # passed — show the badge as a red error, labeled by cause.
+                    _audit_validation = _sql_validation
+                    if _audit_validation and not envelope.ok:
+                        _exec_err = classify_tool_error(tool_result, name)
+                        if _exec_err.startswith("sql_") or _exec_err in {"field_not_found", "table_not_found"}:
+                            _audit_validation = {
+                                "status": "failed",
+                                "label": "syntax_error" if _exec_err == "sql_syntax_error" else "run_failed",
+                                "message": str(tool_result)[:200],
+                                "used_heuristic": False,
+                            }
                     yield {
                         "type": "tool_audit",
                         "tool": name,
@@ -4273,6 +4825,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                         "artifacts": envelope.artifacts,
                         "elapsed_seconds": envelope.debug.get("elapsed_seconds"),
                         "args_preview": envelope.debug.get("args_preview", {}),
+                        "validation": _audit_validation,
                         "recovery": {
                             "sql": str(args.get("sql", ""))[:4000]
                             if name in {"query_data", "create_analysis_table"} else "",
@@ -4291,7 +4844,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                     _hook_prompt_backlog.extend(hook_prompts)
                     yield {"type": "tool_end", "tool": name}
                     if not _outline_proposed and not _ask_user_issued:
-                        yield {"type": "agent_activity", "message": "正在思考下一步…"}
+                        yield {"type": "agent_activity", "message": self._tt("正在思考下一步…", "Thinking…")}
 
                 hook_msg = self._hook_prompt_system_message(_hook_prompt_backlog)
                 if hook_msg:
@@ -4367,9 +4920,6 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                             flags=re.IGNORECASE,
                         )
                     full_content = _stripped.strip()
-
-                if reasoning_content:
-                    all_reasoning.append(reasoning_content)
 
                 _missing_skill_tools = _missing_required_skill_tools(
                     trusted_skill_name, _successful_tool_names,
@@ -4447,8 +4997,64 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                         _force_propose = True
                         continue
 
-                if all_reasoning:
-                    yield {"type": "reasoning", "content": "\n\n---\n\n".join(all_reasoning)}
+                # ── Numeric provenance gate ───────────────────────────────────
+                # Data-derived numbers in the final answer must trace back to
+                # tool results from this conversation (or to user/SQL-argument
+                # context). Unsupported values get one repair round; anything
+                # still unsupported afterwards is disclosed in a footnote.
+                if _successful_tool_names & NUMBER_EVIDENCE_TOOLS:
+                    _ev_texts, _ctx_texts = collect_number_evidence(messages)
+                    _unsupported_keys, _unsupported_total = audit_report_numbers(
+                        full_content, _ev_texts, _ctx_texts,
+                    )
+                    if _unsupported_keys:
+                        if _number_gate_retries < _MAX_NUMBER_GATE_RETRIES:
+                            _number_gate_retries += 1
+                            messages.extend([
+                                {"role": "assistant", "content": full_content},
+                                {
+                                    "role": "user",
+                                    "content": (
+                                        "[QUALITY GATE] Numeric provenance check "
+                                        f"failed for {_unsupported_total} value(s): "
+                                        + ", ".join(_unsupported_keys)
+                                        + ". Each listed number appears in your "
+                                        "draft but not in any tool result of this "
+                                        "conversation. Fix the final answer now: "
+                                        "query the missing metric properly, or "
+                                        "replace each unsupported number with the "
+                                        "exact value from the tool results, or "
+                                        "remove the claim. Never keep a number "
+                                        "that no tool result supports."
+                                    ),
+                                },
+                            ])
+                            yield {
+                                "type": "agent_activity",
+                                "message": self._tt(
+                                    "正在核对数字溯源…",
+                                    "Verifying numeric provenance…",
+                                ),
+                            }
+                            continue
+                        log.warning(
+                            "[run] numeric provenance gate: %d unsupported "
+                            "value(s) remain after retry: %s",
+                            _unsupported_total,
+                            ", ".join(_unsupported_keys),
+                        )
+                        full_content += (
+                            "\n\n---\n⚠️ "
+                            + self._tt(
+                                "数字溯源校验：以下数字未在本会话查询结果中找到直接出处，"
+                                "请注意核对：",
+                                "Numeric provenance check: the following values "
+                                "were not found in this session's tool results; "
+                                "verify before use: ",
+                            )
+                            + ", ".join(_unsupported_keys)
+                            + "."
+                        )
 
                 for chart_item in pending_charts:
                     yield {"type": "chart_html", **chart_item}

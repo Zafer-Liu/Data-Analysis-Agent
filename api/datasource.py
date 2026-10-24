@@ -16,18 +16,22 @@ from werkzeug.utils import secure_filename
 from .state import session_manager, datasource_config_manager, check_session_ownership, require_session_ownership
 from data.connector import ExcelDataSource, CSVDataSource, SQLDataSource, GoogleSheetsDataSource, HTTPAPIDataSource
 from data.sources.excel import excel_requires_job, parse_excel_job
+from data.sources.feishu_bitable import FeishuBitableDataSource
 from data.sources.workspace_persistent import WorkspacePersistentSource
+from data.feishu_bitable_service import (
+    FeishuBitableError, list_bitable_tables, parse_bitable_reference, read_bitable_records,
+)
 from infrastructure.artifact_lifecycle import register_artifact
-from infrastructure.paths import data_path
+from infrastructure.paths import content_data_path
 
 log = logging.getLogger(__name__)
 
 bp = Blueprint("datasource", __name__)
 
 # Source mode retains <project>/uploads; frozen/override mode uses user data.
-_BASE_UPLOAD_DIR = data_path("uploads")
-_BASE_WAREHOUSE_DIR = data_path("outputs", "DataWarehouse")
-_BASE_SESSION_DIR = data_path("outputs", "Session")
+_BASE_UPLOAD_DIR = content_data_path("uploads")
+_BASE_WAREHOUSE_DIR = content_data_path("outputs", "DataWarehouse")
+_BASE_SESSION_DIR = content_data_path("outputs", "Session")
 
 _BASE_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 _BASE_WAREHOUSE_DIR.mkdir(parents=True, exist_ok=True)
@@ -64,7 +68,7 @@ UPLOAD_DIR = _BASE_UPLOAD_DIR
 WAREHOUSE_SAVE_DIR = _BASE_WAREHOUSE_DIR
 PARSED_EXCEL_DIR = _BASE_UPLOAD_DIR / ".parsed_excel"
 PARSED_EXCEL_DIR.mkdir(parents=True, exist_ok=True)
-ALLOWED_EXTS = {".xlsx", ".xls", ".csv"}
+ALLOWED_EXTS = {".xlsx", ".xls", ".csv", ".pdf"}
 _finalize_lock = threading.RLock()
 
 
@@ -215,6 +219,12 @@ def _serialize_source(entry: dict, active_ids: set[str]) -> dict | None:
             "auth_type": getattr(source, "_auth_type", "none"),
             "auth_value": getattr(source, "_auth_value", ""),
         }
+    if isinstance(source, FeishuBitableDataSource):
+        app_token = str(getattr(source, "_feishu_app_token", "") or "")
+        table_id = str(getattr(source, "_feishu_table_id", "") or "")
+        if not app_token or not table_id:
+            return None
+        return {**base, "kind": "feishu", "app_token": app_token, "table_id": table_id}
     if isinstance(source, WorkspacePersistentSource):
         return {
             **base,
@@ -265,6 +275,16 @@ def _restore_source(info: dict):
             str(info.get("auth_value") or ""),
             name,
         )
+    if kind == "feishu":
+        app_token = str(info.get("app_token") or "")
+        table_id = str(info.get("table_id") or "")
+        if not app_token or not table_id:
+            raise ValueError("飞书多维表格 app_token 或 table_id 为空")
+        result = read_bitable_records(bitable=app_token, table_id=table_id)
+        source = FeishuBitableDataSource(result["records"], name or "飞书多维表格")
+        source._feishu_app_token = app_token
+        source._feishu_table_id = table_id
+        return source
     if kind == "workspace_persistent":
         db_path = str(info.get("db_path") or "")
         if not Path(db_path).is_file():
@@ -338,6 +358,10 @@ def _save_current_warehouse(sess, sid: str, name: str, *, autosaved: bool = Fals
 
 
 def _autosave_uploaded_warehouse(sess, sid: str, source_names: list[str], user_id: str = "") -> dict | None:
+    if _is_cloud():
+        # Browser-local file blobs plus conversation snapshots are the durable
+        # restore source in managed Web mode.
+        return None
     if not source_names:
         return None
     label = "、".join(source_names[:2])
@@ -371,7 +395,7 @@ def upload_file(sid: str):
 
     for f in files:
         if not f.filename or not _allowed(f.filename):
-            errors.append(f"{f.filename}: 仅支持 .xlsx / .xls / .csv 文件")
+            errors.append(f"{f.filename}: 仅支持 .xlsx / .xls / .csv / .pdf 文件")
             continue
 
         display_name = f.filename
@@ -381,9 +405,35 @@ def upload_file(sid: str):
         save_path = upload_dir / f"{sid[:8]}_{uuid.uuid4().hex[:6]}_{safe_name}"
         f.save(str(save_path))
         register_artifact(save_path, artifact_type="upload", session_id=sid)
-        log.info("[upload] saved → %s  (display: %s)", save_path, display_name)
+        if _is_cloud():
+            log.info("[upload] temporary file saved sid=%s ext=%s bytes=%d", sid, ext, save_path.stat().st_size)
+        else:
+            log.info("[upload] saved → %s  (display: %s)", save_path, display_name)
 
         try:
+            if ext == ".pdf":
+                from data.sources.extracted import ExtractedTableDataSource
+                from data.table_extract import (
+                    MAX_PDF_BYTES, normalize_grids, parse_pdf_tables,
+                )
+
+                pdf_bytes = save_path.read_bytes()
+                if len(pdf_bytes) > MAX_PDF_BYTES:
+                    raise ValueError(
+                        f"PDF 文件超过 {MAX_PDF_BYTES // (1024 * 1024)}MB 上限，请拆分后再上传")
+                grids = parse_pdf_tables(pdf_bytes)
+                if not grids:
+                    raise ValueError(
+                        "未在 PDF 中检测到表格（扫描件/图片型 PDF 不支持），请先转换为文本型 PDF")
+                tables, _meta = normalize_grids(grids)
+                if not tables:
+                    raise ValueError("PDF 表格均少于 2 行/2 列，无可导入内容")
+                source = ExtractedTableDataSource(f"PDF {display_name}", tables)
+                schema = source.get_schema()
+                source_id = sess.add_source(source)
+                added.append({"source_id": source_id, "source_name": source.name,
+                              "schema_preview": schema})
+                continue
             if ext != ".csv" and excel_requires_job(str(save_path)):
                 db_path = parsed_excel_dir / f"{sid[:8]}_{uuid.uuid4().hex}.duckdb"
                 job_id = sess.job_runner.create(
@@ -406,7 +456,10 @@ def upload_file(sid: str):
             added.append({"source_id": source_id, "source_name": display_name,
                           "schema_preview": schema})
         except Exception as exc:
-            log.error("[upload] FAILED %s: %s\n%s", f.filename, exc, traceback.format_exc())
+            if _is_cloud():
+                log.error("[upload] FAILED sid=%s ext=%s error_type=%s", sid, ext, type(exc).__name__)
+            else:
+                log.error("[upload] FAILED %s: %s\n%s", f.filename, exc, traceback.format_exc())
             errors.append(f"{f.filename}: {exc}")
 
     if not added and not pending_jobs:
@@ -853,6 +906,51 @@ def connect_gsheets(sid: str):
     except Exception as exc:
         log.error("[connect-gsheets] FAILED: %s\n%s", exc, traceback.format_exc())
         return jsonify({"error": _friendly_conn_error(exc, "Google Sheets")}), 400
+
+
+@bp.post("/api/session/<sid>/connect-feishu")
+@require_session_ownership
+def connect_feishu(sid: str):
+    d = request.json or {}
+    bitable = (d.get("bitable") or "").strip()
+    table_id = (d.get("table") or "").strip()
+    display_name = (d.get("name") or "").strip()
+
+    # Fall back to saved config for blank link
+    if not bitable:
+        saved = datasource_config_manager.get("feishu") or {}
+        bitable = saved.get("bitable", "")
+        table_id = table_id or saved.get("table", "")
+    if not bitable:
+        return jsonify({"error": "飞书多维表格链接或 app_token 不能为空"}), 400
+
+    try:
+        app_token, resolved_table = parse_bitable_reference(bitable, table_id)
+        if not resolved_table:
+            tables = list_bitable_tables(bitable=bitable)["tables"]
+            if len(tables) == 1:
+                resolved_table = tables[0]["table_id"]
+            else:
+                return jsonify({"ok": False, "need_table": True,
+                                "app_token": app_token, "tables": tables}), 200
+        result = read_bitable_records(bitable=bitable, table_id=resolved_table)
+        source = FeishuBitableDataSource(result["records"], display_name or "飞书多维表格")
+        source._feishu_app_token = app_token
+        source._feishu_table_id = resolved_table
+        sess = session_manager.get_or_create(sid)
+        source_id = sess.add_source(source)
+        datasource_config_manager.save("feishu", {
+            "bitable": bitable, "table": resolved_table, "name": display_name
+        })
+        return jsonify({"ok": True, "source_id": source_id,
+                        "source_name": source.name,
+                        "schema_preview": source.get_schema(),
+                        "sources": sess.list_sources()})
+    except FeishuBitableError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        log.error("[connect-feishu] FAILED: %s\n%s", exc, traceback.format_exc())
+        return jsonify({"error": _friendly_conn_error(exc, "飞书多维表格")}), 400
 
 
 @bp.post("/api/session/<sid>/connect-api")

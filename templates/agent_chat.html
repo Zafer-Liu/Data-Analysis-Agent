@@ -6,7 +6,7 @@
 <title>智析Agent</title>
 <link rel="icon" href="{{ url_for('static', filename='Images/icon.png') }}">
 <script src="{{ url_for('static', filename='js/theme_bootstrap.js', v='fe0') }}"></script>
-<link rel="stylesheet" href="{{ url_for('static', filename='css/agent_chat.css', v='20261009-ui-1') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/agent_chat.css', v='v1.4.0-polish-2') }}">
 {% if desktop_lifecycle_enabled %}
 <script defer src="{{ url_for('static', filename='js/modules/desktop_lifecycle.js', v='desktop-lease-1') }}"></script>
 {% endif %}
@@ -16,14 +16,17 @@
   .cloud-banner-icon{font-size:18px;flex-shrink:0}
   .cloud-banner-text{flex:1}
   .cloud-banner-text strong{color:#75340a}
+  .cloud-storage-button{flex-shrink:0;border:1px solid rgba(102,77,3,.28);background:rgba(255,255,255,.55);border-radius:8px;padding:5px 9px;color:#664d03;font:inherit;font-weight:600;cursor:pointer}
+  .cloud-storage-button:hover{background:rgba(255,255,255,.85)}
   .cloud-banner-close{flex-shrink:0;width:24px;height:24px;border:none;background:rgba(102,77,3,.15);border-radius:50%;cursor:pointer;color:#664d03;font-size:14px;display:flex;align-items:center;justify-content:center;transition:background .15s}
   .cloud-banner-close:hover{background:rgba(102,77,3,.3)}
   .cloud-banner.hidden{display:none}
 </style>
 <script defer src="{{ url_for('static', filename='js/modules/cloud_banner.js', v='cloud-banner-1') }}"></script>
 {% endif %}
+<script defer src="{{ url_for('static', filename='js/modules/account_menu.js', v='account-menu-10') }}"></script>
 </head>
-<body>
+<body data-cloud-managed="{{ '1' if is_cloud_managed else '0' }}" data-run-mode="{{ run_mode }}">
 <div class="layout">
 
   <!-- ── Sidebar ──────────────────────────────────────────────── -->
@@ -117,16 +120,53 @@
               title="为当前对话临时设定一段补充指令" aria-hidden="true" tabindex="-1"></button>
 
       <footer class="sb-footer">
-        {% if is_cloud_managed %}
-        <div id="cloud-quota" class="sb-quota" style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
-          <span style="font-size:var(--fs-xs);color:var(--color-sidebar-fg);opacity:.6;white-space:nowrap">今日额度</span>
-          <div style="flex:1;height:5px;background:var(--color-sidebar-bg);border-radius:3px;overflow:hidden">
-            <div id="cloud-quota-bar" style="height:100%;width:0;background:#22c55e;border-radius:3px;transition:width .3s,background .3s"></div>
+        <div class="sb-footer-meta" style="font-size:var(--fs-xs);font-weight:600;color:var(--color-sidebar-fg);opacity:.85">v1.4.0 LTS · <a href="https://www.zaferliu.me" target="_blank" rel="noopener noreferrer" style="color:#a78bfa;text-decoration:none;font-weight:700;font-size:calc(var(--fs-xs) * 1.05)">@Zafer_Liu</a></div>
+        {% if is_cloud_managed or run_mode == 'desktop' %}
+        <div class="sb-account-wrap">
+        <div class="sb-account" id="sb-account" data-action="toggleAccountMenu" role="button" tabindex="0" aria-haspopup="true" aria-expanded="false">
+          <div class="sb-account-avatar" id="sb-account-avatar">👤</div>
+          <div class="sb-account-info">
+            <div class="sb-account-name" id="sb-account-name" data-i18n="account.loading">加载中…</div>
+            <div class="sb-account-mode" id="sb-account-mode">{{ '网页版' if is_cloud_managed else '桌面版' }}</div>
           </div>
-          <span id="cloud-quota-text" style="font-size:calc(var(--fs-xs) * .8);color:var(--color-sidebar-fg);opacity:.6;white-space:nowrap">--</span>
+          <svg class="sb-account-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 15l-6-6-6 6"/></svg>
+        </div>
+        <div class="sb-account-menu" id="sb-account-menu" hidden role="menu">
+          <div class="sb-account-menu-item" data-action="showQuotaDetail" role="menuitem">
+            <span class="sb-am-icon">📊</span>
+            <span data-i18n="account.my_quota">我的额度</span>
+            <span class="sb-am-value" id="sb-quota-mini">--</span>
+          </div>
+          <div class="sb-account-menu-item" data-action="showInvitePanel" role="menuitem">
+            <span class="sb-am-icon">🎁</span>
+            <span data-i18n="account.invite">邀请好友</span>
+          </div>
+          <div class="sb-account-menu-item" data-action="showSponsorPanel" role="menuitem">
+            <span class="sb-am-icon sb-am-icon-line" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8l1.1 1.1L12 21l7.7-7.5 1.1-1.1a5.5 5.5 0 0 0 0-7.8Z"/></svg></span>
+            <span data-i18n="account.sponsor">赞助支持</span>
+          </div>
+          <div class="sb-account-menu-divider"></div>
+          <div class="sb-account-menu-item sb-account-menu-danger" data-action="cloudLogout" role="menuitem">
+            <span class="sb-am-icon">🚪</span>
+            <span data-i18n="account.logout">退出登录</span>
+          </div>
+        </div>
+        </div>
+        {% elif run_mode == 'local' %}
+        <div class="sb-account-wrap">
+        <div class="sb-account sb-account-local" id="sb-account" data-action="toggleAccountMenu" role="button" tabindex="0" aria-haspopup="true" aria-expanded="false">
+          <div class="sb-account-avatar">💻</div>
+          <div class="sb-account-info">
+            <div class="sb-account-name" id="sb-account-name" data-i18n="account.local">本地运行</div>
+            <div class="sb-account-mode" id="sb-account-mode" data-i18n="account.no_login">无需登录</div>
+          </div>
+          <svg class="sb-account-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 15l-6-6-6 6"/></svg>
+        </div>
+        <div class="sb-account-menu" id="sb-account-menu" hidden role="menu">
+          <div class="sb-account-menu-local" data-i18n="account.local_hint">本地运行 · 无需登录</div>
+        </div>
         </div>
         {% endif %}
-        <div class="sb-footer-meta" style="font-size:var(--fs-xs);font-weight:600;color:var(--color-sidebar-fg);opacity:.85">v1.3.0 LTS · <a href="https://www.zaferliu.me" target="_blank" rel="noopener noreferrer" style="color:var(--color-accent);text-decoration:none;font-weight:700;font-size:calc(var(--fs-xs) * 1.05)">@Zafer_Liu</a></div>
         <div class="sb-footer-actions">
           <button class="sb-iconbtn sb-footer-update" data-action="openOverlay:ov-update" data-i18n="sidebar.check_update"><svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg><span data-i18n="sidebar.check_update">检查更新</span></button>
           <button class="sb-iconbtn sb-footer-community" type="button" data-action="openOverlay:ov-community"
@@ -191,6 +231,7 @@
               <button class="sb-dropdown-item" data-action="openOverlay:ov-excel"   data-i18n="sidebar.upload"><svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5M12 3v12"/></svg><span data-i18n="sidebar.upload">上传 Excel / CSV</span></button>
               <button class="sb-dropdown-item" data-action="openOverlay:ov-db"      data-i18n="sidebar.connect_db"><svg viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5M3 12a9 3 0 0 0 18 0"/></svg><span data-i18n="sidebar.connect_db">连接 SQL 数据库</span></button>
               <button class="sb-dropdown-item" data-action="openOverlay:ov-gsheets" data-i18n="sidebar.connect_gsheets"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M9 3v18M15 3v18"/></svg><span data-i18n="sidebar.connect_gsheets">连接 Google Sheets</span></button>
+              <button class="sb-dropdown-item" data-action="openOverlay:ov-feishu" data-i18n="sidebar.connect_feishu"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M9 3v18M15 3v18"/></svg><span data-i18n="sidebar.connect_feishu">连接飞书多维表格</span></button>
               <button class="sb-dropdown-item" data-action="openOverlay:ov-api"     data-i18n="sidebar.connect_api"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg><span data-i18n="sidebar.connect_api">连接自定义 API</span></button>
               <hr class="sb-dropdown-sep">
               <button class="sb-dropdown-item" data-action="openWorkspace" data-i18n="sidebar.mount_workspace"><svg viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg><span data-i18n="sidebar.mount_workspace">挂载工作目录</span></button>
@@ -231,7 +272,13 @@
         <input id="skill-picker-search" class="sb-panel-search-input" type="search"
                data-i18n-ph="skills.search" placeholder="搜索技能名称或描述"
                autocomplete="off">
+        <button class="sb-panel-filter-btn" id="skill-filter-btn" type="button"
+                title="按标签筛选" aria-haspopup="true" aria-expanded="false" aria-label="按标签筛选技能">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4h18l-7 8v8l-4-2v-6L3 4z"/></svg>
+          <span class="sb-panel-filter-count" id="skill-filter-count" hidden></span>
+        </button>
         <button class="sb-panel-search-btn" id="skill-new-btn" type="button" title="新建自定义 Skill">＋</button>
+        <div class="sb-panel-filter-pop" id="skill-filter-pop" role="menu" aria-label="标签筛选" hidden></div>
       </div>
       <div class="sb-drawer-body">
         <div class="skill-picker-list" id="skill-picker-list"></div>
@@ -258,6 +305,11 @@
               <label for="skill-form-desc" class="skill-form-label">描述</label>
               <input id="skill-form-desc" type="text" placeholder="简短描述" class="skill-form-input" maxlength="240">
               <span class="skill-form-counter" data-counter-for="skill-form-desc">0 / 240</span>
+            </div>
+            <div class="skill-form-row">
+              <label for="skill-form-tags" class="skill-form-label">标签</label>
+              <input id="skill-form-tags" type="text" placeholder="例如：data-preparation, mode-business" class="skill-form-input">
+              <span class="skill-form-hint">多个标签用英文逗号分隔；仅小写字母、数字和连字符</span>
             </div>
             <div class="skill-form-row-two">
               <div class="skill-form-col" style="display:none">
@@ -472,8 +524,9 @@
 
               <!-- Tab bar -->
               <div class="mcp-fill-tabs">
-                <button class="mcp-fill-tab active" id="mcp-tab-local"  data-action="switchMcpTab:local"><svg viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg> 本地包目录</button>
+                <button class="mcp-fill-tab active" id="mcp-tab-local"  data-action="switchMcpTab:local"><svg viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg> 本地位置</button>
                 <button class="mcp-fill-tab"        id="mcp-tab-paste"  data-action="switchMcpTab:paste"><svg viewBox="0 0 24 24"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></svg> 粘贴内容</button>
+                <button class="mcp-fill-tab"        id="mcp-tab-presets" data-action="switchMcpTab:presets"><svg viewBox="0 0 24 24"><path d="M12 2l3 7h7l-5.5 4 2 7L12 16l-6.5 4 2-7L2 9h7z"/></svg> 常用预设</button>
               </div>
 
               <!-- Tab: local path -->
@@ -486,6 +539,13 @@
                 </div>
                 <span id="mcp-scan-status"   class="f-scan-status"></span>
                 <div  id="mcp-scan-warnings" class="hidden f-warn-chip"></div>
+              </div>
+
+             <!-- Tab: presets -->
+             <div id="mcp-panel-presets" class="mcp-fill-panel hidden">
+               <div class="mcp-smart-hint">内置常用 MCP 服务器模板。标记「一键安装」的预设会自动下载并连接；标记「填充」的需补全路径或 API Key 后保存。</div>
+                <div id="mcp-preset-list" class="mcp-preset-list"><div class="f-loading-text">加载中…</div></div>
+                <span id="mcp-preset-status" class="f-scan-status"></span>
               </div>
 
               <!-- Tab: paste -->
@@ -560,13 +620,14 @@
   </aside>
 
   <!-- ── Main ───────────────────────────────────────────────────── -->
-  <div class="main">
+  <main class="main">
     {% if is_cloud_managed %}
     <div class="cloud-banner" id="cloudBanner">
       <span class="cloud-banner-icon">⚠️</span>
       <div class="cloud-banner-text">
-        <strong>云端演示环境免责声明：</strong>请勿上传敏感数据或商业机密，对话数据存储于公共服务器。<strong>使用完毕后请删除会话</strong>（侧边栏 → 已保存对话 → 删除），以免数据泄露。
+        <strong>网页版本地存储：</strong>聊天中上传的 Excel/CSV 原件和对话记录优先保存到您授权的 Sage 文件夹；未授权或浏览器不支持时保存到浏览器本地数据库。服务器仅保留分析期间所需的临时副本。
       </div>
+      <button class="cloud-storage-button" id="cloud-storage-button" type="button">选择本地文件夹</button>
       <button class="cloud-banner-close" id="cloudBannerClose" title="关闭提示">×</button>
     </div>
     {% endif %}
@@ -583,16 +644,13 @@
         <button class="hdr-btn" id="btn-job-history" data-action="openJobHistory"
                 data-i18n="job.history.title">任务历史</button>
         <button class="hdr-btn" id="btn-schema" data-action="openSchemaView" data-i18n="header.schema"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" class="icon-inline" xmlns="http://www.w3.org/2000/svg"><rect x="1" y="3" width="14" height="2.5" rx="1" fill="currentColor"/><rect x="1" y="7" width="14" height="2.5" rx="1" fill="currentColor" opacity=".7"/><rect x="1" y="11" width="9" height="2.5" rx="1" fill="currentColor" opacity=".45"/></svg>数据预览</button>
-        {% if is_cloud_managed %}
-        <button class="hdr-btn" id="cloud-logout" data-action="cloudLogout" title="退出登录" style="color:#f87171"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>退出</button>
-        {% endif %}
-      </div>
-    </div>
+   </div>
+   </div>
 
     <div class="messages" id="messages">
       <div class="welcome" id="welcome">
         <img src="/static/Images/icon.png" alt="智析 Agent" class="welcome-brand-logo">
-        <h2 data-i18n="welcome.title">开始您的数据分析</h2>
+        <h1 data-i18n="welcome.title">开始您的数据分析</h1>
         <p data-i18n-html="welcome.desc">连接数据库或上传 Excel，用自然语言提问，AI 会自动查询、分析并生成图表。<br>
            输入 <strong>/</strong> 可快速选择专属命令。</p>
         <div class="welcome-prompts">
@@ -670,10 +728,12 @@
             </div>
           </div>
 
-          <textarea id="msg-input" rows="1"
-            data-i18n-ph="input.placeholder"
-            placeholder="今天帮你做些什么？  @ 引用对话文件，/ 调用命令"></textarea>
-          <div class="prompt-suggestion-ghost" id="prompt-suggestion-ghost" aria-hidden="true"></div>
+          <div class="composer-input-layer">
+            <textarea id="msg-input" rows="1"
+              data-i18n-ph="input.placeholder"
+              placeholder="今天帮你做些什么？  @ 引用对话文件，/ 调用命令"></textarea>
+            <div class="prompt-suggestion-ghost" id="prompt-suggestion-ghost" aria-hidden="true"></div>
+          </div>
 
           <div class="composer-toolbar">
             <div class="composer-toolbar-main">
@@ -758,8 +818,8 @@
           </div>
         </div>
       </div>
-    </div>
-  </div>
+   </div>
+  </main>
 </div>
 
 <!-- ══ MODALS ═══════════════════════════════════════════════════════ -->
@@ -767,11 +827,11 @@
 <!-- Excel upload -->
 <div class="overlay" id="ov-excel">
   <div class="modal">
-    <div class="modal-title" data-i18n="modal.excel.title">📂 上传 Excel / CSV 文件</div>
+    <div class="modal-title" data-i18n="modal.excel.title">📂 上传 Excel / CSV / PDF 文件</div>
     <div class="f-row">
       <label data-i18n="modal.excel.label">选择文件</label>
-      <input type="file" id="xl-file" accept=".xlsx,.xls,.csv" multiple>
-      <div class="f-hint" data-i18n="modal.excel.hint">支持 .xlsx / .xls / .csv</div>
+      <input type="file" id="xl-file" accept=".xlsx,.xls,.csv,.pdf" multiple>
+      <div class="f-hint" data-i18n="modal.excel.hint">支持 .xlsx / .xls / .csv / .pdf</div>
     </div>
     <div class="upload-progress hidden" id="xl-progress">
       <div class="upload-progress-bar" id="xl-progress-bar"></div>
@@ -856,6 +916,43 @@
     <div class="modal-footer">
       <button class="btn-sm btn-sm-ghost"   id="gsheets-cancel-btn" data-action="closeOverlay:ov-gsheets" data-i18n="modal.cancel">取消</button>
       <button class="btn-sm btn-sm-primary" id="gsheets-btn"        data-action="connectGSheets"           data-i18n="modal.connect">连接</button>
+    </div>
+  </div>
+</div>
+
+<!-- Feishu Bitable connect -->
+<div class="overlay" id="ov-feishu">
+  <div class="modal">
+    <div class="modal-title" data-i18n="modal.feishu.title">🧾 连接飞书多维表格</div>
+    <div class="msg-ok hidden" id="feishu-status"></div>
+    <div class="f-row">
+      <label data-i18n="modal.feishu.name_label">显示名称（可选）</label>
+      <input type="text" id="feishu-name" data-i18n-ph="modal.feishu.name_ph" placeholder="例如：销售数据表">
+    </div>
+    <div class="f-row">
+      <label>
+        <span data-i18n="modal.feishu.sheet_label">飞书多维表格链接</span>
+        <span class="required-mark"> *</span>
+      </label>
+      <input type="text" id="feishu-sheet" data-i18n-ph="modal.feishu.sheet_ph" placeholder="https://xxx.feishu.cn/base/xxx?table=tblxxx">
+    </div>
+    <div class="f-row hidden" id="feishu-table-row">
+      <label>
+        <span data-i18n="modal.feishu.table_label">选择数据表</span>
+        <span class="required-mark"> *</span>
+      </label>
+      <select id="feishu-table"></select>
+    </div>
+    <div class="f-hint" data-i18n="modal.feishu.hint">需先在设置中配置飞书应用机器人，并将表格授权给应用；导入为最多 100000 条快照，之后可在对话中让 AI 写回</div>
+    <div class="ds-loading hidden" id="feishu-loading">
+      <div class="ds-spinner"></div>
+      <span data-i18n="ds.connecting">正在连接并解析数据…</span>
+    </div>
+    <pre class="schema-box hidden" id="feishu-schema"></pre>
+    <div class="msg-err" id="feishu-err"></div>
+    <div class="modal-footer">
+      <button class="btn-sm btn-sm-ghost"   id="feishu-cancel-btn" data-action="closeOverlay:ov-feishu" data-i18n="modal.cancel">取消</button>
+      <button class="btn-sm btn-sm-primary" id="feishu-btn"        data-action="connectFeishu"           data-i18n="modal.connect">连接</button>
     </div>
   </div>
 </div>
@@ -949,27 +1046,62 @@
       <div class="add-custom-toggle" data-action="toggleAddCustom" data-i18n="modal.settings.add_custom">＋ 添加自定义模型</div>
 
       <div class="add-custom-form" id="add-custom-form">
-        <input type="text"     id="ac-name"   autocomplete="off" data-i18n-ph="add_custom.name_ph"  placeholder="供应商名称（显示用），例如 DeepSeek">
-        <input type="text"     id="ac-url"    autocomplete="off" data-i18n-ph="add_custom.url_ph"   placeholder="API Base URL，例如 https://api.deepseek.com">
-        <input type="text"     id="ac-model"  autocomplete="off" data-i18n-ph="add_custom.model_ph" placeholder="Model ID（传入 API 的模型名），例如 deepseek-chat">
-        <input type="password" id="ac-key"    autocomplete="off" data-lpignore="true" data-i18n-ph="add_custom.key_ph"   placeholder="API Key">
-        <div class="f-ac-custom-row">
-          <input type="number" id="ac-ctx"    data-i18n-ph="add_custom.ctx_ph"   placeholder="上下文窗口（默认 1000000）" class="f-item-flex">
-          <input type="number" id="ac-output" data-i18n-ph="add_custom.out_ph"   placeholder="最大输出（默认 384000）"   class="f-item-flex">
-        </div>
-        <div class="model-price-fields">
-          <div class="f-ac-custom-row">
-            <input type="number" id="ac-input-price" min="0" step="any" inputmode="decimal" placeholder="输入价格（可选）" class="f-item-flex">
-            <input type="number" id="ac-output-price" min="0" step="any" inputmode="decimal" placeholder="输出价格（可选）" class="f-item-flex">
+        <div class="pf-group">
+          <div class="pf-group-label">基本信息</div>
+          <div class="pf-field">
+            <label for="ac-name">供应商名称</label>
+            <input type="text" id="ac-name" autocomplete="off" data-i18n-ph="add_custom.name_ph" placeholder="例如 DeepSeek">
+          </div>
+          <div class="pf-field">
+            <label for="ac-url">API Base URL</label>
+            <input type="text" id="ac-url" autocomplete="off" data-i18n-ph="add_custom.url_ph" placeholder="例如 https://api.deepseek.com">
+          </div>
+          <div class="pf-field">
+            <label for="ac-model">Model ID</label>
+            <input type="text" id="ac-model" autocomplete="off" data-i18n-ph="add_custom.model_ph" placeholder="例如 deepseek-chat">
+          </div>
+          <div class="pf-field">
+            <label for="ac-key">API Key</label>
+            <input type="password" id="ac-key" autocomplete="off" data-lpignore="true" data-i18n-ph="add_custom.key_ph" placeholder="输入 API Key">
           </div>
         </div>
-        <label class="f-ac-label-row">
-          <input type="checkbox" id="ac-think" data-change="toggleAcBudget">
-          <span data-i18n="add_custom.think">启用思考模式</span>
-        </label>
-        <div id="ac-budget-row" class="hidden f-ac-budget-row">
-          <label class="f-ac-budget-label" data-i18n="add_custom.budget">思考预算（tokens）</label>
-          <input type="number" id="ac-budget" value="8000" min="1000" max="100000" step="1000" class="f-item-flex">
+        <div class="pf-group">
+          <div class="pf-group-label">模型参数</div>
+          <div class="pf-grid-2">
+            <div class="pf-field">
+              <label for="ac-ctx">上下文窗口</label>
+              <input type="number" id="ac-ctx" data-i18n-ph="add_custom.ctx_ph" placeholder="默认 1000000">
+            </div>
+            <div class="pf-field">
+              <label for="ac-output">最大输出</label>
+              <input type="number" id="ac-output" data-i18n-ph="add_custom.out_ph" placeholder="默认 384000">
+            </div>
+          </div>
+        </div>
+        <div class="pf-group">
+          <div class="pf-group-label">价格（可选）</div>
+          <div class="pf-grid-2">
+            <div class="pf-field">
+              <label for="ac-input-price">输入价格</label>
+              <input type="number" id="ac-input-price" min="0" step="any" inputmode="decimal" placeholder="每百万 token">
+            </div>
+            <div class="pf-field">
+              <label for="ac-output-price">输出价格</label>
+              <input type="number" id="ac-output-price" min="0" step="any" inputmode="decimal" placeholder="每百万 token">
+            </div>
+          </div>
+        </div>
+        <div class="pf-group">
+          <label class="pf-check-row">
+            <input type="checkbox" id="ac-think" data-change="toggleAcBudget">
+            <span data-i18n="add_custom.think">启用思考模式</span>
+          </label>
+          <div id="ac-budget-row" class="hidden">
+            <div class="pf-field">
+              <label for="ac-budget" data-i18n="add_custom.budget">思考预算（tokens）</label>
+              <input type="number" id="ac-budget" value="8000" min="1000" max="100000" step="1000">
+            </div>
+          </div>
         </div>
         <div class="msg-err" id="ac-err"></div>
         <div class="msg-ok"  id="ac-ok"></div>
@@ -1048,7 +1180,7 @@
       <div class="modal-title" id="delete-session-title">归档这条对话？</div>
     </div>
     <div class="session-delete-copy" id="delete-session-name"></div>
-    <div class="session-delete-warning">归档后，这条对话及其图表、导出、上传等文件会进入「设置 → 存储」的回收站，可随时恢复；不会随保留策略自动清理。</div>
+    <div class="session-delete-warning">{% if is_cloud_managed %}删除后，这条对话及其关联上传原件会从已授权的 Sage 文件夹和浏览器本地索引中移除，无法恢复。{% else %}归档后，这条对话及其图表、导出、上传等文件会进入「设置 → 存储」的回收站，可随时恢复；不会随保留策略自动清理。{% endif %}</div>
     <div class="msg-err" id="delete-session-err"></div>
     <div class="modal-footer">
       <button class="btn-sm btn-sm-ghost" data-action="closeOverlay:ov-delete-session">取消</button>
@@ -1264,11 +1396,273 @@
   </div>
 </div>
 
+<!-- ══ Account: quota detail modal ═══════════════════════════════════ -->
+<div class="overlay" id="ov-quota">
+  <div class="modal modal--w520 quota-modal">
+    <div class="quota-heading">
+      <div class="quota-heading-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><path d="M4 19V9"/><path d="M10 19V5"/><path d="M16 19v-7"/><path d="M22 19V3"/></svg>
+      </div>
+      <div>
+        <div class="modal-title" data-i18n="account.my_quota">我的额度</div>
+        <p class="quota-desc" data-i18n="account.quota.desc">分别查看每日免费额度、付费模型额度与重置时间。</p>
+      </div>
+    </div>
+    <div id="quota-detail-body" class="quota-detail">
+      <div class="quota-overview">
+        <section class="quota-meter quota-meter--free">
+          <div class="quota-meter-head">
+            <strong data-i18n="account.quota.free_title">每日免费</strong>
+            <span data-i18n="account.quota.daily_reset">每日重置</span>
+          </div>
+          <div class="quota-meter-body">
+            <div class="quota-detail-ring">
+              <svg viewBox="0 0 100 100" width="100" height="100">
+                <circle cx="50" cy="50" r="42" pathLength="100"/>
+                <circle id="quota-free-ring-fg" cx="50" cy="50" r="42" pathLength="100"/>
+              </svg>
+              <div class="quota-detail-center">
+                <span class="quota-detail-percent" id="quota-free-percent">--%</span>
+                <span class="quota-detail-caption" data-i18n="account.quota.used_rate">免费已用</span>
+              </div>
+            </div>
+            <div class="quota-meter-copy">
+              <span data-i18n="account.quota.free_available">今日可用</span>
+              <strong id="quota-free-balance">--</strong>
+              <small><span data-i18n="account.quota.free_limit">每日免费总额</span><b id="quota-free-total">--</b></small>
+            </div>
+          </div>
+        </section>
+        <section class="quota-meter quota-meter--paid">
+          <div class="quota-meter-head">
+            <strong data-i18n="account.quota.paid_title">付费额度</strong>
+            <span data-i18n="account.quota.long_lived">长期有效</span>
+          </div>
+          <div class="quota-meter-body">
+            <div class="quota-detail-ring">
+              <svg viewBox="0 0 100 100" width="100" height="100">
+                <circle cx="50" cy="50" r="42" pathLength="100"/>
+                <circle id="quota-paid-ring-fg" cx="50" cy="50" r="42" pathLength="100"/>
+              </svg>
+              <div class="quota-detail-center">
+                <span class="quota-detail-percent" id="quota-paid-percent">--</span>
+                <span class="quota-detail-caption" data-i18n="account.quota.paid_used_rate">付费已用</span>
+              </div>
+            </div>
+            <div class="quota-meter-copy">
+              <span data-i18n="account.quota.paid_used">付费额度已用</span>
+              <strong id="quota-paid-used">--</strong>
+              <small><span data-i18n="account.quota.total_granted">累计获得</span><b id="quota-paid-total">--</b></small>
+            </div>
+          </div>
+        </section>
+      </div>
+      <div class="quota-model-row" id="quota-model-row" hidden>
+        <div class="quota-model-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M13 2 5.5 13H11l-1 9L18.5 10H13z"/></svg>
+        </div>
+        <div class="quota-model-copy">
+          <span data-i18n="account.quota.model_label">额度适用模型</span>
+          <strong id="quota-model-name">免费模型</strong>
+        </div>
+        <span class="quota-model-tier" id="quota-model-tier" data-i18n="account.quota.model_tier">内置 · 免费</span>
+      </div>
+      <div class="quota-detail-grid">
+        <div class="quota-detail-card"><span data-i18n="account.quota.free_used">今日免费已用</span><strong id="quota-detail-used-text">--</strong></div>
+        <div class="quota-detail-card"><span data-i18n="account.quota.free_remaining">今日免费剩余</span><strong id="quota-detail-remaining">--</strong></div>
+        <div class="quota-detail-card quota-detail-card--paid"><span data-i18n="account.quota.paid_used">付费额度已用</span><strong id="quota-paid-used-text">--</strong></div>
+        <div class="quota-detail-card quota-detail-card--paid"><span data-i18n="account.quota.paid_balance">付费额度剩余</span><strong id="quota-detail-bonus-text">--</strong></div>
+      </div>
+      <div class="quota-reset-card" id="quota-detail-reset-row">
+        <div class="quota-reset-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div>
+        <div class="quota-reset-copy">
+          <span data-i18n="account.quota.reset">下次重置</span>
+          <strong id="quota-detail-reset">--</strong>
+        </div>
+        <span class="quota-reset-zone" id="quota-detail-reset-zone">本地时区</span>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-sm btn-sm-ghost" data-action="closeOverlay:ov-quota" data-i18n="modal.close">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ Account: invite friends modal ═════════════════════════════════ -->
+<div class="overlay" id="ov-invite">
+  <div class="modal modal--w520 invite-modal">
+    <div class="invite-heading">
+      <div class="invite-heading-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><path d="M15 8a3 3 0 1 0-3-3 3 3 0 0 0 3 3Z"/><path d="M6 14a3 3 0 1 0-3-3 3 3 0 0 0 3 3Z"/><path d="M18 21a3 3 0 1 0-3-3 3 3 0 0 0 3 3Z"/><path d="m8.7 12.3 6.6 4.4M12.4 6.5 8.6 9.5"/></svg>
+      </div>
+      <div>
+        <div class="modal-title" data-i18n="account.invite">邀请好友</div>
+        <p class="invite-desc" data-i18n="account.invite.desc">每成功邀请一位好友，你获得 10M Token，好友获得 4M Token。</p>
+      </div>
+    </div>
+    <div class="invite-body">
+      <div class="invite-link-card">
+        <div class="invite-section-label" data-i18n="account.invite.link_label">专属邀请链接</div>
+        <div class="invite-link-box">
+          <textarea id="invite-link-input" rows="2" readonly aria-label="专属邀请链接">正在生成…</textarea>
+          <button class="btn-sm btn-sm-primary" id="invite-copy-btn" data-action="copyInviteLink" data-i18n="account.invite.copy" disabled>复制链接</button>
+        </div>
+      </div>
+      <div class="invite-qr-panel">
+        <div class="invite-qr" id="invite-qr" aria-live="polite">
+          <span class="invite-qr-loading" data-i18n="account.invite.qr_loading">正在生成二维码…</span>
+        </div>
+        <div class="invite-qr-copy">
+          <strong data-i18n="account.invite.scan_title">扫码注册</strong>
+          <span data-i18n="account.invite.scan_hint">好友使用手机扫码即可打开注册页面</span>
+        </div>
+      </div>
+      <div class="invite-stats">
+        <div class="invite-stat">
+          <span class="invite-stat-num" id="invite-stat-total">0</span>
+          <span class="invite-stat-label" data-i18n="account.invite.total">总邀请</span>
+        </div>
+        <div class="invite-stat">
+          <span class="invite-stat-num" id="invite-stat-registered">0</span>
+          <span class="invite-stat-label" data-i18n="account.invite.registered">已注册</span>
+        </div>
+        <div class="invite-stat">
+          <span class="invite-stat-num" id="invite-stat-rewarded">0</span>
+          <span class="invite-stat-label" data-i18n="account.invite.rewarded">已奖励</span>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-sm btn-sm-ghost" data-action="closeOverlay:ov-invite" data-i18n="modal.close">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ Account: sponsor modal ═══════════════════════════════════════ -->
+<div class="overlay" id="ov-sponsor" aria-hidden="true">
+  <div class="modal modal--w520 sponsor-modal" role="dialog" aria-modal="true" aria-labelledby="sponsor-title">
+    <div class="sponsor-heading">
+      <div class="sponsor-heading-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8l1.1 1.1L12 21l7.7-7.5 1.1-1.1a5.5 5.5 0 0 0 0-7.8Z"/></svg>
+      </div>
+      <div>
+        <div class="modal-title" id="sponsor-title" data-i18n="account.sponsor">赞助支持</div>
+        <p class="sponsor-desc" data-i18n="account.sponsor.desc">如果智析Agent对你有帮助，可以选择一种方式支持持续维护。</p>
+      </div>
+    </div>
+
+    <div class="sponsor-body">
+      <div class="sponsor-tabs" role="tablist" aria-label="赞助方式">
+        <button class="sponsor-tab active" id="sponsor-tab-wechat" type="button" role="tab" aria-selected="true" aria-controls="sponsor-panel-wechat" data-sponsor-method="wechat" data-i18n="account.sponsor.wechat">微信</button>
+        <button class="sponsor-tab" id="sponsor-tab-alipay" type="button" role="tab" aria-selected="false" aria-controls="sponsor-panel-alipay" data-sponsor-method="alipay" data-i18n="account.sponsor.alipay">支付宝</button>
+        <button class="sponsor-tab" id="sponsor-tab-usdt" type="button" role="tab" aria-selected="false" aria-controls="sponsor-panel-usdt" data-sponsor-method="usdt">USDT</button>
+        <button class="sponsor-tab" id="sponsor-tab-usdc" type="button" role="tab" aria-selected="false" aria-controls="sponsor-panel-usdc" data-sponsor-method="usdc">USDC</button>
+      </div>
+
+      <div class="sponsor-status" id="sponsor-status" aria-live="polite" data-i18n="account.sponsor.loading">正在加载赞助方式…</div>
+
+      <section class="sponsor-panel active" id="sponsor-panel-wechat" role="tabpanel" aria-labelledby="sponsor-tab-wechat" data-sponsor-panel="wechat">
+        <div class="sponsor-fiat-content">
+          <div class="sponsor-poster sponsor-poster-wechat">
+            <img id="sponsor-wechat-image" src="{{ url_for('static', filename='Images/sponsor/wechat.png', v='square-20260830') }}" alt="微信赞助二维码" loading="lazy" draggable="false">
+          </div>
+          <div class="sponsor-method-copy">
+            <strong data-i18n="account.sponsor.wechat_title">使用微信扫码</strong>
+            <span data-i18n="account.sponsor.wechat_hint">打开微信，扫描二维码完成赞助。</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="sponsor-panel" id="sponsor-panel-alipay" role="tabpanel" aria-labelledby="sponsor-tab-alipay" data-sponsor-panel="alipay" hidden>
+        <div class="sponsor-fiat-content">
+          <div class="sponsor-poster sponsor-poster-alipay">
+            <img id="sponsor-alipay-image" src="{{ url_for('static', filename='Images/sponsor/alipay.jpg', v='square-20260830') }}" alt="支付宝赞助二维码" loading="lazy" draggable="false">
+          </div>
+          <div class="sponsor-method-copy">
+            <strong data-i18n="account.sponsor.alipay_title">使用支付宝扫码</strong>
+            <span data-i18n="account.sponsor.alipay_hint">打开支付宝，扫描二维码完成赞助。</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="sponsor-panel" id="sponsor-panel-usdt" role="tabpanel" aria-labelledby="sponsor-tab-usdt" data-sponsor-panel="usdt" hidden>
+        <div class="sponsor-crypto-content">
+          <div class="sponsor-crypto-visual">
+            <div class="sponsor-token-lockup"><strong>USDT</strong><span>X Layer</span></div>
+            <div class="sponsor-crypto-qr"><img id="sponsor-usdt-qr" alt="USDT X Layer收款二维码"></div>
+          </div>
+          <div class="sponsor-crypto-detail">
+            <div class="sponsor-network-row"><span data-i18n="account.sponsor.network">网络</span><strong>X Layer</strong></div>
+            <div class="sponsor-field-label" data-i18n="account.sponsor.address">收款地址</div>
+            <div class="sponsor-address-box">
+              <code id="sponsor-usdt-address">—</code>
+              <button class="sponsor-copy-btn" type="button" data-sponsor-copy="usdt_address" data-i18n="account.sponsor.copy">复制</button>
+            </div>
+            <button class="sponsor-alt-copy" type="button" data-sponsor-copy="usdt_xko" data-i18n="account.sponsor.copy_xko">复制 XKO 格式地址</button>
+            <div class="sponsor-contract-row">
+              <span data-i18n="account.sponsor.contract">代币合约</span>
+              <code id="sponsor-usdt-contract">—</code>
+              <button type="button" data-sponsor-copy="usdt_contract" data-i18n-title="account.sponsor.copy_contract" title="复制合约地址" aria-label="复制USDT合约地址"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3"/></svg></button>
+            </div>
+            <div class="sponsor-network-warning" data-i18n="account.sponsor.warning_usdt">仅通过 X Layer 网络转入 USDT，其他网络可能导致资产丢失。自托管钱包通常需要少量 OKB 支付网络费。</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="sponsor-panel" id="sponsor-panel-usdc" role="tabpanel" aria-labelledby="sponsor-tab-usdc" data-sponsor-panel="usdc" hidden>
+        <div class="sponsor-crypto-content">
+          <div class="sponsor-crypto-visual">
+            <div class="sponsor-token-lockup"><strong>USDC</strong><span>X Layer</span></div>
+            <div class="sponsor-crypto-qr"><img id="sponsor-usdc-qr" alt="USDC X Layer收款二维码"></div>
+          </div>
+          <div class="sponsor-crypto-detail">
+            <div class="sponsor-network-row"><span data-i18n="account.sponsor.network">网络</span><strong>X Layer</strong></div>
+            <div class="sponsor-field-label" data-i18n="account.sponsor.address">收款地址</div>
+            <div class="sponsor-address-box">
+              <code id="sponsor-usdc-address">—</code>
+              <button class="sponsor-copy-btn" type="button" data-sponsor-copy="usdc_address" data-i18n="account.sponsor.copy">复制</button>
+            </div>
+            <button class="sponsor-alt-copy" type="button" data-sponsor-copy="usdc_xko" data-i18n="account.sponsor.copy_xko">复制 XKO 格式地址</button>
+            <div class="sponsor-contract-row">
+              <span data-i18n="account.sponsor.contract">代币合约</span>
+              <code id="sponsor-usdc-contract">—</code>
+              <button type="button" data-sponsor-copy="usdc_contract" data-i18n-title="account.sponsor.copy_contract" title="复制合约地址" aria-label="复制USDC合约地址"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3"/></svg></button>
+            </div>
+            <div class="sponsor-network-warning" data-i18n="account.sponsor.warning_usdc">仅通过 X Layer 网络转入 USDC，其他网络可能导致资产丢失。自托管钱包通常需要少量 OKB 支付网络费。</div>
+          </div>
+        </div>
+      </section>
+
+    </div>
+    <div class="modal-footer">
+      <button class="btn-sm btn-sm-ghost" data-action="closeOverlay:ov-sponsor" data-i18n="modal.close">关闭</button>
+    </div>
+  </div>
+</div>
 
 <div id="business-canvas-root"></div>
 <div id="global-ui-root"></div>
 <div id="job-history-root"></div>
 <div id="checkpoint-root"></div>
+{% if is_cloud_managed %}
+<div class="overlay" id="ov-local-storage">
+  <div class="modal local-storage-modal" role="dialog" aria-modal="true" aria-labelledby="local-storage-title">
+    <div class="modal-title" id="local-storage-title">选择 Sage 数据保存位置</div>
+    <p class="local-storage-copy">请选择一个本地父目录，智析Agent 会在其中创建或使用 <strong>Sage</strong> 文件夹，并按账户保存上传原件和对话记录。云端不持久化这些内容。</p>
+    <div class="local-storage-note">受浏览器安全限制，网页无法在您拒绝授权后自行创建 <code>C:\Sage</code>。如果暂不选择，将自动使用 IndexedDB 浏览器本地数据库；以后可随时更改。</div>
+    <div class="local-storage-status" id="local-storage-status"></div>
+    <div class="local-storage-backup-actions">
+      <button class="btn-sm btn-sm-ghost" id="local-storage-export-btn" type="button">下载浏览器数据备份</button>
+      <label class="btn-sm btn-sm-ghost" for="local-storage-import-input">从浏览器备份文件恢复</label>
+      <input id="local-storage-import-input" type="file" accept="application/json,.json" hidden>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-sm btn-sm-ghost" id="local-storage-browser-btn" type="button">暂不选择，使用浏览器存储</button>
+      <button class="btn-sm btn-sm-primary" id="local-storage-folder-btn" type="button">选择文件夹</button>
+    </div>
+  </div>
+</div>
+{% endif %}
 <div class="toast" id="toast"></div>
 
 <!-- ── Vendor libs (markdown + sanitizer) ─────────────────────────── -->
@@ -1277,6 +1671,6 @@
 <script src="{{ url_for('static', filename='vendor/vue.global.prod.js') }}"></script>
 
 <!-- ── ES module entry; non-critical UI islands load from dist/chunks on demand ── -->
-<script type="module" src="{{ url_for('static', filename='dist/chat-app.js', v='20261009-ui-1') }}"></script>
+<script type="module" src="{{ url_for('static', filename='dist/chat-app.js', v='local-service-draft-2') }}"></script>
 </body>
 </html>

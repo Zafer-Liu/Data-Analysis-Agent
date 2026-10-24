@@ -2,7 +2,8 @@
 name: bcg-matrix
 description: 波士顿矩阵（BCG Matrix）分析，按市场增长率和相对市场份额将业务单元分为明星、问题、现金牛、瘦狗四类（portfolio 产品组合）
 icon: 📊
-allowedTools: [display_diagram, edit_diagram, get_diagram, get_shape_library]
+tags: [mode-business, strategy, visualization]
+allowedTools: [display_diagram, edit_diagram, get_diagram]
 ---
 # 波士顿矩阵分析
 

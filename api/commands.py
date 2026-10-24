@@ -122,6 +122,7 @@ def _compact_command(sess, arguments: str = "") -> tuple[dict, int]:
             record_compaction_result,
         )
         from agent.token_metrics import finalize_prompt_breakdown
+        from agent.model_call_audit import audit_model_call
 
         cfg = config_manager.get_config(provider)
         client = get_llm_client(provider)
@@ -153,6 +154,15 @@ def _compact_command(sess, arguments: str = "") -> tuple[dict, int]:
             client,
             cfg.model,
             usage_callback=usages.append,
+            audit_factory=lambda: audit_model_call(
+                user_id=str(getattr(sess, "owner_user_id", "") or ""),
+                session_id=str(getattr(sess, "session_id", "") or ""),
+                source="web",
+                purpose="manual_compaction",
+                billing_scope="platform",
+                provider=provider,
+                model=cfg.model,
+            ),
             focus=arguments,
         )
         usage = None

@@ -18,6 +18,7 @@ gunicorn>=20.1.0       # Linux 私有化部署备用
 pyecharts>=2.0.0
 selenium>=4.0.0
 snapshot-selenium>=0.0.2
+playwright>=1.40.0
 scipy>=1.7.0
 
 # Data
@@ -28,10 +29,13 @@ PyYAML>=6.0.0          # agent skill front matter parsing (import name: yaml)
 openpyxl>=3.1.0
 xlrd>=2.0.1
 python-calamine>=0.1.0
+pdfplumber>=0.11.0    # PDF table extraction for the web-table ingest pipeline (MIT, pure Python)
 
 # Viz
 plotly>=5.0.0
 matplotlib>=3.4.0
+# kaleido>=1.0.0    # 可选：/api/chart/<id>/png 服务端 PNG 导出；未安装时该端点返回 501
+qrcode>=8.0,<9.0       # 本地生成邀请二维码，避免依赖外部图片服务
 
 # HTTP / LLM
 requests>=2.31.0
