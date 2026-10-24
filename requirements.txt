@@ -79,5 +79,5 @@ jieba>=0.42.1
 # Semantic embedding (neural_embedder — BGE-small-zh via ONNX Runtime)
 # Replaces torch (~200MB) with onnxruntime (~30-50MB) for inference-only use.
 # Pin tokenizers for compatibility with the Rust-backed tokenizer load path.
-onnxruntime>=1.17.0
+onnxruntime>=1.31.0
 tokenizers>=0.15.0
