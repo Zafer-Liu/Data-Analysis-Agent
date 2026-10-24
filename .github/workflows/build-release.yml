@@ -37,7 +37,7 @@ jobs:
             name: macOS Intel x64
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -84,7 +84,7 @@ jobs:
         run: |
           pnpm install --frozen-lockfile
           pnpm run build
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -162,7 +162,7 @@ jobs:
         run: |
           pnpm install --frozen-lockfile
           pnpm run build
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
