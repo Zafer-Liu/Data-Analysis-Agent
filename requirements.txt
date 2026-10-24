@@ -41,7 +41,7 @@ qrcode>=8.0,<9.0       # 本地生成邀请二维码，避免依赖外部图片�
 requests>=2.31.0
 lark-oapi>=1.7.1,<2  # 飞书应用机器人长连接（本地入站事件）
 charset-normalizer>=3.4.0  # requests 的间接依赖，3.4+ 支持 Python 3.14
-openai>=1.0.0
+openai>=3.35.1
 python-dotenv>=1.0.0
 httpx>=0.27.0
 
