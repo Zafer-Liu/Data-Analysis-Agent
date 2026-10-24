@@ -57,7 +57,7 @@ python-pptx>=0.6.21
 lxml>=4.6.0
 
 # Time series analysis
-statsmodels>=0.14.0
+statsmodels>=0.15.0
 pmdarima>=2.0.0
 
 # Database (agent)
