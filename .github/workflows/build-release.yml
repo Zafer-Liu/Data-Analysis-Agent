@@ -122,7 +122,7 @@ jobs:
         shell: pwsh
         run: pwsh -File packaging/build_windows.ps1 -Version $env:PACKAGE_VERSION
       - name: Upload Windows package and reports
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: windows-x64-package
           if-no-files-found: error
@@ -204,7 +204,7 @@ jobs:
         shell: bash
         run: bash packaging/build_macos.sh --version "$PACKAGE_VERSION"
       - name: Upload macOS package and reports
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           if-no-files-found: error
