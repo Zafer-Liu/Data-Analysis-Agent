@@ -26,13 +26,13 @@ duckdb>=1.0.0
 pandas>=1.3.0
 numpy>=1.21.0
 PyYAML>=6.0.3          # agent skill front matter parsing (import name: yaml)
-openpyxl>=3.1.0
+openpyxl>=3.1.5
 xlrd>=2.0.1
 python-calamine>=0.1.0
 pdfplumber>=0.11.0    # PDF table extraction for the web-table ingest pipeline (MIT, pure Python)
 
 # Viz
-plotly>=5.0.0
+plotly>=7.1.0
 matplotlib>=3.4.0
 # kaleido>=1.0.0    # 可选：/api/chart/<id>/png 服务端 PNG 导出；未安装时该端点返回 501
 qrcode>=8.0,<9.0       # 本地生成邀请二维码，避免依赖外部图片服务
@@ -41,7 +41,7 @@ qrcode>=8.0,<9.0       # 本地生成邀请二维码，避免依赖外部图片�
 requests>=2.31.0
 lark-oapi>=1.7.1,<2  # 飞书应用机器人长连接（本地入站事件）
 charset-normalizer>=3.4.0  # requests 的间接依赖，3.4+ 支持 Python 3.14
-openai>=1.0.0
+openai>=3.35.1
 python-dotenv>=1.0.0
 httpx>=0.27.0
 
