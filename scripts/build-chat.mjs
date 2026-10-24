@@ -18,5 +18,10 @@ function run(label, cmd, args) {
 }
 
 run("clean-chat-chunks.mjs", node, [path.join(root, "scripts", "clean-chat-chunks.mjs")]);
-run("vite.chat-app.config.js", node, [vite, "build", "--config", "vite.chat-app.config.js"]);
+run("vite.chat-app.config.js", node, [
+  vite,
+  "build",
+  "--config",
+  "frontend/config/vite.chat-app.config.js",
+]);
 run("verify-chat-bundle.mjs", node, [path.join(root, "scripts", "verify-chat-bundle.mjs")]);

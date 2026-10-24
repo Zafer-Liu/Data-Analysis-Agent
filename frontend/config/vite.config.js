@@ -1,7 +1,10 @@
 import { resolve } from "node:path";
 import { defineConfig } from "vite";
 
+const root = resolve(import.meta.dirname, "../..");
+
 export default defineConfig({
+  root,
   build: {
     outDir: "static/dist",
     emptyOutDir: true,
@@ -9,7 +12,7 @@ export default defineConfig({
     sourcemap: false,
     rollupOptions: {
       input: {
-        dashboard: resolve(import.meta.dirname, "frontend/entries/dashboard.js"),
+        dashboard: resolve(root, "frontend/entries/dashboard.js"),
       },
       output: {
         entryFileNames: "[name].js",

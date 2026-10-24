@@ -12,7 +12,7 @@ Sklearn_Model Analysis
 
 依赖策略（红线：核心包零 sklearn）：
   - 顶层仅导入 numpy/pandas；sklearn 在 run() 内延迟导入
-  - 未安装时抛明确错误，提示 `pip install -r requirements-ml.txt`
+  - 未安装时抛明确错误，提示 `pip install -r requirements/ml.txt`
   - registry 加载不受影响（模块可加载，调用时才要求 sklearn）
 
 输出三张结果表：
@@ -36,7 +36,7 @@ ANALYSIS_DESC = (
     "输出评估指标、特征重要性或聚类结果及 Markdown 报告。"
     "通过 groupby_column 参数传入模型类型（rf / lr / lm / ridge / kmeans，默认 rf）；"
     "通过 n_deciles 参数传入聚类数 k 或随机种子（默认 42）。"
-    "需要安装可选依赖：pip install -r requirements-ml.txt"
+    "需要安装可选依赖：pip install -r requirements/ml.txt"
 )
 REQUIRED_PARAMS = ["target_column"]
 OPTIONAL_PARAMS = [
@@ -304,7 +304,7 @@ def run(
     except ImportError:
         raise ImportError(
             "scikit-learn 未安装。机器学习建模需要可选依赖，请先执行："
-            "pip install -r requirements-ml.txt"
+            "pip install -r requirements/ml.txt"
         )
 
     from sklearn.model_selection import train_test_split

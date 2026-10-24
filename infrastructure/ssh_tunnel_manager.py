@@ -40,7 +40,7 @@ def _paramiko():
     try:
         import paramiko
     except ImportError as exc:
-        raise TunnelError("未安装远程连接依赖；请安装 requirements-remote.txt") from exc
+        raise TunnelError("未安装远程连接依赖；请运行 pip install paramiko") from exc
     return paramiko
 
 

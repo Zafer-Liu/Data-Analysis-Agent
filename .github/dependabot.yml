@@ -13,7 +13,7 @@ updates:
       prefix: "chore(deps)"
       include: scope
 
-  # Python backend
+  # Python backend and optional manifests in requirements/.
   - package-ecosystem: pip
     directory: /
     schedule:
@@ -26,7 +26,7 @@ updates:
       include: scope
     ignore:
       # torch is intentionally left to the user's CUDA matrix in
-      # requirements-dl.txt (see its header comment); an automated bump
+      # requirements/dl.txt (see its header comment); an automated bump
       # would pick a build that does not match the local GPU/driver.
       - dependency-name: "torch"
       - dependency-name: "torchvision"

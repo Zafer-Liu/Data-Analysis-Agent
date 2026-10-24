@@ -14,7 +14,7 @@ export default [
   },
   js.configs.recommended,
   {
-    files: ["frontend/**/*.js", "vite*.config.js"],
+    files: ["frontend/**/*.js"],
     languageOptions: {
       ecmaVersion: "latest",
       sourceType: "module",

@@ -22,6 +22,7 @@
 </div>
 
 <p align="center">
+  <a href="#sponsors">Sponsors</a> ·
   <a href="#demo">Demo</a> ·
   <a href="#quick-start">Quick start</a> ·
   <a href="#capabilities">Capabilities</a> ·
@@ -34,6 +35,30 @@
   <a href="https://discord.gg/EEG4Sw7tde">Discord</a> ·
   <a href="https://t.me/+cdRNfS68u9BlYjJl">Telegram</a> · QQ: <code>991636855</code>
 </p>
+
+<a id="sponsors"></a>
+
+## 🙏 Sponsors
+
+Thank you to the sponsors supporting this project!
+
+### Sponsored by Sidrune AI
+
+<p align="center"><a href="https://sidrune.ai/register?source=github&campaign=daanagent&promo=daanagent"><img src="./Information/assets/SidruneAI.png" alt="Sidrune AI banner" height="80" /></a></p>
+
+Sidrune AI provides a unified API for accessing and managing AI models, with model, latency, and cost information in one place.
+
+👉 **[Explore Sidrune AI](https://sidrune.ai/register?source=github&campaign=daanagent&promo=daanagent)**
+
+### ☁️ Sponsored by DolOffer
+
+<p align="center"><a href="https://doloffer.com/"><img src="./Information/assets/DolOffer.png" alt="DolOffer logo" height="80" /></a></p>
+
+Thank you to DolOffer for supporting this project! DolOffer is a platform focused on digital product recommendations and deal sharing, helping users quickly discover useful tools, services, and limited-time offers. The platform provides popular subscription services such as YouTube Premium, Claude, ChatGPT Plus, Spotify, Apple Music, and more, with prices as low as 30% of the official price or even lower. All services are genuine, stable, and backed by reliable after-sales support. Register through our exclusive link and use the coupon code **AI8888** when topping up to enjoy an additional 10% discount.
+
+👉 **[Learn more](https://github.com/Doloffer-g/guide)**
+
+---
 
 <a id="demo"></a>
 
@@ -101,11 +126,14 @@ Show monthly sales and plot the trend.
 
 Running the source directly requires no cloud login. See [installation options](#install) and [model configuration](#llm-config) for more details.
 
+Optional machine-learning, deep-learning, packaging, and test dependencies live in [`requirements/`](./requirements/README.md). See the [product specification](./Information/PRODUCT.md) and [frontend build guide](./frontend/README.md) for development details.
+
 ---
 
 <details>
 <summary>Table of contents</summary>
 
+- [Sponsors](#sponsors)
 - [Capabilities](#capabilities)
 - [Installation](#install)
 - [Slash commands](#commands)
@@ -113,7 +141,6 @@ Running the source directly requires no cloud login. See [installation options](
 - [LLM configuration](#llm-config)
 - [Agent Manager](#agent-manager)
 - [Changelog](#changelog)
-- [Sponsors](#sponsors)
 - [FAQ](#faq)
 - [Contributing](#contributing)
 - [License](#license)
@@ -479,30 +506,6 @@ v1.3.0 enters the Feishu AI Skills Hackathon, adds a Feishu bot and built-in Bit
 
 - [Version Update Log (中文)](./Information/Version_Update_Log.md)
 - [Version Update Log (English)](./Information/Version_Update_Log_EN.md)
-
----
-
-<a id="sponsors"></a>
-
-## 🙏 Sponsors
-
-Thank you to the sponsors supporting this project!
-
-### Sponsored by Sidrune AI
-
-<p align="center"><a href="https://sidrune.ai/register?source=github&campaign=daanagent&promo=daanagent"><img src="./Information/assets/SidruneAI.png" alt="Sidrune AI banner" height="80" /></a></p>
-
-Sidrune AI provides a unified API for accessing and managing AI models, with model, latency, and cost information in one place.
-
-👉 **[Explore Sidrune AI](https://sidrune.ai/register?source=github&campaign=daanagent&promo=daanagent)**
-
-### ☁️ Sponsored by DolOffer
-
-<p align="center"><a href="https://doloffer.com/"><img src="./Information/assets/DolOffer.png" alt="DolOffer logo" height="80" /></a></p>
-
-Thank you to DolOffer for supporting this project! DolOffer is a platform focused on digital product recommendations and deal sharing, helping users quickly discover useful tools, services, and limited-time offers. The platform provides popular subscription services such as YouTube Premium, Claude, ChatGPT Plus, Spotify, Apple Music, and more, with prices as low as 30% of the official price or even lower. All services are genuine, stable, and backed by reliable after-sales support. Register through our exclusive link and use the coupon code **AI8888** when topping up to enjoy an additional 10% discount.
-
-👉 **[Learn more](https://github.com/Doloffer-g/guide)**
 
 ---
 

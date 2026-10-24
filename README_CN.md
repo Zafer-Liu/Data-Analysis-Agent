@@ -22,6 +22,7 @@
 </div>
 
 <p align="center">
+  <a href="#sponsors">赞助商</a> ·
   <a href="#demo">动态演示</a> ·
   <a href="#quick-start">快速开始</a> ·
   <a href="#capabilities">核心能力</a> ·
@@ -34,6 +35,32 @@
   <a href="https://discord.gg/EEG4Sw7tde">Discord</a> ·
   <a href="https://t.me/+cdRNfS68u9BlYjJl">Telegram</a> · QQ: <code>991636855</code>
 </p>
+
+<a id="sponsors"></a>
+
+## 🙏 赞助商
+
+感谢以下赞助商对本项目的支持！
+
+### ☁️ 赞助 · Sponsored by Sidrune AI
+
+<p align="center"><a href="https://sidrune.ai/register?source=github&campaign=daanagent&promo=daanagent"><img src="./Information/assets/SidruneAI.png" alt="Sidrune AI banner" height="80" /></a></p>
+
+感谢 Sidrune AI 赞助了本项目！Sidrune AI —— 一个入口，接入并管理全球主流 AI 模型。面向个人开发者、技术团队与企业，通过统一 API 接入并管理全球主流 AI 模型；多线路动态调度提升可用性，模型表现、响应时间与费用透明可查。根据不同模型与线路，API 调用成本较官方或基准价格可降低 40%—98%。立即访问并注册，即可获得 $3 API 额度。
+
+👉 **[注册 Sidrune AI](https://sidrune.ai/register?source=github&campaign=daanagent&promo=daanagent)**
+
+---
+
+### ☁️ 赞助 · Sponsored by DolOffer
+
+<div align="center"><a href="https://doloffer.com/"><img src="./Information/assets/DolOffer.png" alt="DolOffer logo" height="80" /></a></div>
+
+感谢 DolOffer 对本项目的支持！DolOffer 是一个专注于数字产品推荐与优惠分享的平台，帮助用户快速发现值得关注的工具、服务和限时福利。平台提供 YouTube Premium、Claude、ChatGPT Plus、Spotify、Apple Music 等多种热门订阅服务，价格低至官方价的 3 折甚至更低，正版稳定，售后无忧。现在通过我们的专属链接注册，并在充值时输入优惠码 **AI8888**，即可额外享受 9 折优惠。
+
+👉 **[了解更多](https://github.com/Doloffer-g/guide)**
+
+---
 
 <a id="demo"></a>
 
@@ -101,11 +128,14 @@ python app.py
 
 直接运行源码无需云登录。其他安装方式见[安装说明](#install)，模型设置见 [LLM 配置](#llm-config)。
 
+机器学习、深度学习、打包和测试的可选依赖统一放在 [`requirements/`](./requirements/README.md)。开发说明见[产品规格](./Information/PRODUCT.md)和[前端构建指南](./frontend/README.md)。
+
 ---
 
 <details>
 <summary>完整目录</summary>
 
+- [赞助商](#sponsors)
 - [核心能力](#capabilities)
 - [安装说明](#install)
 - [斜杠命令](#commands)
@@ -113,7 +143,6 @@ python app.py
 - [LLM 配置](#llm-config)
 - [Agent Manager](#agent-manager)
 - [更新日志](#changelog)
-- [赞助商](#sponsors)
 - [FAQ](#faq)
 - [贡献指南](#contributing)
 - [License](#license)
@@ -496,32 +525,6 @@ v1.3.0 参加飞书 AI 绝活黑客松，接入飞书机器人，内置多维表
 
 - [Version Update Log（中文）](./Information/Version_Update_Log.md)
 - [Version Update Log (English)](./Information/Version_Update_Log_EN.md)
-
----
-
-<a id="sponsors"></a>
-
-## 🙏 赞助商
-
-感谢以下赞助商对本项目的支持！
-
-### ☁️ 赞助 · Sponsored by Sidrune AI
-
-<p align="center"><a href="https://sidrune.ai/register?source=github&campaign=daanagent&promo=daanagent"><img src="./Information/assets/SidruneAI.png" alt="Sidrune AI banner" height="80" /></a></p>
-
-感谢 Sidrune AI 赞助了本项目！Sidrune AI —— 一个入口，接入并管理全球主流 AI 模型。面向个人开发者、技术团队与企业，通过统一 API 接入并管理全球主流 AI 模型；多线路动态调度提升可用性，模型表现、响应时间与费用透明可查。根据不同模型与线路，API 调用成本较官方或基准价格可降低 40%—98%。立即访问并注册，即可获得 $3 API 额度。
-
-👉 **[注册 Sidrune AI](https://sidrune.ai/register?source=github&campaign=daanagent&promo=daanagent)**
-
----
-
-### ☁️ 赞助 · Sponsored by DolOffer
-
-<div align="center"><a href="https://doloffer.com/"><img src="./Information/assets/DolOffer.png" alt="DolOffer logo" height="80" /></a></div>
-
-感谢 DolOffer 对本项目的支持！DolOffer 是一个专注于数字产品推荐与优惠分享的平台，帮助用户快速发现值得关注的工具、服务和限时福利。平台提供 YouTube Premium、Claude、ChatGPT Plus、Spotify、Apple Music 等多种热门订阅服务，价格低至官方价的 3 折甚至更低，正版稳定，售后无忧。现在通过我们的专属链接注册，并在充值时输入优惠码 **AI8888**，即可额外享受 9 折优惠。
-
-👉 **[了解更多](https://github.com/Doloffer-g/guide)**
 
 ---
 

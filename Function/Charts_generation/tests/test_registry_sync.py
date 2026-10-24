@@ -44,8 +44,8 @@ _TEXT_FIELDS = ("chart_id", "name", "category", "desc", "data_format", "constrai
 # 命中的所有数字都必须等于 len(_CHARTS)，否则报 文件:行号。
 _DOC_COUNT_PATTERNS = [
     ("README.md", [r"Charts-(\d+)_Types", r"(\d+)\s*种图表"]),
-    ("README_EN.md", [r"Charts-(\d+)_Types"]),
-    ("PRODUCT.md", [r"(\d+)\s*种图表"]),
+    ("README_CN.md", [r"Charts-(\d+)_Types", r"(\d+)\s*种图表"]),
+    ("Information/PRODUCT.md", [r"(\d+)\s*种图表"]),
     ("Function/Charts_generation/charts/Instruction.md", [r"从\s*(\d+)\s*种"]),
 ]
 

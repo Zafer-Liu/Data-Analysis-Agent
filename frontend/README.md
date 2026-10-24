@@ -16,6 +16,7 @@
 
 ```
 frontend/
+├── config/         # Vite 构建配置（显式以仓库根目录为 root）
 ├── entries/        # 构建入口（Vite input），按页面/功能聚合 side-effect 导入
 │   ├── chat-app.js     # 聊天主应用入口（agent_chat.html 的唯一 <script type="module">）
 │   ├── dashboard.js    # 仪表盘独立页入口
@@ -84,7 +85,7 @@ frontend/
 ## 构建管线
 
 ```
-vite build (vite.chat-app.config.js)
+vite build --config frontend/config/vite.chat-app.config.js
   ├── input: frontend/entries/chat-app.js
   ├── base: /static/dist/        ← 必须与 HTML 服务路径一致，否则 chunk preload 失效
   ├── manualChunks: ui-registry + event-bus 强制进共享 chunk

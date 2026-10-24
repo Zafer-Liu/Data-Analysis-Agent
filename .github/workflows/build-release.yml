@@ -41,6 +41,9 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements/*.txt
       - name: Install dependencies
         shell: bash
         run: |
@@ -50,8 +53,8 @@ jobs:
           else
             python -m pip install -r requirements.txt
           fi
-          python -m pip install -r requirements-build.txt
-          python -m pip install -r requirements-test.txt
+          python -m pip install -r requirements/build.txt
+          python -m pip install -r requirements/test.txt
       - name: Compile runtime sources
         shell: bash
         run: python -m compileall -q agent api data app.py
@@ -85,6 +88,9 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements/*.txt
       - name: Resolve package version
         shell: pwsh
         run: |
@@ -108,7 +114,7 @@ jobs:
           } else {
             python -m pip install -r requirements.txt
           }
-          python -m pip install -r requirements-build.txt
+          python -m pip install -r requirements/build.txt
       - name: Install Inno Setup
         shell: pwsh
         run: choco install innosetup --no-progress -y
@@ -160,6 +166,9 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements/*.txt
       - name: Install macOS ODBC runtime
         shell: bash
         run: |
@@ -189,7 +198,7 @@ jobs:
           else
             python -m pip install -r requirements.txt
           fi
-          python -m pip install -r requirements-build.txt
+          python -m pip install -r requirements/build.txt
           python -c "import pyodbc; print('pyodbc:', pyodbc.version)"
       - name: Build audited macOS DMG
         shell: bash

@@ -1,4 +1,4 @@
-# Optional deep-learning modelling dependencies (M2).
+# Optional deep-learning modelling dependencies (M2): pip install -r requirements/dl.txt.
 # Do not add this file to the core requirements: CUDA wheels and their runtime
 # selection are platform-specific. For a matching CUDA build, follow
 # https://pytorch.org/get-started/locally/ before installing this file.

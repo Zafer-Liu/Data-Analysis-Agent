@@ -16,7 +16,7 @@ ANALYSIS_NAME = "深度学习建模（PyTorch MLP）"
 ANALYSIS_DESC = (
     "使用可选 PyTorch 训练 MLP 分类或回归模型，自动选择可用 CUDA 或 CPU。"
     "groupby_column 使用 mlp_cls（默认）或 mlp_reg；n_deciles 为训练 epoch（默认 60，最大 500）。"
-    "需要安装：pip install -r requirements-dl.txt"
+    "需要安装：pip install -r requirements/dl.txt"
 )
 REQUIRED_PARAMS = ["target_column"]
 OPTIONAL_PARAMS = ["groupby_column (mlp_cls / mlp_reg)", "n_deciles (训练 epoch, default 60)"]
@@ -28,7 +28,7 @@ def _require_torch():
         import torch
         from torch import nn
     except ImportError as exc:
-        raise ImportError("PyTorch 未安装，请先执行：pip install -r requirements-dl.txt") from exc
+        raise ImportError("PyTorch 未安装，请先执行：pip install -r requirements/dl.txt") from exc
     return torch, nn
 
 

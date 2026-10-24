@@ -24,7 +24,7 @@ ANALYSIS_DESC = (
     "支持多步滚动预测与 MC Dropout 置信区间估计。"
     "groupby_column 为时间列名（默认自动探测）；值不是列名且为 lstm 时使用 LSTM 单元（默认 GRU）；"
     "n_deciles 为预测步数（默认 12）。"
-    "需要安装：pip install -r requirements-dl.txt"
+    "需要安装：pip install -r requirements/dl.txt"
 )
 REQUIRED_PARAMS = ["target_column"]
 OPTIONAL_PARAMS = [
@@ -53,7 +53,7 @@ def _require_torch():
         import torch
         from torch import nn
     except ImportError as exc:
-        raise ImportError("PyTorch 未安装，请先执行：pip install -r requirements-dl.txt") from exc
+        raise ImportError("PyTorch 未安装，请先执行：pip install -r requirements/dl.txt") from exc
     return torch, nn
 
 

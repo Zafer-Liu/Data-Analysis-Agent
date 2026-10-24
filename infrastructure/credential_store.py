@@ -23,7 +23,7 @@ def _keyring():
         from keyring.errors import KeyringError
     except ImportError as exc:
         raise CredentialStoreError(
-            "未安装系统凭据库支持；请安装 requirements-remote.txt，或使用 SSH agent/密钥认证"
+            "未安装系统凭据库支持；请运行 pip install keyring，或使用 SSH agent/密钥认证"
         ) from exc
     return keyring, KeyringError
 

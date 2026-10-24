@@ -1,7 +1,10 @@
 import { resolve } from "node:path";
 import { defineConfig } from "vite";
 
+const root = resolve(import.meta.dirname, "../..");
+
 export default defineConfig({
+  root,
   // base must match the public URL path where chat-app.js is served so that
   // Vite's __vite__mapDeps preload links and dynamic import() paths resolve
   // to /static/dist/chunks/... instead of /chunks/...
@@ -11,7 +14,7 @@ export default defineConfig({
     emptyOutDir: false,
     sourcemap: false,
     rollupOptions: {
-      input: resolve(import.meta.dirname, "frontend/entries/chat-app.js"),
+      input: resolve(root, "frontend/entries/chat-app.js"),
       output: {
         entryFileNames: "chat-app.js",
         chunkFileNames: "chunks/[name]-[hash].js",

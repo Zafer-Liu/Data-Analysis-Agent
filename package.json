@@ -8,15 +8,21 @@
     "node": ">=20.19.0"
   },
   "scripts": {
-    "build": "vite build && node scripts/build-chat.mjs",
+    "build": "vite build --config frontend/config/vite.config.js && node scripts/build-chat.mjs",
     "build:chat": "node scripts/build-chat.mjs",
     "build:check": "node scripts/build-chat.mjs",
     "test:frontend": "node --test --test-concurrency=1 \"tests/*.test.mjs\"",
     "test:charts": "python -m pytest Function/Charts_generation/tests -q",
-    "format": "prettier --write \"frontend/core/**/*.js\" \"frontend/entries/**/*.js\" \"vite*.config.js\" \"eslint.config.js\" \"package.json\"",
-    "format:check": "prettier --check \"frontend/core/**/*.js\" \"frontend/entries/**/*.js\" \"vite*.config.js\" \"eslint.config.js\" \"package.json\"",
-    "lint": "eslint \"frontend/**/*.js\" \"static/js/**/*.js\" \"vite*.config.js\"",
+    "format": "prettier --write \"frontend/core/**/*.js\" \"frontend/entries/**/*.js\" \"frontend/config/*.js\" \"eslint.config.js\" \"package.json\"",
+    "format:check": "prettier --check \"frontend/core/**/*.js\" \"frontend/entries/**/*.js\" \"frontend/config/*.js\" \"eslint.config.js\" \"package.json\"",
+    "lint": "eslint \"frontend/**/*.js\" \"static/js/**/*.js\"",
     "quality": "npm run format:check && npm run lint && npm run build:check && npm run test:frontend && python scripts/generate_tool_inventory.py --check && npm run test:charts && python -m unittest discover -s tests -v"
+  },
+  "prettier": {
+    "printWidth": 100,
+    "semi": true,
+    "singleQuote": false,
+    "trailingComma": "all"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",
