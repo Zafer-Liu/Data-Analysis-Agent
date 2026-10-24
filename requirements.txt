@@ -32,7 +32,7 @@ python-calamine>=0.1.0
 pdfplumber>=0.11.0    # PDF table extraction for the web-table ingest pipeline (MIT, pure Python)
 
 # Viz
-plotly>=5.0.0
+plotly>=7.1.0
 matplotlib>=3.4.0
 # kaleido>=1.0.0    # 可选：/api/chart/<id>/png 服务端 PNG 导出；未安装时该端点返回 501
 qrcode>=8.0,<9.0       # 本地生成邀请二维码，避免依赖外部图片服务
