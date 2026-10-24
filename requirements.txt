@@ -48,7 +48,7 @@ httpx>=0.27.0
 # Remote GPU connectivity (G2) — SSH tunnels and OS credential storage.
 # keyring delegates to Windows Credential Manager, macOS Keychain, or the
 # platform Secret Service; connection passwords are never stored in JSON.
-paramiko>=3.4.0
+paramiko>=5.1.0
 keyring>=24.0.0
 
 # Export (Output module)
