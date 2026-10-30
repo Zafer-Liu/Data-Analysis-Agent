@@ -42,14 +42,6 @@
 
 Thank you to the sponsors supporting this project!
 
-### Sponsored by Sidrune AI
-
-<p align="center"><a href="https://sidrune.ai/register?source=github&campaign=daanagent&promo=daanagent"><img src="./Information/assets/SidruneAI.png" alt="Sidrune AI banner" height="80" /></a></p>
-
-Sidrune AI provides a unified API for accessing and managing AI models, with model, latency, and cost information in one place.
-
-👉 **[Explore Sidrune AI](https://sidrune.ai/register?source=github&campaign=daanagent&promo=daanagent)**
-
 ### ☁️ Sponsored by DolOffer
 
 <p align="center"><a href="https://doloffer.com/"><img src="./Information/assets/DolOffer.png" alt="DolOffer logo" height="80" /></a></p>
