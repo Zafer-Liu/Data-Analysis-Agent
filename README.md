@@ -52,6 +52,34 @@ Thank you to DolOffer for supporting this project! DolOffer is a platform focuse
 
 ---
 
+### ☁️ Sponsored by Mozhenzhen
+
+<p align="center"><a href="https://mozhenzhen.com/"><img src="./Information/assets/Mozhenzhen.png" alt="Mozhenzhen logo" height="80" /></a></p>
+
+Mozhenzhen — a consumer anti-pitfall guide for developers and AI enthusiasts. Whether you are looking for real-time API price comparison, latency benchmarking and authenticity verification (no watered-down or fake models), comparing after-sales warranties, risk prevention and hidden traps among account / subscription top-up providers, or even discovering free community relays and backup nodes, Mozhenzhen uses transparent data to help you avoid pitfalls and spend every cent wisely.
+
+👉 **[Visit Mozhenzhen](https://mozhenzhen.com/)**
+
+---
+
+### ☁️ Sponsored by Infistar
+
+<p align="center"><a href="https://www.infistar.cc/register?aff=U2DQQJPT&ref_source=link"><img src="./Information/assets/Infistar.png" alt="Infistar logo" height="80" /></a></p>
+
+Thank you to Infistar.cc for sponsoring Data-Analysis-Agent! It provides stable and efficient multi-model API services that fit perfectly into data cleaning, code generation, chart plotting and automated analysis report workflows.
+
+⚙️ Compatible integration: select the OpenAI-compatible interface in the project, configure the Base URL and API Key, and you are ready to go.
+
+🧩 Multi-model support: brings together top models such as Claude, GPT, Gemini and DeepSeek, making it easy to switch between them and compare analysis and code generation results.
+
+🏷️ Pricing & service: selected models from as low as 1% of official pricing, with public and transparent multipliers, RMB settlement, invoicing and model verification.
+
+🎁 Exclusive perk: sign up via our [exclusive promo link](https://www.infistar.cc/register?aff=U2DQQJPT&ref_source=link) and get $5 in free credits!
+
+👉 **[Register on Infistar · Claim $5 credits](https://www.infistar.cc/register?aff=U2DQQJPT&ref_source=link)**
+
+---
+
 <a id="demo"></a>
 
 ## See it in action

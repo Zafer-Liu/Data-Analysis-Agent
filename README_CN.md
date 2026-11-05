@@ -52,6 +52,34 @@
 
 ---
 
+### ☁️ 赞助 · Sponsored by 模真真
+
+<p align="center"><a href="https://mozhenzhen.com/"><img src="./Information/assets/Mozhenzhen.png" alt="模真真 logo" height="80" /></a></p>
+
+模真真 —— 专为开发者与 AI 爱好者打造的消费防坑指南。无论你是找 API 实时比价、延迟测速与真伪校验（拒绝掺水与假模型），还是想对比全网 成品账号/订阅代充 服务商的售后质保、风险防范与暗坑套路，甚至免费挖掘公益站与备用节点，模真真都能用透明数据帮你避坑选型，把每一分钱都花在刀刃上！
+
+👉 **[前往模真真](https://mozhenzhen.com/)**
+
+---
+
+### ☁️ 赞助 · Sponsored by Infistar 无限星河
+
+<p align="center"><a href="https://www.infistar.cc/register?aff=U2DQQJPT&ref_source=link"><img src="./Information/assets/Infistar.png" alt="Infistar 无限星河 logo" height="80" /></a></p>
+
+感谢 Infistar.cc 无限星河 赞助 Data-Analysis-Agent！提供稳定高效的多模型 API 服务，完美适配数据清洗、代码生成、图表绘制与自动化分析报告等工作流。
+
+⚙️ 兼容接入：在项目中选择 OpenAI 兼容接口，配置 Base URL 与 API Key 即可快速开跑。
+
+🧩 多模型支持：汇聚 Claude、GPT、Gemini、DeepSeek 等顶尖模型，方便自由切换对比分析与代码生成效果。
+
+🏷️ 价格与服务：精选模型低至官方 0.1 折起，倍率公开透明，支持人民币结算、开票及模型验真。
+
+🎁 专属福利：通过 [专属推广链接](https://www.infistar.cc/register?aff=U2DQQJPT&ref_source=link) 注册即送 $5 体验额度！
+
+👉 **[注册 Infistar · 领取 $5 额度](https://www.infistar.cc/register?aff=U2DQQJPT&ref_source=link)**
+
+---
+
 <a id="demo"></a>
 
 ## 动态演示
