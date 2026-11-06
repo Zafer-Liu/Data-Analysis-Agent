@@ -1,6 +1,6 @@
 // Compatibility data-source module: uploads, databases, sheets, APIs and multi-source management.
 import { eventBus } from "../core/event-bus.js";
-import { $, esc, hideWelcome } from "../core/dom.js";
+import { $, esc } from "../core/dom.js";
 import { closeOverlay, openOverlay, toast } from "../core/overlay.js";
 import { sysMsg } from "./msg.js";
 import { isBrowserLocalMode, rememberUploadedFiles } from "../core/local-data-store.js";
@@ -123,7 +123,9 @@ function setSrc(name, hintKey, connected) {
     : t("header.subtitle");
 
   document.querySelector(".sidebar")?.classList.toggle("has-source", connected);
-  if (connected) hideWelcome();
+  // Welcome stays visible after connecting/uploading a data source: its prompt
+  // chips only become useful once data exists. It is hidden on the first
+  // message (chat-stream) or when a session with history is restored.
 }
 
 // ── After any connect/add operation ───────────────────────────────────────

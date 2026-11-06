@@ -253,14 +253,14 @@
     if (widgets.length === 0) { $("empty-state").style.display = "flex"; return; }
 
     // Build KPI strip
-    buildKpiStrip(kpis);
+    buildKpiStrip(kpis, true);
     // Build chart grid
     if (charts.length > 0) buildGrid(charts);
     else if (kpis.length === 0) $("empty-state").style.display = "flex";
   }
 
   /* ── KPI Strip ───────────────────────────────────────────────── */
-  function buildKpiStrip(kpis) {
+  function buildKpiStrip(kpis, animate) {
     const strip = $("kpi-strip");
     if (!kpis.length) { strip.innerHTML = ""; return; }
     strip.innerHTML = kpis.map(w => {
@@ -273,17 +273,71 @@
         const up = parseFloat(trend) >= 0;
         trendHtml = `<div class="kpi-trend ${up ? "up" : "down"}">${up ? "▲" : "▼"} ${Math.abs(trend)}%</div>`;
       }
-      return `<div class="kpi-card">
+      return `<div class="kpi-card${animate ? " kpi-enter" : ""}">
         <div class="kpi-label">${esc(label)}</div>
         <div class="kpi-value">${esc(String(v))}</div>
         ${sub ? `<div class="kpi-sub">${esc(sub)}</div>` : ""}
         ${trendHtml}
       </div>`;
     }).join("");
+    if (animate) animateKpiValues(strip);
+  }
+
+  /* Count each numeric KPI from 0 to its target on first paint.
+     Keeps any non-numeric prefix/suffix (¥, %, units) and the original
+     grouping/decimal formatting; non-numeric values render as-is. */
+  function animateKpiValues(strip) {
+    if (window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    strip.querySelectorAll(".kpi-value").forEach(el => {
+      const m = el.textContent.match(/^([^0-9\-+]*)([-+]?[\d,]+(?:\.\d+)?)([\s\S]*)$/);
+      if (!m) return;
+      const target = parseFloat(m[2].replace(/,/g, ""));
+      if (!isFinite(target)) return;
+      const decimals = (m[2].split(".")[1] || "").length;
+      const grouped = m[2].includes(",");
+      const fmt = v => {
+        const fixed = v.toFixed(decimals);
+        const parts = fixed.split(".");
+        if (grouped) parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+        return m[1] + parts.join(".") + m[3];
+      };
+      const dur = 850, t0 = performance.now();
+      const tick = now => {
+        const p = Math.min((now - t0) / dur, 1);
+        const eased = 1 - Math.pow(1 - p, 3);  // easeOutCubic, matches --ease-out
+        el.textContent = fmt(target * eased);
+        if (p < 1) requestAnimationFrame(tick);
+        else el.textContent = fmt(target);  // land exactly on the source value
+      };
+      requestAnimationFrame(tick);
+    });
   }
 
   /* ── Grid ────────────────────────────────────────────────────── */
   const _hiddenWidgets = new Map();
+
+  /* Scroll reveal: tiles below the fold stay hidden until scrolled into
+     view, then rise in with a small stagger per observer batch. */
+  const _revealReduced = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const _revealObserver = ("IntersectionObserver" in window && !_revealReduced)
+    ? new IntersectionObserver(entries => {
+        let i = 0;
+        entries.forEach(en => {
+          if (!en.isIntersecting) return;
+          const el = en.target;
+          _revealObserver.unobserve(el);
+          el.style.animationDelay = `${Math.min(i++, 5) * 70}ms`;
+          el.classList.remove("reveal-pending");
+          el.classList.add("reveal-in");
+        });
+      }, { threshold: 0.1 })
+    : null;
+
+  function observeTileReveal(el) {
+    if (!_revealObserver || !el) return;
+    el.classList.add("reveal-pending");
+    _revealObserver.observe(el);
+  }
 
   function buildGrid(widgets) {
     const wrap = $("db-grid-wrap");
@@ -319,7 +373,10 @@
       const outer = gridEl.querySelector(`.grid-stack-item[gs-id="${CSS.escape(w.id)}"]`);
       if (outer) {
         const inner = outer.querySelector(".grid-stack-item-content");
-        if (inner) inner.setAttribute("data-widget-id", w.id);
+        if (inner) {
+          inner.setAttribute("data-widget-id", w.id);
+          observeTileReveal(inner);
+        }
       }
     });
 

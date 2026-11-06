@@ -2,9 +2,9 @@
 @import "parts/tokens.css?v=v1.4.0-polish-2";
 @import "parts/layout.css?v=v1.4.0-polish-2";
 @import "parts/chat.css?v=v1.4.0-polish-2";
-@import "parts/modals.css?v=v1.4.1";
+@import "parts/modals.css?v=v1.4.1-motion-1";
 @import "parts/forecast.css?v=model-setup-2";
 @import "parts/local-services.css?v=service-center-1";
-@import "parts/kb.css";
+@import "parts/kb.css?v=v1.4.0-motion-1";
 @import "parts/business-canvas.css";
 @import "parts/diagram.css";

@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>智析Agent</title>
 <link rel="icon" href="{{ url_for('static', filename='Images/icon.png') }}">
-<script src="{{ url_for('static', filename='js/theme_bootstrap.js', v='fe0') }}"></script>
-<link rel="stylesheet" href="{{ url_for('static', filename='css/agent_chat.css', v='v1.4.0-polish-2') }}">
+<script src="{{ url_for('static', filename='js/theme_bootstrap.js', v='fe1') }}"></script>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/agent_chat.css', v='v1.4.0-motion-1') }}">
 {% if desktop_lifecycle_enabled %}
 <script defer src="{{ url_for('static', filename='js/modules/desktop_lifecycle.js', v='desktop-lease-1') }}"></script>
 {% endif %}
@@ -664,14 +664,13 @@
             </div>
           </section>
           <section class="welcome-prompt-group" aria-labelledby="welcome-commands-label">
-            <h3 id="welcome-commands-label" data-i18n="welcome.commands">或使用分析命令</h3>
+            <h3 id="welcome-commands-label" data-i18n="welcome.commands">或试试分析技能</h3>
             <div class="hint-chips hint-chips-commands">
-              <button type="button" class="hint-chip" data-action="fillHint" data-i18n="hint.decile">/decile 对销售额做十分位分析</button>
-              <button type="button" class="hint-chip" data-action="fillHint" data-i18n="hint.tree">/tree 用 C4.5 决策树预测客户流失</button>
-              <button type="button" class="hint-chip" data-action="fillHint" data-i18n="hint.kmeans">/kmeans 对客户做聚类分析，K=3</button>
-              <button type="button" class="hint-chip" data-action="fillHint" data-i18n="hint.data">/data 查看数据概况和分布</button>
-              <button type="button" class="hint-chip" data-action="fillHint" data-i18n="hint.ppt">/ppt 生成销售业绩分析演示文稿</button>
-              <button type="button" class="hint-chip" data-action="fillHint" data-i18n="hint.dashboard">/dashboard 生成可交互销售分析看板</button>
+              <button type="button" class="hint-chip" data-action="fillSkillHint" data-skill="decile" data-i18n="hint.decile">对销售额做十分位分析</button>
+              <button type="button" class="hint-chip" data-action="fillSkillHint" data-skill="tree" data-i18n="hint.tree">用 C4.5 决策树预测客户流失</button>
+              <button type="button" class="hint-chip" data-action="fillSkillHint" data-skill="kmeans" data-i18n="hint.kmeans">对客户做聚类分析，K=3</button>
+              <button type="button" class="hint-chip" data-action="fillSkillHint" data-skill="ppt" data-i18n="hint.ppt">生成销售业绩分析演示文稿</button>
+              <button type="button" class="hint-chip" data-action="fillSkillHint" data-skill="dashboard" data-i18n="hint.dashboard">生成可交互销售分析看板</button>
             </div>
           </section>
         </div>

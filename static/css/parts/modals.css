@@ -1700,6 +1700,21 @@
 /* Reveal secondary actions on hover so the list stays calm by default */
 .saved-item:hover .saved-rename,
 .saved-item:hover .saved-del { opacity: 1; }
+
+/* First-paint stagger for the saved-sessions list, gated by html.page-boot
+   (set by theme_bootstrap.js, removed ~1.6s after load) so re-renders on
+   save/rename/delete don't replay the entrance. */
+@media (prefers-reduced-motion: no-preference) {
+  html.page-boot .saved-item { animation: saved-rise .42s var(--ease-out) backwards; }
+  html.page-boot .saved-item:nth-child(2) { animation-delay: .05s; }
+  html.page-boot .saved-item:nth-child(3) { animation-delay: .10s; }
+  html.page-boot .saved-item:nth-child(4) { animation-delay: .15s; }
+  html.page-boot .saved-item:nth-child(5) { animation-delay: .20s; }
+  html.page-boot .saved-item:nth-child(6) { animation-delay: .25s; }
+  html.page-boot .saved-item:nth-child(7) { animation-delay: .30s; }
+  html.page-boot .saved-item:nth-child(n+8) { animation-delay: .35s; }
+}
+@keyframes saved-rise { from { opacity: 0; transform: translateY(8px); } }
 .saved-rename:hover {
   color: #93c5fd; background: rgba(59, 130, 246, .14);
 }

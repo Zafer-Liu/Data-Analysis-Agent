@@ -210,11 +210,13 @@ html[lang="en"] .story-title-accent { margin-top: 8px; font-family: "Source Han 
 
 .form-error { min-height: 21px; margin: -1px 0 8px; color: var(--auth-danger); font-size: 12px; line-height: 1.5; text-align: center; }
 .form-error.success { color: var(--auth-success); }
+/* Shake is added by login.js only when a fresh error message lands */
+.form-error.shake { animation: auth-shake .4s cubic-bezier(.36, .07, .19, .97); }
 
 .btn { width: 100%; height: 47px; display: flex; align-items: center; justify-content: center; gap: 10px; border: 0; border-radius: 11px; font-size: 14px; font-weight: 650; cursor: pointer; transition: transform .18s ease, background .18s ease, box-shadow .18s ease; }
 .btn-primary { color: #fff; background: var(--auth-primary-strong); box-shadow: 0 10px 28px rgba(77, 89, 223, .24); }
 .btn-primary:hover:not(:disabled) { transform: translateY(-1px); background: #7180ff; box-shadow: 0 14px 32px rgba(77, 89, 223, .32); }
-.btn-primary:active:not(:disabled) { transform: translateY(0); }
+.btn-primary:active:not(:disabled) { transform: translateY(0) scale(.97); }
 
 .agree-row { display: flex; align-items: flex-start; gap: 9px; margin-top: 17px; color: var(--auth-muted); font-size: 11px; line-height: 1.55; }
 .agree-row input { width: 14px; height: 14px; margin: 1px 0 0; accent-color: var(--auth-primary); }
@@ -263,17 +265,27 @@ html[lang="en"] .story-title-accent { margin-top: 8px; font-family: "Source Han 
   .agreement-box { padding: 24px 20px; border-radius: 15px; }
 }
 
+/* Mask reveal for the hero title — each line rises out of an overflow-hidden
+   wrapper, so the descenders need a little breathing room inside the mask. */
+.title-mask { display: block; overflow: hidden; padding-bottom: .1em; margin-bottom: -.1em; }
+.title-mask > span { display: inline-block; will-change: transform; }
+
 @media (prefers-reduced-motion: no-preference) {
-  .auth-story .brand, .story-copy, .analysis-trace, .auth-panel > * { animation: auth-enter .62s both cubic-bezier(.22, .78, .22, 1); }
-  .story-copy { animation-delay: .06s; }
-  .analysis-trace { animation-delay: .13s; }
+  .auth-story .brand, .analysis-trace, .auth-panel > * { animation: auth-enter .62s both cubic-bezier(.22, .78, .22, 1); }
+  .title-mask > span { animation: title-rise .85s both cubic-bezier(.22, .78, .22, 1); }
+  .title-mask:nth-of-type(1) > span { animation-delay: .14s; }
+  .title-mask:nth-of-type(2) > span { animation-delay: .28s; }
+  .story-summary { animation: auth-enter .62s both cubic-bezier(.22, .78, .22, 1); animation-delay: .46s; }
+  .analysis-trace { animation-delay: .34s; }
   .auth-panel > *:nth-child(2) { animation-delay: .08s; }
   .auth-panel > *:nth-child(3) { animation-delay: .12s; }
   .auth-panel > *:nth-child(n+4) { animation-delay: .16s; }
-  .trace-line { stroke-dasharray: 1; stroke-dashoffset: 1; animation: trace-draw 1.25s .28s forwards ease-out; }
+  .trace-line { stroke-dasharray: 1; stroke-dashoffset: 1; animation: trace-draw 1.25s .58s forwards ease-out; }
 }
 
 @keyframes auth-enter { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes title-rise { from { transform: translateY(112%); } to { transform: translateY(0); } }
+@keyframes auth-shake { 0%, 100% { transform: translateX(0); } 20% { transform: translateX(-7px); } 40% { transform: translateX(6px); } 60% { transform: translateX(-4px); } 80% { transform: translateX(3px); } }
 @keyframes trace-draw { to { stroke-dashoffset: 0; } }
 
 @media (prefers-reduced-motion: reduce) {

@@ -69,6 +69,16 @@ if (globalThis.__baaAppDelegationRegistered) {
     openModelPicker: (el) => window.BAA.models.openModelPicker(el),
     closeModelPicker: () => window.BAA.models.closeModelPicker(),
     fillHint:     (el)  => window.BAA.slash.fillHint(el),
+    // Welcome-page skill chips: pin the skill (badge) and fill the input,
+    // but let the user review and send — skills are not slash commands.
+    fillSkillHint: (el) => {
+      const input = $("msg-input");
+      if (input) {
+        input.value = el.textContent.trim();
+        window.BAA.slash.autoResize(input);
+      }
+      window.BAA.skills?.selectSkill?.(el.dataset.skill);
+    },
     toggleComposerExpanded: () => {
       const shell = document.querySelector(".composer-shell");
       const button = $("composer-expand-btn");

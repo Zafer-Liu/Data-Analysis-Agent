@@ -158,11 +158,27 @@ html, body, .db-canvas, .grid-stack-item-content, .widget-header,
               inset 0 1px 0 rgba(255,255,255,.05);
 }
 .kpi-label  { font-size: 11px; color: var(--color-text-mute); text-transform: uppercase; letter-spacing: .5px; font-weight: 600; }
-.kpi-value  { font-size: 24px; font-weight: 700; color: var(--color-text); line-height: 1.1; letter-spacing: -.02em; }
+.kpi-value  { font-size: 24px; font-weight: 700; color: var(--color-text); line-height: 1.1; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
 .kpi-sub    { font-size: 11px; color: var(--color-text-mute); }
 .kpi-trend  { font-size: 11px; font-weight: 600; }
 .kpi-trend.up   { color: #16a34a; }
 .kpi-trend.down { color: var(--color-danger); }
+
+/* First-paint entrance (JS adds .kpi-enter only on the initial build,
+   not on refreshes, so auto-refresh stays calm) */
+.kpi-card.kpi-enter { animation: db-card-in .5s var(--ease-out) backwards; }
+.kpi-card.kpi-enter:nth-child(2) { animation-delay: .06s; }
+.kpi-card.kpi-enter:nth-child(3) { animation-delay: .12s; }
+.kpi-card.kpi-enter:nth-child(4) { animation-delay: .18s; }
+.kpi-card.kpi-enter:nth-child(n+5) { animation-delay: .24s; }
+@keyframes db-card-in { from { opacity: 0; transform: translateY(12px); } }
+
+/* Scroll reveal for chart tiles — .reveal-pending hides tiles below the fold
+   until the observer promotes them to .reveal-in. Fill mode is backwards so
+   the hover lift keeps working once the entrance finishes. */
+.grid-stack-item-content.reveal-pending { opacity: 0; }
+.grid-stack-item-content.reveal-in { animation: db-tile-in .55s var(--ease-out) backwards; }
+@keyframes db-tile-in { from { opacity: 0; transform: translateY(16px); } }
 
 /* ── Chart Grid ───────────────────────────────────────────────────── */
 .db-grid-wrap { padding: 12px 20px 24px; }
@@ -539,7 +555,8 @@ html, body, .db-canvas, .grid-stack-item-content, .widget-header,
 .modal-desc { margin: 10px 0 18px; color: var(--color-text-mute); font-size: 13px; line-height: 1.6; }
 .modal-input { width: 100%; height: 42px; padding: 0 12px; color: var(--color-text); background: var(--color-surface-2); border: 1px solid var(--color-border); border-radius: var(--radius-sm); }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
-.btn-modal { min-height: 36px; padding: 0 14px; color: var(--color-text-soft); background: var(--color-surface-2); border: 1px solid var(--color-border); border-radius: var(--radius-sm); cursor: pointer; }
+.btn-modal { min-height: 36px; padding: 0 14px; color: var(--color-text-soft); background: var(--color-surface-2); border: 1px solid var(--color-border); border-radius: var(--radius-sm); cursor: pointer; transition: transform var(--t-fast); }
+.btn-modal:not(:disabled):active { transform: translateY(1px) scale(.97); }
 .btn-modal.primary { color: #fff; background: var(--color-primary); border-color: var(--color-primary); }
 .btn-modal:hover { border-color: var(--color-primary-tint); }
 .btn-modal.primary:hover { background: var(--color-primary-hover); }

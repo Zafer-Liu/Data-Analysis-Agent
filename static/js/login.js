@@ -410,6 +410,24 @@ async function doPasswordReset() {
   }
 }
 
+/* ---- form error shake ----
+   Every flow already signals failure by writing to one of the three
+   .form-error elements. Observing those writes keeps a single trigger
+   point instead of touching every call site; success messages (which
+   carry the .success class) and clears (empty text) are ignored. */
+function attachErrorShake(el) {
+  if (!el || typeof MutationObserver === 'undefined') return;
+  new MutationObserver(function() {
+    if (!el.textContent.trim() || el.classList.contains('success')) return;
+    el.classList.remove('shake');
+    void el.offsetWidth;  // restart the animation on consecutive errors
+    el.classList.add('shake');
+  }).observe(el, { childList: true, characterData: true, subtree: true });
+}
+attachErrorShake(document.getElementById('login-error'));
+attachErrorShake(document.getElementById('reg-error'));
+attachErrorShake(document.getElementById('reset-error'));
+
 /* ---- event listeners ---- */
 
 applyLoginLanguage(detectLoginLanguage());

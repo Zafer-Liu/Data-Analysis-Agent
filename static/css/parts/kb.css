@@ -175,6 +175,20 @@
   border-color: rgba(96, 165, 250, .3);
   box-shadow: 0 4px 12px rgba(96, 165, 250, .12), var(--shadow-xs);
 }
+
+/* Entrance stagger, gated on the knowledge drawer being open. The animation
+   starts when the selector begins matching (drawer opens) or when the Vue
+   island inserts a new card; in-place re-renders patch existing nodes and
+   don't replay it. Fill is backwards so the hover lift still works after. */
+@media (prefers-reduced-motion: no-preference) {
+  #sb-panel-knowledge:not(.collapsed) .kb-card { animation: kb-card-in .42s var(--ease-out) backwards; }
+  #sb-panel-knowledge:not(.collapsed) .kb-card:nth-child(2) { animation-delay: .05s; }
+  #sb-panel-knowledge:not(.collapsed) .kb-card:nth-child(3) { animation-delay: .10s; }
+  #sb-panel-knowledge:not(.collapsed) .kb-card:nth-child(4) { animation-delay: .15s; }
+  #sb-panel-knowledge:not(.collapsed) .kb-card:nth-child(5) { animation-delay: .20s; }
+  #sb-panel-knowledge:not(.collapsed) .kb-card:nth-child(n+6) { animation-delay: .25s; }
+}
+@keyframes kb-card-in { from { opacity: 0; transform: translateY(10px); } }
 .kb-card-head {
   display: flex; align-items: flex-start; justify-content: space-between; gap: 8px;
 }

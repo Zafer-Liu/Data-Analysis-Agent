@@ -6,9 +6,9 @@
   <meta name="theme-color" content="#f4f6fa">
   <title>智析Agent — 登录</title>
   <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}">
-  <script src="{{ url_for('static', filename='js/theme_bootstrap.js', v='fe0') }}"></script>
+  <script src="{{ url_for('static', filename='js/theme_bootstrap.js', v='fe1') }}"></script>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/parts/tokens.css', v='v1.4.0-polish-2') }}">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/login.css', v='20261009-1') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/login.css', v='20261025-1') }}">
 </head>
 <body>
   <main class="auth-shell">
@@ -22,7 +22,7 @@
       </a>
 
       <div class="story-copy">
-        <h1 id="story-title" aria-label="让复杂数据，变成清晰判断。" data-i18n-aria-label="story.title_full"><span class="story-title-line" data-i18n="story.title_line_1">让复杂数据，</span><br><span class="story-title-accent" data-i18n="story.title_line_2">变成清晰判断。</span></h1>
+        <h1 id="story-title" aria-label="让复杂数据，变成清晰判断。" data-i18n-aria-label="story.title_full"><span class="title-mask"><span class="story-title-line" data-i18n="story.title_line_1">让复杂数据，</span></span><span class="title-mask"><span class="story-title-accent" data-i18n="story.title_line_2">变成清晰判断。</span></span></h1>
         <p class="story-summary" data-i18n="story.summary">从原始数据到可执行结论，在同一个工作区完成分析、验证与表达。</p>
       </div>
 
@@ -172,6 +172,6 @@
     </div>
   </div>
 
-  <script src="{{ url_for('static', filename='js/login.js', v='20261009-1') }}"></script>
+  <script src="{{ url_for('static', filename='js/login.js', v='20261025-1') }}"></script>
 </body>
 </html>
