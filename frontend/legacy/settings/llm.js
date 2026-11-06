@@ -30,11 +30,11 @@ function renderLlm() {
 
  const BUILTIN_META = {
     deepseek:   { label: "DeepSeek",         color: "#4D6BFE" },
-    openai:     { label: "OpenAI / ChatGPT", color: "#10A37F" },
-    atlascloud: { label: "AtlasCloud",       color: "#6366F1" },
+    openai:     { label: "OpenAI 兼容",      color: "#10A37F" },
+    infistar:   { label: "Infistar 无限星河", color: "#F59E0B" },
     ollama:     { label: "Ollama (本地)",     local: true, color: "#7C3AED" },
  };
-  const BUILTIN_ORDER = ["deepseek", "openai", "atlascloud", "ollama"];
+  const BUILTIN_ORDER = ["deepseek", "openai", "infistar", "ollama"];
 
   /* ── LLM tab reactive state ────────────────────── */
   if (!uiState._llmProviders) {

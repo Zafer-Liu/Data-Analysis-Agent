@@ -278,7 +278,7 @@ export function mountMcpUi() {
         }),
         h("input", {
           type: "text", id: "mcp-env",
-          placeholder: "环境变量（变量名=值，逗号分隔），例如：ATLASCLOUD_API_KEY=apikey-xxx, OTHER_KEY=yyy",
+          placeholder: "环境变量（变量名=值，逗号分隔），例如：MY_API_KEY=apikey-xxx, OTHER_KEY=yyy",
           value: F.env,
           onInput: (e) => { F.env = e.target.value; },
         }),

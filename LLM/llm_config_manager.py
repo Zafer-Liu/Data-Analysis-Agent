@@ -229,6 +229,8 @@ class LLMConfigManager:
             "prompt_cache_retention": "in_memory",
         },
         "openai": {
+            # 通用 OpenAI 兼容入口：默认指向官方端点，可用 OPENAI_BASE_URL /
+            # OPENAI_MODEL 覆盖，或在设置界面改为任意 OpenAI 兼容中转服务。
             "base_url": "https://api.openai.com/v1",
             "model": "gpt-4o-mini",
             "env_var": "OPENAI_API_KEY",
@@ -239,10 +241,11 @@ class LLMConfigManager:
             "prompt_cache_mode": "openai",
             "prompt_cache_retention": "in_memory",
         },
-        "atlascloud": {
-            "base_url": "https://api.atlascloud.ai/v1",
-            "model": "moonshotai/kimi-k2.6",
-            "env_var": "ATLASCLOUD_API_KEY",
+        "infistar": {
+            # 赞助商 Infistar 无限星河：OpenAI 兼容多模型中转（Claude/GPT/Gemini/DeepSeek）
+            "base_url": "https://infistar.cc/v1",
+            "model": "deepseek-chat",
+            "env_var": "INFISTAR_API_KEY",
             "is_custom": False,
             "context_window": DEFAULT_CONTEXT_WINDOW,
             "max_output_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
@@ -805,7 +808,7 @@ class LLMConfigManager:
 
     def get_default_provider(self) -> Optional[str]:
         priority = [spec["id"] for spec in HOSTED_MODEL_SPECS] + [
-            "deepseek", "minimax", "openai", "atlascloud", "ollama", "claude",
+            "deepseek", "minimax", "openai", "ollama", "infistar",
         ]
         for provider in priority:
             if provider in self.configs and self.configs[provider].enabled:
@@ -997,7 +1000,7 @@ def get_llm_client_with_fallback(preferred_provider: Optional[str] = None):
     if preferred_provider:
         candidates.append(preferred_provider)
 
-    priority = ["deepseek", "openai", "atlascloud", "ollama", "claude"]
+    priority = ["deepseek", "openai", "ollama", "infistar"]
     for p in priority:
         if p not in candidates and p in manager.configs and manager.configs[p].enabled:
             candidates.append(p)

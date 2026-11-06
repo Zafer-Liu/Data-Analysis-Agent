@@ -22,12 +22,12 @@ export function mountSettingsUi() {
  const COMMON_ICON = "/static/Images/icon.png";
  const BUILTIN_META = {
     deepseek:   { label: "DeepSeek",         color: "#4D6BFE" },
-    openai:     { label: "OpenAI / ChatGPT", color: "#10A37F" },
-    atlascloud: { label: "AtlasCloud",       color: "#6366F1" },
+    openai:     { label: "OpenAI 兼容",      color: "#10A37F" },
+    infistar:   { label: "Infistar 无限星河", color: "#F59E0B" },
     ollama:     { label: "Ollama (本地)",     local: true, color: "#7C3AED" },
  };
   // 内置提供商排序：Ollama 作为本地模型放在最后，与普通在线提供商区分开。
-  const BUILTIN_ORDER = ["deepseek", "openai", "atlascloud", "ollama"];
+  const BUILTIN_ORDER = ["deepseek", "openai", "infistar", "ollama"];
 
   // 判断 base_url 是否本地地址（与后端 _is_local_base_url 保持一致）
   function _isLocalUrl(url) {

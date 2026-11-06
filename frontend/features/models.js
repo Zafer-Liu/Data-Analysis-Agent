@@ -5,8 +5,8 @@ import { getUiIsland } from "../core/ui-registry.js";
   const COMMON_ICON = "/static/Images/icon.png";
   const BUILTIN_META = {
     deepseek:   { label: "DeepSeek",         icon: COMMON_ICON },
-    openai:     { label: "OpenAI / ChatGPT", icon: COMMON_ICON },
-    atlascloud: { label: "AtlasCloud",       icon: COMMON_ICON },
+    openai:     { label: "OpenAI 兼容",      icon: COMMON_ICON },
+    infistar:   { label: "Infistar 无限星河", icon: COMMON_ICON },
     ollama:     { label: "Ollama (本地)",     icon: COMMON_ICON, local: true },
   };
   const MODEL_PICKER = {
