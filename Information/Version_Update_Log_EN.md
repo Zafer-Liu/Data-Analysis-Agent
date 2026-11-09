@@ -1,5 +1,41 @@
 # Version Development Log
 
+## v1.5.0
+**November 9, 2026**
+
+v1.5.0 syncs the private-edition features to the public source, extends the built-in tool system, adds a cost event ledger and workflow token budgets, brings in the Infistar model provider, and completes a round of dependency and CI maintenance. Existing local data sources, analysis tools, and the Web workspace remain available.
+
+### Private-edition feature sync
+
+Read-only administration console, desktop cloud authentication and model gateways, referral and quota ledgers, browser and web-table ingestion, browser-local persistence, PyTorch GRU/LSTM, chart themes and PNG export, in-memory SQL transformations with numeric provenance checks, canvas save recovery, Skill tags, and SSE reliability improvements. See the v1.4.0 sync notes in the README.
+
+### Tool system and governance
+
+- The built-in tool registry grows to 73 tools: browser search/navigate/click/extract interactions, Feishu Bitable read/write, web-table ingestion, chart/canvas/dashboard/presentation generation, team and task management, workflow modeling and queries, and long-term memory reads.
+- Deferred discovery for low-frequency tools: 13 core tools are exposed by default, the other 50 are discovered per conversation context, and the model-visible cap is 20 tools (including MCP), with a discovery lifetime of the latest 3 user turns.
+- Adds a tool governance inventory script and a job-migration plan; CI validates registry, schema, and migration-plan consistency.
+
+### Cost ledger and budgets
+
+- New append-only cost event ledger: per model call, input/output/cached tokens, latency, and attribution are recorded locally for sessions and nodes; a recorder failure never interrupts the chat stream.
+- Workflow run details gain a "resource usage" panel summarizing billed events, token usage, cache reads, and tool calls, with expandable per-node cost records; unpriced models are labelled explicitly.
+- Workflows can set an optional total token budget (1,000–1,000,000) at creation: an 80% threshold emits a warning event, and once the cap is reached no further nodes are dispatched; the cap and usage are visible in the blueprint and dynamic plans.
+- Team member profiles are named and reusable; dynamic plans show each task's profile and token usage.
+
+### Model services
+
+Adds the Infistar provider; removes the built-in AtlasCloud and claude configurations.
+
+### UI fixes and polish
+
+- Fixes Skills, Knowledge, and MCP panels being covered by the chat header and message content at viewport widths ≤1280px (#83); panels and the session drawer now share a blurred overlay background, so chat text no longer shows through.
+- Refreshed auth UI and welcome prompts; the welcome screen offers skill-based suggestions with motion polish.
+
+### Engineering and dependencies
+
+- Optional dependencies and build configuration reorganized; batch dependency upgrades (openai 3.x, plotly 7, vite 8, gunicorn 26, paramiko 5, eslint 10, among others); CI Actions upgraded with monthly grouped updates; the desktop release pipeline tolerates the locally maintained docs/tests directories and skips those checks when absent.
+- Documentation and local test directories are maintained locally only and are no longer part of the public repository; frontend bundles are rebuilt by the release pipeline.
+
 ## v1.3.0 LTS
 **August 21, 2026**
 
