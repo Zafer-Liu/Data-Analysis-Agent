@@ -62,7 +62,12 @@ jobs:
         shell: bash
         run: |
           python scripts/generate_tool_inventory.py --check
-          python -m unittest discover -s tests -v
+          # tests/ is local-only (see .gitignore) and absent from a clean checkout.
+          if [ -d tests ]; then
+            python -m unittest discover -s tests -v
+          else
+            echo "tests/ is not tracked in this repository; skipping unittest discovery"
+          fi
           python -m pytest Function/Charts_generation/tests -q
 
   build-windows:
