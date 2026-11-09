@@ -54,11 +54,11 @@ Thank you to DolOffer for supporting this project! DolOffer is a platform focuse
 
 ### ☁️ Sponsored by Mozhenzhen
 
-<p align="center"><a href="https://mozhenzhen.com/"><img src="./Information/assets/Mozhenzhen.png" alt="Mozhenzhen logo" height="80" /></a></p>
+<p align="center"><a href="https://mozhenzhen.com/go/data-analysis-agent"><img src="./Information/assets/Mozhenzhen.png" alt="Mozhenzhen logo" height="80" /></a></p>
 
 Mozhenzhen — a consumer anti-pitfall guide for developers and AI enthusiasts. Whether you are looking for real-time API price comparison, latency benchmarking and authenticity verification (no watered-down or fake models), comparing after-sales warranties, risk prevention and hidden traps among account / subscription top-up providers, or even discovering free community relays and backup nodes, Mozhenzhen uses transparent data to help you avoid pitfalls and spend every cent wisely.
 
-👉 **[Visit Mozhenzhen](https://mozhenzhen.com/)**
+👉 **[Visit Mozhenzhen](https://mozhenzhen.com/go/data-analysis-agent)**
 
 ---
 

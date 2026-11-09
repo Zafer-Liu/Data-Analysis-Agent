@@ -54,11 +54,11 @@
 
 ### ☁️ 赞助 · Sponsored by 模真真
 
-<p align="center"><a href="https://mozhenzhen.com/"><img src="./Information/assets/Mozhenzhen.png" alt="模真真 logo" height="80" /></a></p>
+<p align="center"><a href="https://mozhenzhen.com/go/data-analysis-agent"><img src="./Information/assets/Mozhenzhen.png" alt="模真真 logo" height="80" /></a></p>
 
 模真真 —— 专为开发者与 AI 爱好者打造的消费防坑指南。无论你是找 API 实时比价、延迟测速与真伪校验（拒绝掺水与假模型），还是想对比全网 成品账号/订阅代充 服务商的售后质保、风险防范与暗坑套路，甚至免费挖掘公益站与备用节点，模真真都能用透明数据帮你避坑选型，把每一分钱都花在刀刃上！
 
-👉 **[前往模真真](https://mozhenzhen.com/)**
+👉 **[前往模真真](https://mozhenzhen.com/go/data-analysis-agent)**
 
 ---
 
