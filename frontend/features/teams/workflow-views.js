@@ -178,6 +178,23 @@ export function createWorkflowViews(ctx) {
           onInput: event => updateWorkflowCreate("description", event.target.value),
         }),
       ]),
+      h("details", { class: "workflow-create-budget" }, [
+        h("summary", null, "可选：运行总 Token 上限"),
+        h("label", null, [
+          h("span", null, "上限（1,000–1,000,000）"),
+          h("input", {
+            type: "number",
+            min: "1000",
+            max: "1000000",
+            step: "1000",
+            placeholder: "留空则不启用总 Token 阈值",
+            value: local.workflowCreate.maxTotalTokens || "",
+            disabled: local.workflowCreating,
+            onInput: event => updateWorkflowCreate("maxTotalTokens", event.target.value),
+          }),
+        ]),
+        h("p", { class: "workflow-create-hint" }, "达到 80% 会记录预警；达到上限时不再派发尚未执行的节点。仅影响这次新建的 Workflow。"),
+      ]),
       h("div", { class: "workflow-create-actions" }, [
         h("button", {
           class: "btn-sm btn-sm-primary",
@@ -373,6 +390,9 @@ export function createWorkflowViews(ctx) {
           `${workflowModeLabel(graph.run_policy?.mode)}执行`),
         edgeCounts.auto
           ? h("span", { class: "workflow-rule" }, `${edgeCounts.auto} 条自动流转`)
+          : null,
+        graph.limits?.max_total_tokens
+          ? h("span", { class: "workflow-rule" }, `总 Token 上限 ${Number(graph.limits.max_total_tokens).toLocaleString()}`)
           : null,
         ...specialRules.map(edge => h("span", {
           key: edge.edge_id || `${edge.from_node}-${edge.to_node}-${edge.type}`,
@@ -658,6 +678,15 @@ export function createWorkflowViews(ctx) {
         title: `${node}：已记录模型用量`,
         detail: `输入 ${Number(event?.input_tokens || 0).toLocaleString()} Token，输出 ${Number(event?.output_tokens || 0).toLocaleString()} Token。`,
         tone: "info",
+      };
+    }
+    if (type === "workflow_token_budget_warning") {
+      const used = Number(event?.used_tokens || 0).toLocaleString();
+      const limit = Number(event?.max_total_tokens || 0).toLocaleString();
+      return {
+        title: "Token 预算预警",
+        detail: `已使用 ${used} / ${limit} Token。请缩小范围，或在新的 Workflow 版本中调整预算。`,
+        tone: "warning",
       };
     }
     if (type === "workflow_checkpoint_node_reused") {
@@ -1097,6 +1126,53 @@ export function createWorkflowViews(ctx) {
     return `${(value / 3600).toFixed(1)} 小时`;
   }
 
+  function formatWorkflowCost(amount) {
+    const value = Number(amount);
+    if (!Number.isFinite(value)) return "未配置价格";
+    return `$${value.toLocaleString(undefined, { maximumFractionDigits: 6 })}`;
+  }
+
+  function renderWorkflowRunCosts() {
+    const costs = local.runCosts;
+    const summary = costs?.summary;
+    const events = costs?.events || [];
+    if (!summary && !events.length) {
+      return h("section", { class: "workflow-run-costs" }, [
+        h("div", { class: "workflow-run-costs-head" }, [
+          h("div", null, [
+            h("strong", null, "本次资源用量"),
+            h("span", null, "节点完成模型调用后，这里会显示成本记录。"),
+          ]),
+          h("span", null, "等待数据"),
+        ]),
+      ]);
+    }
+    const allPriced = Boolean(summary?.cost_configured);
+    return h("section", { class: "workflow-run-costs" }, [
+      h("div", { class: "workflow-run-costs-head" }, [
+        h("div", null, [
+          h("strong", null, "本次资源用量"),
+          h("span", null, allPriced ? "基于已配置模型价格" : "部分模型尚未配置价格"),
+        ]),
+        h("span", { class: allPriced ? "good" : "warn" }, formatWorkflowCost(summary?.estimated_cost)),
+      ]),
+      h("div", { class: "workflow-run-cost-grid" }, [
+        h("div", null, [h("span", null, "计费事件"), h("strong", null, Number(summary?.event_count || 0).toLocaleString())]),
+        h("div", null, [h("span", null, "输入 Token"), h("strong", null, Number(summary?.input_tokens || 0).toLocaleString())]),
+        h("div", null, [h("span", null, "缓存读取"), h("strong", null, Number(summary?.cached_input_tokens || 0).toLocaleString())]),
+        h("div", null, [h("span", null, "工具调用"), h("strong", null, Number(summary?.tool_call_count || 0).toLocaleString())]),
+      ]),
+      events.length ? h("details", { class: "workflow-run-cost-events" }, [
+        h("summary", null, `查看 ${events.length} 条节点成本记录`),
+        h("div", null, events.map(event => h("div", { key: event.event_id }, [
+          h("strong", null, `节点执行 ${String(event.scope_id || "-").slice(-8)}`),
+          h("span", null, `${event.model || "未标注模型"} · 输入 ${Number(event.input_tokens || 0).toLocaleString()} / 输出 ${Number(event.output_tokens || 0).toLocaleString()}`),
+          h("small", null, formatWorkflowCost(event.estimated_cost)),
+        ]))),
+      ]) : h("p", { class: "workflow-run-cost-empty" }, "暂无已完成节点的成本记录。"),
+    ]);
+  }
+
   function renderWorkflowMetricsDashboard() {
     const metrics = local.workflowMetrics;
     if (local.workflowMetricsLoading && !metrics) {
@@ -1210,6 +1286,7 @@ export function createWorkflowViews(ctx) {
         h("span", null, `Finished ${formatTime(run.finished_at) || "-"}`),
         h("span", null, `By ${run.started_by || "-"}`),
       ]),
+      renderWorkflowRunCosts(),
       renderRunOutputs(detail),
       h("div", { class: "workflow-detail-tabs" }, [
         renderWorkflowKnowledgeCandidates(detail),

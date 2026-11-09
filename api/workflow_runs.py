@@ -118,6 +118,38 @@ def get_workflow_run(sid: str, run_id: str):
     return jsonify({"ok": True, **detail})
 
 
+@bp.get("/api/session/<sid>/workflow-runs/<run_id>/costs")
+@require_session_ownership
+def get_workflow_run_costs(sid: str, run_id: str):
+    """Return Workflow-node cost aggregates without exposing prompt content."""
+    try:
+        runtime = workflow_runtime_manager.get(sid)
+        if runtime.run_store.get_run(run_id) is None:
+            raise WorkflowContractError(
+                WorkflowErrorCode.RESOURCE_NOT_FOUND,
+                f"workflow run not found: {run_id}",
+            )
+        from data.cost_event_store import get_cost_event_store
+        store = get_cost_event_store()
+        return jsonify({
+            "ok": True,
+            "summary": store.summary(
+                workspace_id=runtime.workspace.workspace_id,
+                session_id=sid,
+                scope_type="workflow_node",
+                parent_scope_id=run_id,
+            ),
+            "events": store.list_events(
+                workspace_id=runtime.workspace.workspace_id,
+                session_id=sid,
+                scope_type="workflow_node",
+                parent_scope_id=run_id,
+            ),
+        })
+    except WorkflowContractError as exc:
+        return _error(exc)
+
+
 @bp.get("/api/session/<sid>/workflow-runs/<run_id>/events")
 @require_session_ownership
 def get_workflow_run_events(sid: str, run_id: str):

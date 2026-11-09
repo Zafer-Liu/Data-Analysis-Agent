@@ -223,6 +223,7 @@ class WorkflowScheduler:
             if self._expire_timed_out_run(run, version["graph"]):
                 return self.detail(run_id)
             self._reconcile_jobs(run_id, version["graph"])
+            self._warn_token_budget(run_id, version["graph"])
             if self._expire_token_budget(run_id, version["graph"]):
                 return self.detail(run_id)
             if RunStatus((self.run_store.get_run(run_id) or run)["status"]) is RunStatus.CANCELING:
@@ -366,20 +367,52 @@ class WorkflowScheduler:
         )
         return True
 
-    def _expire_token_budget(self, run_id: str, graph: Mapping[str, Any]) -> bool:
+    def _token_budget_usage(self, run_id: str, graph: Mapping[str, Any]) -> tuple[int, int] | None:
         limit = graph.get("limits", {}).get("max_total_tokens")
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
-            return False
+            return None
         used = sum(
             int(item.get("input_tokens") or 0) + int(item.get("output_tokens") or 0)
             for item in self.run_store.list_node_runs(run_id)
         )
-        if used <= limit:
+        return used, limit
+
+    def _warn_token_budget(self, run_id: str, graph: Mapping[str, Any]) -> None:
+        """Persist one visible warning when a configured total-token budget reaches 80%."""
+        usage = self._token_budget_usage(run_id, graph)
+        if usage is None:
+            return
+        used, limit = usage
+        if used * 100 < limit * 80:
+            return
+        if any(
+            event.get("type") == "workflow_token_budget_warning"
+            for event in self.run_store.list_events(run_id)
+        ):
+            return
+        self.run_store.record_event(
+            run_id,
+            "workflow_token_budget_warning",
+            {
+                "run_id": run_id,
+                "used_tokens": used,
+                "max_total_tokens": limit,
+                "usage_ratio": round(used / limit, 4),
+                "message": "workflow consumed at least 80% of its configured token budget",
+            },
+        )
+
+    def _expire_token_budget(self, run_id: str, graph: Mapping[str, Any]) -> bool:
+        usage = self._token_budget_usage(run_id, graph)
+        if usage is None:
+            return False
+        used, limit = usage
+        if used < limit:
             return False
         for node_run in self.run_store.list_node_runs(run_id):
             if NodeRunStatus(node_run["status"]) is NodeRunStatus.READY:
                 self.run_store.transition_node(node_run["id"], NodeRunStatus.CANCELED, error="workflow token budget exceeded")
-        self.run_store.transition_run(run_id, RunStatus.FAILED, failure_code="workflow_token_budget_exceeded", failure_message=f"workflow consumed {used} tokens, above max_total_tokens={limit}")
+        self.run_store.transition_run(run_id, RunStatus.FAILED, failure_code="workflow_token_budget_exceeded", failure_message=f"workflow consumed {used} tokens, at max_total_tokens={limit}")
         return True
 
     def _reconcile_jobs(self, run_id: str, graph: Mapping[str, Any]) -> None:

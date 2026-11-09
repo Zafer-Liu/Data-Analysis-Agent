@@ -910,7 +910,7 @@ class WorkflowRunStore:
         """Persist actual model usage without mixing it into node artifacts."""
         with self._transaction():
             row = self._conn.execute(
-                "SELECT n.run_id FROM workflow_node_runs n "
+                "SELECT n.run_id, r.session_id FROM workflow_node_runs n "
                 "JOIN workflow_runs r ON r.id = n.run_id "
                 "WHERE n.id = ? AND r.workspace_id = ?",
                 (node_run_id, self.workspace_id),
@@ -945,6 +945,35 @@ class WorkflowRunStore:
                     "output_tokens": output_tokens,
                 },
             )
+        # A node result aggregates one or more delegated model calls.  The
+        # stable node-run id makes this an idempotent replacement on scheduler
+        # replay without duplicating cost in the cross-entrypoint ledger.
+        try:
+            from agent.workflows.pricing import estimate_model_cost
+            from data.cost_event_store import get_cost_event_store
+
+            provider = str(usage.get("provider") or "")
+            model = str(usage.get("model") or "")
+            get_cost_event_store().record(
+                event_id=f"workflow-node:{node_run_id}",
+                occurred_at=_now(),
+                scope_type="workflow_node",
+                scope_id=node_run_id,
+                parent_scope_id=str(row["run_id"]),
+                workspace_id=self.workspace_id,
+                session_id=str(row["session_id"] or ""),
+                provider=provider,
+                model=model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cached_input_tokens=max(0, int(usage.get("cached_input_tokens") or 0)),
+                tool_call_count=max(0, int(usage.get("tool_calls") or 0)),
+                estimated_cost=estimate_model_cost(provider, model, input_tokens, output_tokens),
+            )
+        except Exception:
+            # Observability must not make a durable Workflow node fail after
+            # its result has already been committed.
+            log.exception("[workflow] failed to record cost event node_run=%s", node_run_id)
         return True
 
     def record_event(

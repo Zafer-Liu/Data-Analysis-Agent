@@ -280,10 +280,17 @@ export function createTeamViews(ctx) {
     const budget = plan?.budget || {};
     const inputTokens = Number(budget.input_tokens || 0);
     const outputTokens = Number(budget.output_tokens || 0);
+    const usedTokens = Number(budget.used_tokens || inputTokens + outputTokens);
+    const maxTokens = Number(budget.max_total_tokens || plan?.max_total_tokens || 0);
     const toolCalls = Number(budget.tool_calls || 0);
     const jobs = Number(budget.child_job_count || 0);
-    if (!inputTokens && !outputTokens && !toolCalls && !jobs) return "等待成员执行用量";
-    return `输入 ${inputTokens.toLocaleString()} · 输出 ${outputTokens.toLocaleString()} · ${toolCalls} 次工具 · ${jobs} 个子 Job · 成本未配置`;
+    const cap = maxTokens
+      ? ` · Token ${usedTokens.toLocaleString()} / ${maxTokens.toLocaleString()}${budget.exhausted ? "（已达上限）" : ""}`
+      : "";
+    if (!inputTokens && !outputTokens && !toolCalls && !jobs) {
+      return maxTokens ? `等待成员执行用量 · Token 上限 ${maxTokens.toLocaleString()}` : "等待成员执行用量";
+    }
+    return `输入 ${inputTokens.toLocaleString()} · 输出 ${outputTokens.toLocaleString()}${cap} · ${toolCalls} 次工具 · ${jobs} 个子 Job · 成本未配置`;
   }
 
   function renderDynamicPlans() {
@@ -300,7 +307,7 @@ export function createTeamViews(ctx) {
         h("span", { class: `team-plan-task-dot ${task.status}` }),
         h("div", null, [
           h("strong", null, task.title || task.id),
-          h("small", null, `${task.member_name}${task.depends_on?.length ? ` · 依赖 ${task.depends_on.join(", ")}` : ""}`),
+          h("small", null, `${task.member_name}${task.profile?.key && task.profile.key !== "inherit" ? ` · ${task.profile.name || task.profile.key}` : ""}${task.depends_on?.length ? ` · 依赖 ${task.depends_on.join(", ")}` : ""}`),
           task.error ? h("small", { class: "team-plan-task-error" }, task.error) : null,
         ]),
         task.job_id ? h("div", { class: "team-plan-task-links" }, [

@@ -27,6 +27,7 @@ TOOL_RESULT_CHAR_BUDGET = 2_000
 TOOL_RESULT_PREVIEW_CHARS = 2_000
 TOOL_RESULT_PREVIEW_LINES = 40
 TOOL_RESULT_READ_MAX_CHARS = 4_000
+MCP_SUMMARY_CONTRACT_THRESHOLD = 30_000
 _GLOBAL_RESULT_ROOT = content_data_path("outputs", "tool_results")
 
 
@@ -488,6 +489,71 @@ def _summarize_content(content: Any, max_chars: int = 220) -> str:
     return text[:max_chars] + ("..." if len(text) > max_chars else "")
 
 
+def large_mcp_summary_contract(raw: Any, artifact: dict) -> dict:
+    """Create a no-content handoff for a very large MCP response.
+
+    This deliberately reports shape and recovery instructions instead of
+    attempting another LLM call or copying source text into the Lead's
+    context.  It is therefore safe to emit on every oversized MCP response
+    and lets a later, bounded ``read_tool_result`` call retrieve only the
+    needed evidence.
+    """
+    artifact_id = str(artifact.get("artifact_id") or "")
+    text = _json_text(raw)
+    shape: dict[str, Any]
+    if isinstance(raw, dict):
+        keys = [str(key)[:120] for key in list(raw)[:30]]
+        shape = {
+            "kind": "object",
+            "top_level_keys": keys,
+            "field_count": len(raw),
+        }
+        query_terms = keys[:8]
+    elif isinstance(raw, (list, tuple)):
+        sample = next((item for item in raw if isinstance(item, dict)), None)
+        item_keys = [str(key)[:120] for key in list(sample or {})[:20]]
+        shape = {
+            "kind": "array",
+            "item_count": len(raw),
+            "sample_item_keys": item_keys,
+        }
+        query_terms = item_keys[:8]
+    else:
+        shape = {
+            "kind": "text",
+            "character_count": len(text),
+            "line_count": len(text.splitlines()),
+        }
+        query_terms = []
+    recommended = [
+        {
+            "artifact_id": artifact_id,
+            "query": term,
+            "reason": "retrieve only matching evidence from the externalized MCP result",
+        }
+        for term in query_terms
+    ]
+    if not recommended:
+        recommended.append({
+            "artifact_id": artifact_id,
+            "offset": 0,
+            "limit": TOOL_RESULT_READ_MAX_CHARS,
+            "reason": "read the first bounded page before selecting a narrower query",
+        })
+    return {
+        "facts": [shape],
+        "constraints": [
+            "The full MCP response is externalized and must not be replayed into later stages.",
+            "Use bounded artifact reads for any source claim that requires original evidence.",
+        ],
+        "open_questions": [
+            "Which fields or records are relevant to the current subtask?",
+        ],
+        "recommended_artifact_queries": recommended,
+        "source_artifact_ids": [artifact_id] if artifact_id else [],
+    }
+
+
 def make_tool_result(
     tool: str,
     raw: Any,
@@ -551,6 +617,21 @@ def make_tool_result(
         if evidence_artifact is not None:
             result_artifacts.append(evidence_artifact)
     result_debug = dict(debug or {})
+    if (
+        tool.startswith("mcp__")
+        and result_artifact is not None
+        and len(_json_text(raw)) > MCP_SUMMARY_CONTRACT_THRESHOLD
+    ):
+        model_data = large_mcp_summary_contract(raw, result_artifact)
+        summary = (
+            f"Large MCP response externalized ({budget_debug.get('original_chars', 0):,} chars); "
+            "use the structured handoff and bounded artifact reads."
+        )
+        result_debug["mcp_summary_contract"] = {
+            "version": 1,
+            "threshold_chars": MCP_SUMMARY_CONTRACT_THRESHOLD,
+            "artifact_id": result_artifact.get("artifact_id", ""),
+        }
     if budget_debug:
         result_debug["result_budget"] = budget_debug
     return ToolResultEnvelope(

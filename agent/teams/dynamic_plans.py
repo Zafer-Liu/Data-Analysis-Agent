@@ -5,10 +5,13 @@ from datetime import datetime
 from infrastructure.paths import content_data_path
 from data.workspace import workspace_manager
 from agent.tools.workspace.teams import WorkspaceTeamError
+from agent.teams.profiles import normalize_team_profile
 from agent.workflows.service import WorkflowService
 
 _LOCK=threading.RLock()
 TERMINAL={"completed","failed","canceled"}
+MIN_TOTAL_TOKENS=1_000
+MAX_TOTAL_TOKENS=1_000_000
 
 class DynamicTeamPlanStore:
     def __init__(self, session_id, workspace_id=None):
@@ -59,15 +62,39 @@ class DynamicTeamPlanStore:
             "tool_calls":count("tool_calls"),
         }
 
+    @staticmethod
+    def _normalize_max_total_tokens(value):
+        if value in (None, ""):
+            return None
+        if isinstance(value, bool):
+            raise WorkspaceTeamError("max_total_tokens must be an integer")
+        try:
+            normalized=int(value)
+        except (TypeError, ValueError) as exc:
+            raise WorkspaceTeamError("max_total_tokens must be an integer") from exc
+        if not MIN_TOTAL_TOKENS <= normalized <= MAX_TOTAL_TOKENS:
+            raise WorkspaceTeamError(
+                f"max_total_tokens must be between {MIN_TOTAL_TOKENS} and {MAX_TOTAL_TOKENS}"
+            )
+        return normalized
+
     def _refresh_budget(self,plan):
         task_usages=[self._normalize_usage(item) for task in plan.get("tasks",[]) for item in (task.get("usage_history") or [task.get("usage")]) ]
         current_task_usages=[self._normalize_usage(task.get("usage")) for task in plan.get("tasks",[])]
         review_usages=[self._normalize_usage(item) for item in (plan.get("quality_review_usage_history") or [plan.get("quality_review_usage")]) ]
         all_usages=task_usages+review_usages
         measured=lambda item:any(item[key] for key in ("input_tokens","output_tokens","cached_input_tokens","tool_calls"))
+        input_tokens=sum(item["input_tokens"] for item in all_usages)
+        output_tokens=sum(item["output_tokens"] for item in all_usages)
+        used_tokens=input_tokens+output_tokens
+        max_total_tokens=self._normalize_max_total_tokens(plan.get("max_total_tokens"))
+        if max_total_tokens is not None:
+            plan["max_total_tokens"]=max_total_tokens
+        else:
+            plan.pop("max_total_tokens", None)
         plan["budget"]={
-            "input_tokens":sum(item["input_tokens"] for item in all_usages),
-            "output_tokens":sum(item["output_tokens"] for item in all_usages),
+            "input_tokens":input_tokens,
+            "output_tokens":output_tokens,
             "cached_input_tokens":sum(item["cached_input_tokens"] for item in all_usages),
             "tool_calls":sum(item["tool_calls"] for item in all_usages),
             "measured_task_count":sum(1 for item in current_task_usages if measured(item)),
@@ -75,11 +102,16 @@ class DynamicTeamPlanStore:
             "child_job_count":sum(len(task.get("job_ids") or ([task["job_id"]] if task.get("job_id") else [])) for task in plan.get("tasks",[])),
             "quality_review_measured":any(measured(item) for item in review_usages),
             "estimated_cost":None,
+            "used_tokens":used_tokens,
+            "max_total_tokens":max_total_tokens,
+            "usage_ratio":round(used_tokens/max_total_tokens,4) if max_total_tokens else None,
+            "warning_emitted":bool(plan.get("budget_warning_emitted")),
+            "exhausted":bool(max_total_tokens and used_tokens>=max_total_tokens),
         }
         return plan["budget"]
 
 
-    def create(self,team_name,goal,assignments,created_by="lead",status="running"):
+    def create(self,team_name,goal,assignments,created_by="lead",status="running",max_total_tokens=None):
         if status not in {"planned","running"}: raise WorkspaceTeamError("invalid dynamic plan status")
         if not 1<=len(assignments)<=8: raise WorkspaceTeamError("dynamic plan requires 1-8 tasks")
         now=self._now(); seen=set(); tasks=[]
@@ -90,6 +122,7 @@ class DynamicTeamPlanStore:
             tasks.append({"id":tid,"member_name":str(item.get("member_name") or "")[:64],
               "title":str(item.get("description") or tid)[:240],"prompt":str(item.get("prompt") or "")[:12000],
               "depends_on":[str(x)[:64] for x in item.get("depends_on") or []][:8],
+              "profile":normalize_team_profile(item.get("profile")),
               "status":"pending","attempt":1,"job_id":"","result_summary":"","error":"","tool_count":0,"artifacts":[],"usage":self._normalize_usage({}),"usage_history":[],"job_ids":[],
               "started_at":"","finished_at":"","updated_at":now})
         if any(not t["member_name"] or not t["prompt"] or t["id"] in t["depends_on"] or any(x not in seen for x in t["depends_on"]) for t in tasks):
@@ -105,11 +138,55 @@ class DynamicTeamPlanStore:
                 dependencies.pop(task_id)
         plan={"id":"tp_"+uuid.uuid4().hex[:16],"workspace_id":self.workspace_id,"team_name":str(team_name)[:64],
           "goal":str(goal or "团队动态协作")[:4000],"status":status,"created_by":str(created_by)[:120],
-          "tasks":tasks,"quality_review_usage":self._normalize_usage({}),"quality_review_usage_history":[],"created_at":now,"updated_at":now,"finished_at":"","workflow_draft_id":""}
+          "tasks":tasks,"quality_review_usage":self._normalize_usage({}),"quality_review_usage_history":[],"created_at":now,"updated_at":now,"finished_at":"","workflow_draft_id":"",
+          "max_total_tokens":self._normalize_max_total_tokens(max_total_tokens),"budget_warning_emitted":False,"budget_exhausted_at":""}
         self._refresh_budget(plan)
         with _LOCK:
             data=self._load(); data["workspace_id"]=self.workspace_id; data["plans"].append(plan); data["plans"]=data["plans"][-100:]; self._save(data)
         return plan
+
+    def check_token_budget(self,pid):
+        """Return the persisted Team-plan budget state and emit its one-time warning."""
+        with _LOCK:
+            data=self._load(); plan=next((p for p in data["plans"] if p["id"]==pid),None)
+            if not plan: raise WorkspaceTeamError(f"dynamic plan not found: {pid}")
+            budget=self._refresh_budget(plan)
+            warning_new=False
+            max_total_tokens=budget.get("max_total_tokens")
+            if max_total_tokens and budget["used_tokens"]*100>=max_total_tokens*80 and not plan.get("budget_warning_emitted"):
+                plan["budget_warning_emitted"]=True
+                budget["warning_emitted"]=True
+                warning_new=True
+            if budget.get("exhausted") and not plan.get("budget_exhausted_at"):
+                plan["budget_exhausted_at"]=self._now()
+            if warning_new or budget.get("exhausted"):
+                plan["updated_at"]=self._now()
+                self._save(data)
+            return {"warning_new":warning_new,**budget}
+
+    def cancel_pending_for_token_budget(self,pid):
+        """Cancel only never-started tasks after a configured Team budget is exhausted."""
+        with _LOCK:
+            data=self._load(); plan=next((p for p in data["plans"] if p["id"]==pid),None)
+            if not plan: raise WorkspaceTeamError(f"dynamic plan not found: {pid}")
+            budget=self._refresh_budget(plan)
+            if not budget.get("exhausted"):
+                return plan, []
+            now=self._now()
+            reason=(
+                f"dynamic team token budget exceeded: {budget['used_tokens']} used, "
+                f"max_total_tokens={budget['max_total_tokens']}"
+            )
+            canceled=[]
+            for task in plan.get("tasks",[]):
+                if task.get("status")!="pending":
+                    continue
+                task["status"]="canceled"; task["error"]=reason; task["finished_at"]=now; task["updated_at"]=now
+                canceled.append(task["id"])
+            if canceled:
+                plan["updated_at"]=now
+                self._save(data)
+            return plan, canceled
     def start(self,pid):
         with _LOCK:
             data=self._load(); plan=next((p for p in data["plans"] if p["id"]==pid),None)
@@ -141,7 +218,14 @@ class DynamicTeamPlanStore:
             if usage is not None:
                 task["usage"]=self._normalize_usage(usage)
                 if status in TERMINAL:
-                    task.setdefault("usage_history",[]).append({"attempt":int(task.get("attempt") or 1),**task["usage"]})
+                    attempt=int(task.get("attempt") or 1)
+                    history=task.setdefault("usage_history",[])
+                    event={"attempt":attempt,**task["usage"]}
+                    existing=next((index for index,item in enumerate(history) if isinstance(item,dict) and int(item.get("attempt") or 0)==attempt),None)
+                    if existing is None:
+                        history.append(event)
+                    else:
+                        history[existing]=event
             if status=="running": task["started_at"]=task["started_at"] or now
             if status in TERMINAL: task["finished_at"]=now
             task["result_summary"]=str(result)[:500]; task["error"]=str(error)[:2000]
@@ -155,7 +239,31 @@ class DynamicTeamPlanStore:
                     "created_at":str(event.get("created_at") or "")[:40],
                 } for event in events if event.get("tool")]
             self._refresh_budget(plan)
-            plan["updated_at"]=now; self._save(data); return task
+            plan["updated_at"]=now; self._save(data)
+            if usage is not None and status in TERMINAL:
+                # One event per task attempt.  A repeated terminal callback
+                # updates that attempt rather than inflating plan cost.
+                try:
+                    from agent.workflows.pricing import estimate_model_cost
+                    from data.cost_event_store import get_cost_event_store
+                    measured=task["usage"]
+                    provider=str(measured.get("provider") or "")
+                    model=str(measured.get("model") or "")
+                    get_cost_event_store().record(
+                        event_id=f"team-task:{plan['id']}:{task['id']}:{int(task.get('attempt') or 1)}",
+                        occurred_at=now, scope_type="team_task", scope_id=str(task["id"]),
+                        parent_scope_id=str(plan["id"]), workspace_id=self.workspace_id,
+                        session_id=self.session_id, provider=provider, model=model,
+                        input_tokens=measured.get("input_tokens"), output_tokens=measured.get("output_tokens"),
+                        cached_input_tokens=measured.get("cached_input_tokens"),
+                        tool_call_count=measured.get("tool_calls"),
+                        estimated_cost=estimate_model_cost(provider, model, measured.get("input_tokens", 0), measured.get("output_tokens", 0)),
+                    )
+                except Exception:
+                    # Team state remains authoritative when optional telemetry
+                    # storage is unavailable.
+                    pass
+            return task
     def record_quality_review_usage(self,pid,usage):
         with _LOCK:
             data=self._load(); plan=next((p for p in data["plans"] if p["id"]==pid),None)
@@ -163,7 +271,26 @@ class DynamicTeamPlanStore:
             if plan["status"]=="canceled": return plan
             plan["quality_review_usage"]=self._normalize_usage(usage)
             plan.setdefault("quality_review_usage_history",[]).append(plan["quality_review_usage"])
-            self._refresh_budget(plan); plan["updated_at"]=self._now(); self._save(data); return plan
+            self._refresh_budget(plan); now=self._now(); plan["updated_at"]=now; self._save(data)
+            try:
+                from agent.workflows.pricing import estimate_model_cost
+                from data.cost_event_store import get_cost_event_store
+                measured=plan["quality_review_usage"]
+                provider=str(measured.get("provider") or "")
+                model=str(measured.get("model") or "")
+                get_cost_event_store().record(
+                    event_id=f"team-review:{plan['id']}:{len(plan.get('quality_review_usage_history') or [])}",
+                    occurred_at=now, scope_type="team_task", scope_id="quality-review",
+                    parent_scope_id=str(plan["id"]), workspace_id=self.workspace_id,
+                    session_id=self.session_id, provider=provider, model=model,
+                    input_tokens=measured.get("input_tokens"), output_tokens=measured.get("output_tokens"),
+                    cached_input_tokens=measured.get("cached_input_tokens"),
+                    tool_call_count=measured.get("tool_calls"),
+                    estimated_cost=estimate_model_cost(provider, model, measured.get("input_tokens", 0), measured.get("output_tokens", 0)),
+                )
+            except Exception:
+                pass
+            return plan
 
     def prepare_retry(self,pid,task_ids):
         requested={str(item) for item in (task_ids or []) if str(item)}

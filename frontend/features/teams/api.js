@@ -40,6 +40,10 @@ export function createTeamApi(ctx) {
     return fetchJson(`/api/session/${state.SID}/workflow-runs/${encodeURIComponent(runId)}`);
   }
 
+  async function fetchWorkflowRunCosts(runId) {
+    return fetchJson(`/api/session/${state.SID}/workflow-runs/${encodeURIComponent(runId)}/costs`);
+  }
+
   async function loadWorkflowArtifact(runId, artifactId) {
     if (!runId || !artifactId || local.workflowArtifactLoading) return;
     local.workflowArtifactLoading = artifactId;
@@ -97,6 +101,7 @@ export function createTeamApi(ctx) {
     fetchWorkflowRuns,
     fetchWorkflowMetrics,
     fetchWorkflowRun,
+    fetchWorkflowRunCosts,
     loadWorkflowArtifact,
     createAgentProfile,
     createWorkflowDraft,

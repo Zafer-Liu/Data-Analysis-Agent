@@ -533,6 +533,14 @@ BUILTIN_TOOL_REGISTRY = ToolRegistry([
     ),
     _spec("plan_complete", "interaction", default_exposed=False),
     _spec(
+        "workflow_recommend", "read", default_exposed=False, discoverable=True,
+        discovery_keywords=(
+            "是否需要 workflow", "是否需要工作流", "该用工作流吗", "复杂度", "任务分级",
+            "workflow recommendation", "workflow complexity", "route advice",
+        ),
+        discovery_summary="Recommend an S/M/L execution route and advisory budget without creating or starting anything.",
+    ),
+    _spec(
         "workflow_create", "write", default_exposed=False, discoverable=True,
         discovery_keywords=(
             "workflow", "工作流", "创建workflow", "创建 workflow", "创建工作流",

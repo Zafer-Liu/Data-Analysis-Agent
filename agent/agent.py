@@ -17,6 +17,7 @@ import os
 import urllib.parse
 from infrastructure.paths import content_data_path
 import re
+import uuid
 from typing import Iterator, List, Dict, Any, Optional, Tuple
 
 from .prompts      import (
@@ -1566,12 +1567,18 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                     }
                     workflow = tool_result["workflow"]
                     version = tool_result["version"]
+                    routing_advice = tool_result.get("routing_advice") or {}
+                    recommendation = routing_advice.get("recommendation") or {}
+                    budget = recommendation.get("budget") or {}
                     yield {
                         "type": "text",
                         "content": (
                             f"已创建并发布 Workflow「{workflow['name']}」。\n\n"
                             f"运行模式：`{workflow['mode']}`  \n"
-                            f"版本：`v{version['version_number']}`\n\n"
+                            f"版本：`v{version['version_number']}`  \n"
+                            f"建议复杂度：`{routing_advice.get('complexity', 'L')}`"
+                            f"（{recommendation.get('execution', 'explicit_workflow')}；"
+                            f"建议总 Token 上限 {budget.get('max_total_tokens', '-')}，未自动应用）\n\n"
                             "可在「团队 → Workflow」中查看 DAG，或继续说“启动刚创建的 workflow”。"
                         ),
                     }
@@ -2594,6 +2601,12 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                 )
                 yield {
                     "type": "usage",
+                    # The API layer persists this once as a durable numeric-only
+                    # cost event.  It is deliberately generated per completed
+                    # provider call instead of deriving an id from session
+                    # totals, which would make retries double-countable.
+                    "usage_event_id": f"session-llm-{uuid.uuid4().hex}",
+                    "usage_latency_ms": int(round(_elapsed * 1000)),
                     "prompt_tokens": usage_data.prompt_tokens,
                     "completion_tokens": usage_data.completion_tokens,
                     "total_tokens": usage_data.total_tokens,
@@ -3076,6 +3089,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                             "artifacts": envelope.artifacts,
                             "elapsed_seconds": envelope.debug.get("elapsed_seconds"),
                             "args_preview": envelope.debug.get("args_preview", {}),
+                            "mcp_summary_contract": envelope.debug.get("mcp_summary_contract"),
                             "parallel": True,
                             "validation": None,
                         }
@@ -3723,7 +3737,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                 )
                             else:
                                 tool_result = "Unknown workspace tool"
-                        elif name in {"workflow_create", "workflow_create_custom", "workflow_list", "workflow_start", "workflow_status"}:
+                        elif name in {"workflow_recommend", "workflow_create", "workflow_create_custom", "workflow_list", "workflow_start", "workflow_status"}:
                             from agent.tools.workflow import execute_workflow_tool
                             tool_result = execute_workflow_tool(
                                 name, self._session_id, args,
@@ -3850,6 +3864,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                 dynamic_plan = dynamic_plan_store.create(
                                     team_name, str(args.get("goal") or "团队动态协作")[:4000],
                                     assignments, created_by="lead", status="planned",
+                                    max_total_tokens=args.get("max_total_tokens"),
                                 )
                                 tool_result = {
                                     "plan": dynamic_plan,
@@ -3947,6 +3962,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                         "member_name": task["member_name"],
                                         "prompt": task["prompt"],
                                         "description": task["title"],
+                                        "profile": task.get("profile", {}).get("key", "inherit"),
                                     } for task in dynamic_tasks]
                                 elif review_plan_id:
                                     review_ids = args.get("review_task_ids") or []
@@ -3959,6 +3975,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                     assignments = [{
                                         "task_id": task["id"], "member_name": task["member_name"], "prompt": task["prompt"],
                                         "description": task["title"], "depends_on": task.get("depends_on") or [],
+                                        "profile": task.get("profile", {}).get("key", "inherit"),
                                     } for task in dynamic_tasks]
                                 elif plan_id:
                                     planned_plan = dynamic_plan_store.get(plan_id)
@@ -3972,6 +3989,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                         "prompt": task["prompt"],
                                         "description": task["title"],
                                         "depends_on": task.get("depends_on") or [],
+                                        "profile": task.get("profile", {}).get("key", "inherit"),
                                     } for task in dynamic_tasks]
                                 else:
                                     if not assignments:
@@ -3979,6 +3997,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                     dynamic_goal = str(args.get("goal") or "团队动态协作")[:4000]
                                     dynamic_plan = dynamic_plan_store.create(
                                         team_name, dynamic_goal, assignments, created_by="lead",
+                                        max_total_tokens=args.get("max_total_tokens"),
                                     )
                                     dynamic_tasks = list(dynamic_plan["tasks"])
 
@@ -4026,6 +4045,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                             "member": member,
                                             "prompt": assignment_prompt,
                                             "description": str(assignment.get("description", ""))[:500],
+                                            "profile": dict(dynamic_tasks[assignment_index].get("profile") or {}),
                                             "inbox_context": "",
                                             "consumed_messages": 0,
                                         })
@@ -4049,13 +4069,23 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                 def _run_prepared_delegate(item: dict) -> tuple[dict, dict]:
                                     description = str(item.get("description") or "")
                                     task_max_tokens = 2500 if any(marker in description for marker in ("报告", "可视化", "report", "visual")) else result_max_tokens
+                                    profile = item.get("profile") or {}
+                                    profile_output_limit = profile.get("max_output_tokens")
+                                    if profile_output_limit is not None:
+                                        task_max_tokens = min(task_max_tokens, int(profile_output_limit))
+                                    profile_tool_limit = profile.get("max_tool_calls")
+                                    task_max_tool_calls = self.TEAM_MEMBER_MAX_TOOL_CALLS
+                                    if profile_tool_limit is not None:
+                                        task_max_tool_calls = min(task_max_tool_calls, int(profile_tool_limit))
+                                    profile_tools = profile.get("allowed_tools")
                                     delegated = self._run_delegated_llm(
                                         member=item["member"],
                                         prompt=item["prompt"] + "\n\n交付必须完整结束；如表格过长，请压缩行数并给出完整结论，不能在表格或句子中截断。",
                                         inbox_context=item["inbox_context"],
                                         timeout_seconds=timeout_seconds,
                                         max_tokens=task_max_tokens,
-                                        max_tool_calls=self.TEAM_MEMBER_MAX_TOOL_CALLS,
+                                        max_tool_calls=task_max_tool_calls,
+                                        allowed_tools=frozenset(profile_tools) if profile_tools is not None else None,
                                     )
                                     return item, delegated
 
@@ -4069,6 +4099,40 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                 executor = ThreadPoolExecutor(max_workers=max_workers)
                                 try:
                                     while remaining:
+                                        budget_state = dynamic_plan_store.check_token_budget(
+                                            dynamic_plan["id"],
+                                        )
+                                        if budget_state.get("warning_new"):
+                                            yield {
+                                                "type": "team_event",
+                                                "event": "dynamic_plan_token_budget_warning",
+                                                "team": team_name,
+                                                "plan_id": dynamic_plan["id"],
+                                                "used_tokens": budget_state["used_tokens"],
+                                                "max_total_tokens": budget_state["max_total_tokens"],
+                                                "usage_ratio": budget_state["usage_ratio"],
+                                            }
+                                        if budget_state.get("exhausted"):
+                                            dynamic_plan, canceled_task_ids = (
+                                                dynamic_plan_store.cancel_pending_for_token_budget(
+                                                    dynamic_plan["id"],
+                                                )
+                                            )
+                                            if canceled_task_ids:
+                                                remaining = [
+                                                    item for item in remaining
+                                                    if item["task_id"] not in set(canceled_task_ids)
+                                                ]
+                                                yield {
+                                                    "type": "team_event",
+                                                    "event": "dynamic_plan_token_budget_exceeded",
+                                                    "team": team_name,
+                                                    "plan": dynamic_plan,
+                                                    "canceled_task_ids": canceled_task_ids,
+                                                    "used_tokens": budget_state["used_tokens"],
+                                                    "max_total_tokens": budget_state["max_total_tokens"],
+                                                }
+                                                break
                                         blocked = [
                                             item for item in remaining
                                             if set(item["depends_on"]) & failed_task_ids
@@ -4203,6 +4267,11 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                                         "status": "failed", "error": content,
                                                         "result": "", "consumed_messages": item["consumed_messages"],
                                                     })
+                                                    dynamic_plan_store.task(
+                                                        dynamic_plan["id"], task_id, "failed",
+                                                        error=content, tool_events=tool_events,
+                                                        usage=task_usage,
+                                                    )
                                                     failed_task_ids.add(task_id)
                                                     yield {
                                                         "type": "team_event", "event": "member_failed",
@@ -4226,6 +4295,11 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                                         "_dynamic_usage": task_usage,
                                                         "consumed_messages": item["consumed_messages"],
                                                     })
+                                                    dynamic_plan_store.task(
+                                                        dynamic_plan["id"], task_id, "failed",
+                                                        result=content, error=invalid_reason,
+                                                        tool_events=tool_events, usage=task_usage,
+                                                    )
                                                     failed_task_ids.add(task_id)
                                                     yield {
                                                         "type": "team_event", "event": "member_failed",
@@ -4245,6 +4319,11 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                                     "_dynamic_usage": task_usage,
                                                     "consumed_messages": item["consumed_messages"],
                                                 })
+                                                dynamic_plan_store.task(
+                                                    dynamic_plan["id"], task_id, "completed",
+                                                    result=content, tool_events=tool_events,
+                                                    usage=task_usage,
+                                                )
                                                 succeeded_task_ids.add(task_id)
                                                 yield {
                                                     "type": "team_event", "event": "member_idle",
@@ -4266,6 +4345,10 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                                     "status": "failed", "error": reason, "result": "",
                                                     "consumed_messages": item["consumed_messages"],
                                                 })
+                                                dynamic_plan_store.task(
+                                                    dynamic_plan["id"], item["task_id"], "failed",
+                                                    error=reason,
+                                                )
                                                 failed_task_ids.add(item["task_id"])
                                                 yield {
                                                     "type": "team_event", "event": "member_failed",
@@ -4274,6 +4357,17 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                                 }
                                 finally:
                                     executor.shutdown(wait=False, cancel_futures=True)
+                                budget_state = dynamic_plan_store.check_token_budget(dynamic_plan["id"])
+                                if budget_state.get("warning_new"):
+                                    yield {
+                                        "type": "team_event",
+                                        "event": "dynamic_plan_token_budget_warning",
+                                        "team": team_name,
+                                        "plan_id": dynamic_plan["id"],
+                                        "used_tokens": budget_state["used_tokens"],
+                                        "max_total_tokens": budget_state["max_total_tokens"],
+                                        "usage_ratio": budget_state["usage_ratio"],
+                                    }
                                 if results:
                                     review_input = {
                                         "team": team_name,
@@ -4337,6 +4431,17 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                         dynamic_plan_store.record_quality_review_usage(
                                             dynamic_plan["id"], review_delegated.get("usage", {}),
                                         )
+                                        budget_state = dynamic_plan_store.check_token_budget(dynamic_plan["id"])
+                                        if budget_state.get("warning_new"):
+                                            yield {
+                                                "type": "team_event",
+                                                "event": "dynamic_plan_token_budget_warning",
+                                                "team": team_name,
+                                                "plan_id": dynamic_plan["id"],
+                                                "used_tokens": budget_state["used_tokens"],
+                                                "max_total_tokens": budget_state["max_total_tokens"],
+                                                "usage_ratio": budget_state["usage_ratio"],
+                                            }
                                         review_blocking_reason = (
                                             _delegated_result_invalid_reason(
                                                 review_content,
@@ -4406,6 +4511,12 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                         if task_job_id and self._job_runner is not None:
                                             self._job_runner.cancel_tracked(task_job_id)
                                         continue
+                                    stored_task = next(
+                                        task for task in dynamic_plan_store.get(dynamic_plan["id"])["tasks"]
+                                        if task["id"] == dynamic_task["id"]
+                                    )
+                                    if stored_task.get("status") == "canceled":
+                                        continue
                                     matched = results_by_task.get(dynamic_task["id"], {})
                                     task_succeeded = matched.get("status") == "idle"
                                     task_artifacts = []
@@ -4427,7 +4538,6 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                         tool_events=matched.get("_dynamic_tool_events"),
                                         job_id=task_job_id,
                                         artifacts=task_artifacts,
-                                        usage=matched.get("_dynamic_usage"),
                                     )
                                     if task_succeeded and task_job_id and self._job_runner is not None:
                                         self._job_runner.append_tracked_event(task_job_id, {
@@ -4826,6 +4936,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                         "elapsed_seconds": envelope.debug.get("elapsed_seconds"),
                         "args_preview": envelope.debug.get("args_preview", {}),
                         "validation": _audit_validation,
+                        "mcp_summary_contract": envelope.debug.get("mcp_summary_contract"),
                         "recovery": {
                             "sql": str(args.get("sql", ""))[:4000]
                             if name in {"query_data", "create_analysis_table"} else "",

@@ -688,6 +688,14 @@
   margin: -2px 0 0; color: var(--color-text-dim);
   font-size: var(--fs-2xs); line-height: 1.45;
 }
+.workflow-create-budget {
+  display: grid; gap: 7px; padding: 8px; border: 1px solid var(--color-border-soft);
+  border-radius: var(--radius-sm); background: var(--color-surface-2);
+}
+.workflow-create-budget > summary {
+  cursor: pointer; color: var(--color-text-soft); font-size: var(--fs-2xs); font-weight: 750;
+}
+.workflow-create-budget[open] > summary { color: var(--color-text); }
 .workflow-create-actions {
   display: flex; justify-content: flex-start; align-items: center; gap: 8px;
 }
@@ -854,6 +862,35 @@
 .workflow-run-summary {
   display: flex; flex-wrap: wrap; gap: 8px 12px; padding-bottom: 10px;
   border-bottom: 1px solid var(--color-border);
+}
+.workflow-run-costs {
+  display: grid; gap: 9px; padding: 11px 12px; border: 1px solid var(--color-border);
+  border-radius: var(--radius-md); background: var(--color-surface-2);
+}
+.workflow-run-costs-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.workflow-run-costs-head > div { display: grid; gap: 2px; min-width: 0; }
+.workflow-run-costs-head strong { color: var(--color-text); font-size: var(--fs-sm); }
+.workflow-run-costs-head span, .workflow-run-cost-empty { color: var(--color-text-dim); font-size: var(--fs-2xs); }
+.workflow-run-costs-head > span { font-size: var(--fs-xs); font-weight: 750; font-variant-numeric: tabular-nums; }
+.workflow-run-costs-head > span.good { color: var(--color-success-text); }
+.workflow-run-costs-head > span.warn { color: var(--color-warn-text); }
+.workflow-run-cost-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(112px, 1fr)); gap: 7px; }
+.workflow-run-cost-grid > div {
+  display: grid; gap: 3px; min-width: 0; padding: 7px 8px; background: var(--color-surface);
+  border: 1px solid var(--color-border-soft); border-radius: var(--radius-sm);
+}
+.workflow-run-cost-grid span { color: var(--color-text-dim); font-size: var(--fs-2xs); }
+.workflow-run-cost-grid strong { color: var(--color-text); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
+.workflow-run-cost-events { color: var(--color-text-soft); font-size: var(--fs-xs); }
+.workflow-run-cost-events summary { cursor: pointer; color: var(--color-text-soft); }
+.workflow-run-cost-events > div { display: grid; gap: 6px; margin-top: 8px; }
+.workflow-run-cost-events > div > div {
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) auto; gap: 8px;
+  align-items: baseline; padding-top: 6px; border-top: 1px solid var(--color-border-soft);
+}
+.workflow-run-cost-events strong { color: var(--color-text); font-size: var(--fs-xs); overflow-wrap: anywhere; }
+.workflow-run-cost-events span, .workflow-run-cost-events small {
+  color: var(--color-text-dim); font-size: var(--fs-2xs); font-variant-numeric: tabular-nums;
 }
 .workflow-final-output {
   display: grid; gap: 0; min-width: 0;
@@ -1214,6 +1251,7 @@
 .workflow-event-summary span { color: var(--color-text-dim); font-size: var(--fs-2xs); line-height: 1.45; overflow-wrap: anywhere; }
 .workflow-event > summary small { flex: 0 0 auto; padding-top: 1px; }
 .workflow-event-succeeded > summary { background: rgba(34, 197, 94, .05); }
+.workflow-event-warning > summary { background: var(--color-warn-soft); }
 .workflow-event-failed > summary { background: var(--color-danger-soft); }
 .workflow-event-audit { margin: 0 10px 10px; border-top: 1px solid var(--color-border); }
 .workflow-event-audit > summary {
@@ -1279,6 +1317,7 @@
   .workflow-metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .workflow-metrics-head, .workflow-metric-version, .workflow-suggestion { align-items: stretch; flex-direction: column; }
   .workflow-suggestion button { align-self: flex-start; }
+  .workflow-run-cost-events > div > div { grid-template-columns: 1fr; gap: 3px; }
   .workflow-dag-map { grid-template-columns: 1fr !important; }
   .workflow-approval-revision, .workflow-approval-field { grid-template-columns: 1fr; }
   .workflow-approval-revision-head { align-items: stretch; flex-direction: column; }

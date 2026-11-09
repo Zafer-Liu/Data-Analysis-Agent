@@ -725,6 +725,30 @@ def get_token_metrics(sid: str):
     })
 
 
+@bp.get("/api/session/<sid>/cost-events")
+def get_cost_events(sid: str):
+    """Return this session's bounded, numeric-only cost audit trail."""
+    allowed, _uid = check_session_ownership(sid)
+    if not allowed:
+        return jsonify({"error": "无权访问此会话", "code": "forbidden"}), 403
+    try:
+        limit = max(1, min(int(request.args.get("limit", "100")), 500))
+    except ValueError:
+        return jsonify({"error": "limit must be an integer", "code": "invalid_request"}), 400
+    try:
+        trend_days = max(1, min(int(request.args.get("trend_days", "90")), 90))
+    except ValueError:
+        return jsonify({"error": "trend_days must be an integer", "code": "invalid_request"}), 400
+    from data.cost_event_store import get_cost_event_store
+    store = get_cost_event_store()
+    return jsonify({
+        "ok": True,
+        "summary": store.summary(session_id=sid),
+        "cache_trends": store.cache_trends(session_id=sid, days=trend_days),
+        "events": store.list_events(session_id=sid, limit=limit),
+    })
+
+
 @bp.post("/api/session/<sid>/clear")
 def clear_history(sid: str):
     allowed, _uid = check_session_ownership(sid)
@@ -1491,6 +1515,31 @@ def chat_stream(sid: str):
                             session_id=sid,
                             model_call_id=str(event.get("model_call_id") or ""),
                         )
+                    # Keep the long-lived accounting ledger numeric-only.  A
+                    # recorder failure must never interrupt the chat stream;
+                    # Session counters above remain the real-time fallback.
+                    try:
+                        from data.cost_event_store import get_cost_event_store
+                        breakdown = event.get("prompt_breakdown")
+                        breakdown = breakdown if isinstance(breakdown, dict) else {}
+                        get_cost_event_store().record(
+                            event_id=str(event.get("usage_event_id") or uuid.uuid4().hex),
+                            occurred_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                            scope_type="session",
+                            scope_id=sid,
+                            workspace_id=fixed_workspace_id,
+                            session_id=sid,
+                            provider=str(breakdown.get("provider") or sess.model_provider or ""),
+                            model=str(breakdown.get("model") or sess.model or ""),
+                            input_tokens=event.get("prompt_tokens", 0),
+                            output_tokens=event.get("completion_tokens", 0),
+                            cached_input_tokens=event.get("cached_input_tokens", 0),
+                            cache_write_tokens=event.get("cache_write_tokens", 0),
+                            latency_ms=event.get("usage_latency_ms"),
+                            attribution=breakdown,
+                        )
+                    except Exception:
+                        log.exception("[cost-events] failed to record session usage sid=%s", sid)
                     cfg = config_manager.get_config(effective_provider)
                     enriched = {
                         **event,

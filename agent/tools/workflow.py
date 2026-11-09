@@ -32,6 +32,29 @@ _TEMPLATE_ALIASES = {
 }
 _CUSTOM_WORKFLOW_SIGNALS = ("自定义", "agent", "角色", "节点", "步骤", "流程", "template", "模板")
 _CUSTOM_ALLOWED_TOOLS = frozenset({"get_schema", "query_data"})
+_ROUTE_BUDGETS = {
+    "S": {
+        "recommended_execution": "single_agent_loop",
+        "max_total_tokens": 12000,
+        "max_tool_calls": 12,
+        "max_run_minutes": 10,
+        "max_parallel_tasks": 1,
+    },
+    "M": {
+        "recommended_execution": "consider_team_or_workflow",
+        "max_total_tokens": 48000,
+        "max_tool_calls": 50,
+        "max_run_minutes": 30,
+        "max_parallel_tasks": 4,
+    },
+    "L": {
+        "recommended_execution": "explicit_workflow",
+        "max_total_tokens": 120000,
+        "max_tool_calls": 120,
+        "max_run_minutes": 90,
+        "max_parallel_tasks": 6,
+    },
+}
 
 
 def classify_workflow_request(message: str) -> dict[str, Any]:
@@ -44,12 +67,21 @@ def classify_workflow_request(message: str) -> dict[str, Any]:
     lowered = text.lower()
     reasons = [signal for signal in _WORKFLOW_COMPLEXITY_SIGNALS if signal in lowered or signal in text]
     explicit = "workflow" in lowered or "工作流" in text
-    recommended = explicit or len(reasons) >= 2
+    complexity = "L" if explicit or len(reasons) >= 2 else "M" if reasons else "S"
+    budget = dict(_ROUTE_BUDGETS[complexity])
+    recommended = complexity == "L"
     return {
         "route": "workflow" if recommended else "loop",
+        "complexity": complexity,
         "explicit_workflow": explicit,
         "reasons": reasons[:5],
         "auto_create": False,
+        "recommendation": {
+            "execution": budget.pop("recommended_execution"),
+            "budget": budget,
+            "budget_is_advisory": True,
+            "requires_explicit_creation": complexity == "L",
+        },
     }
 
 
@@ -317,6 +349,7 @@ def workflow_create(
     source_key = str(source_key or "source_snapshot").strip() or "source_snapshot"
     workflow_name = str(name or "经营分析 Workflow").strip() or "经营分析 Workflow"
     workflow_description = str(description or "").strip() or f"{mode} 模式的 {template} Workflow 模板"
+    routing_advice = classify_workflow_request(f"{workflow_name}\n{workflow_description}")
     suffix = f"{int(time.time() * 1000):x}"
     specs = [
         ("inspect", "数据检查员", "data_inspector", "识别数据表、字段质量和可用指标范围，直接输出一份非空的 data_quality_report。报告必须包含“数据质量”和“可用指标范围”两节；可使用 Markdown。", ["get_schema", "query_data"]),
@@ -381,6 +414,7 @@ def workflow_create(
         "validation": validation,
         "profile_ids": profile_ids,
         "feature_flags": workflow_feature_flags(),
+        "routing_advice": routing_advice,
         "next_actions": [
             "Use workflow_start with workflow_id or version_id to run it.",
             "Open the Teams panel Workflow tab to inspect the DAG, approvals, and materials.",
@@ -433,6 +467,8 @@ def workflow_create_custom(
     mode = _workflow_mode(mode)
     source_key = str(source_key or "source_snapshot").strip() or "source_snapshot"
     workflow_name = str(name or "自定义 Agent Workflow").strip() or "自定义 Agent Workflow"
+    workflow_description = str(description or "").strip() or "通过对话定义的自定义 Agent Workflow"
+    routing_advice = classify_workflow_request(f"{workflow_name}\n{workflow_description}")
     normalized_agents = _normalize_custom_agents(agents)
     agent_index_by_name = {agent["name"]: index for index, agent in enumerate(normalized_agents)}
     suffix = f"{int(time.time() * 1000):x}"
@@ -465,7 +501,7 @@ def workflow_create_custom(
         }
         workflow = service.create_workflow(
             name=workflow_name,
-            description=str(description or "").strip() or "通过对话定义的自定义 Agent Workflow",
+            description=workflow_description,
             graph=graph,
             input_schema={"type": "object", "properties": {
                 source_key: {"type": "string", "title": "数据来源或范围", "description": "例如：当前工作区数据、2026 年 7 月销售表"},
@@ -476,7 +512,7 @@ def workflow_create_custom(
         )
         validation = service.validate_draft(workflow["id"])
         published = service.publish(workflow["id"], published_by="conversation")
-    return {"workflow": {"id": workflow["id"], "name": workflow["name"], "description": workflow["description"], "mode": mode, "template": "custom", "source_key": source_key, "output_key": "workflow_result"}, "version": published["version"], "validation": validation, "profile_ids": profile_ids, "next_actions": ["Use workflow_start with workflow_id or version_id to run it.", "Open the Teams panel Workflow tab to inspect the generated Agent DAG."]}
+    return {"workflow": {"id": workflow["id"], "name": workflow["name"], "description": workflow["description"], "mode": mode, "template": "custom", "source_key": source_key, "output_key": "workflow_result"}, "version": published["version"], "validation": validation, "profile_ids": profile_ids, "routing_advice": routing_advice, "next_actions": ["Use workflow_start with workflow_id or version_id to run it.", "Open the Teams panel Workflow tab to inspect the generated Agent DAG."]}
 
 
 def workflow_list(session_id: str) -> dict[str, Any]:
@@ -539,11 +575,18 @@ def workflow_status(session_id: str, run_id: str) -> dict[str, Any]:
     return runtime.scheduler.advance(str(run_id or "").strip())
 
 
+def workflow_recommend(message: str) -> dict[str, Any]:
+    """Return a no-side-effect S/M/L execution recommendation."""
+    return classify_workflow_request(str(message or ""))
+
+
 def execute_workflow_tool(
     name: str,
     session_id: str,
     args: Mapping[str, Any],
 ) -> dict[str, Any]:
+    if name == "workflow_recommend":
+        return workflow_recommend(str(args.get("message") or args.get("goal") or ""))
     if name == "workflow_create":
         return workflow_create(
             session_id,

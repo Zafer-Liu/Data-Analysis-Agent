@@ -39,6 +39,7 @@ import { createTeamViews } from "./teams/team-views.js";
     runs: [],
     selectedRun: "",
     runDetail: null,
+    runCosts: null,
     workflowInputs: {},
     workflowInputSavedAt: {},
     workflowInputAdvanced: {},
@@ -65,6 +66,7 @@ import { createTeamViews } from "./teams/team-views.js";
       description: "自动检查数据、分析关键指标、复核发现并生成报告。",
       mode: "full_auto",
       sourceKey: "source_snapshot",
+      maxTotalTokens: "",
       template: "analysis",
       customAgents: [
         {
@@ -94,6 +96,7 @@ import { createTeamViews } from "./teams/team-views.js";
   const fetchWorkflowRuns = (...a) => api.fetchWorkflowRuns(...a);
   const fetchWorkflowMetrics = (...a) => api.fetchWorkflowMetrics(...a);
   const fetchWorkflowRun = (...a) => api.fetchWorkflowRun(...a);
+  const fetchWorkflowRunCosts = (...a) => api.fetchWorkflowRunCosts(...a);
 
   const wActions = createWorkflowActions({ local, state, api, renderPanel, refreshWorkflows });
   const decideWorkflowApproval = (...a) => wActions.decideWorkflowApproval(...a);
@@ -191,10 +194,16 @@ import { createTeamViews } from "./teams/team-views.js";
   async function selectWorkflowRun(runId) {
     if (!runId) return;
     local.selectedRun = runId;
+    local.runCosts = null;
     local.workflowsError = "";
     renderPanel();
     try {
-      local.runDetail = await fetchWorkflowRun(runId);
+      const [detail, costs] = await Promise.all([
+        fetchWorkflowRun(runId),
+        fetchWorkflowRunCosts(runId),
+      ]);
+      local.runDetail = detail;
+      local.runCosts = costs;
     } catch (error) {
       local.workflowsError = String(error.message || error);
     }
@@ -222,7 +231,17 @@ import { createTeamViews } from "./teams/team-views.js";
       if (!options.keepSelection || !local.runs.some(run => run.id === local.selectedRun)) {
         local.selectedRun = local.runs[0]?.id || "";
       }
-      local.runDetail = local.selectedRun ? await fetchWorkflowRun(local.selectedRun) : null;
+      if (local.selectedRun) {
+        const [detail, costs] = await Promise.all([
+          fetchWorkflowRun(local.selectedRun),
+          fetchWorkflowRunCosts(local.selectedRun),
+        ]);
+        local.runDetail = detail;
+        local.runCosts = costs;
+      } else {
+        local.runDetail = null;
+        local.runCosts = null;
+      }
       local.workflowsError = "";
     } catch (error) {
       local.workflowsError = String(error.message || error);

@@ -51,6 +51,10 @@ export function createWorkflowActions(ctx) {
   function normalizedWorkflowCreate() {
     const form = local.workflowCreate || {};
     const sourceKey = String(form.sourceKey || "source_snapshot").trim() || "source_snapshot";
+    const rawMaxTotalTokens = String(form.maxTotalTokens ?? "").trim();
+    const parsedMaxTotalTokens = /^\d+$/.test(rawMaxTotalTokens)
+      ? Number(rawMaxTotalTokens)
+      : Number.NaN;
     return {
       name: String(form.name || "经营分析 Workflow").trim() || "经营分析 Workflow",
       description: String(form.description || "").trim(),
@@ -58,6 +62,11 @@ export function createWorkflowActions(ctx) {
         ? form.mode
         : "full_auto",
       sourceKey,
+      maxTotalTokens: Number.isInteger(parsedMaxTotalTokens)
+        && parsedMaxTotalTokens >= 1000
+        && parsedMaxTotalTokens <= 1000000
+        ? parsedMaxTotalTokens
+        : null,
       template: Object.prototype.hasOwnProperty.call(WORKFLOW_TEMPLATES, form.template)
         ? form.template
         : "analysis",
@@ -468,6 +477,9 @@ export function createWorkflowActions(ctx) {
       const template = form.creationMode === "custom"
         ? buildCustomWorkflow(profileIds, form, customAgents)
         : buildWorkflowTemplate(profileIds, form);
+      if (form.maxTotalTokens) {
+        template.graph.limits.max_total_tokens = form.maxTotalTokens;
+      }
       const workflow = await createWorkflowDraft({
         name: form.name,
         description: form.description || (form.creationMode === "custom"
