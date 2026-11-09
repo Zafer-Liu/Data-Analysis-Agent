@@ -2697,7 +2697,13 @@ details.tool-audit {
     overflow: visible;
   }
 
-  .sb-drawer {
+  /* The skills / knowledge / MCP panels (.sb-panel) share the drawer's
+     overlay model here.  Left in-flow, they overflow the fixed-width hub and
+     paint beneath .chat-header and positioned message content.  Their
+     background is translucent, so blur what floats beneath it; otherwise the
+     chat text shows through and reads as overlapping the panel. */
+  .sb-drawer,
+  .sb-panel {
     position: fixed;
     z-index: 60;
     top: 0;
@@ -2706,9 +2712,12 @@ details.tool-audit {
     width: min(340px, calc(100vw - var(--workspace-sidebar) - 16px));
     min-width: 0;
     box-shadow: 16px 0 42px rgba(0, 0, 0, .28);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
   }
 
-  .sb-drawer.collapsed {
+  .sb-drawer.collapsed,
+  .sb-panel.collapsed {
     width: min(340px, calc(100vw - var(--workspace-sidebar) - 16px));
     min-width: 0;
     transform: translateX(calc(-100% - 14px));
@@ -2781,12 +2790,14 @@ details.tool-audit {
     padding: 4px;
   }
 
-  .sb-drawer {
+  .sb-drawer,
+  .sb-panel {
     left: var(--workspace-rail);
     width: min(340px, calc(100vw - var(--workspace-rail) - 12px));
   }
 
-  .sb-drawer.collapsed {
+  .sb-drawer.collapsed,
+  .sb-panel.collapsed {
     width: min(340px, calc(100vw - var(--workspace-rail) - 12px));
   }
 
