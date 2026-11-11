@@ -298,6 +298,8 @@ Download the latest version from [GitHub Releases](https://github.com/Zafer-Liu/
 
 Run the installer and follow the setup wizard. After installation, launch **Business Analytics Agent** from the desktop or Start Menu.
 
+Desktop packages built from the current source open in local mode without a platform account. Configure your own model API key in Settings. Existing published installers are unchanged until a new release is built; v1.5.0 still depends on the retired cloud login service.
+
 ---
 
 ### Option 2: Download the ZIP (Recommended for Beginners, Cross-Platform)
@@ -504,7 +506,7 @@ This is especially useful when you frequently demonstrate, debug, or run multipl
 
 The public source now includes the existing private-edition features: the read-only administration console, desktop cloud authentication and model gateways, referral and quota ledgers, browser/table ingestion, browser-local persistence, PyTorch GRU/LSTM, chart themes and PNG export, in-memory SQL transformations and numeric provenance checks, canvas save recovery, Skill tags, and SSE reliability improvements.
 
-Running `python app.py` directly still requires no cloud login. Hosted and desktop services require their corresponding configuration. See the [sync inventory](./docs/feature-sync-1.4.md) and [hosted configuration](./docs/hosted-configuration.md).
+Direct `python app.py` launches and default desktop packages require no cloud login and use your own model configuration. Hosted services retain account authentication; desktop cloud authentication is enabled only by an explicitly configured `BAA_CLOUD_AUTH_URL`. See the [sync inventory](./docs/feature-sync-1.4.md) and [hosted configuration](./docs/hosted-configuration.md).
 
 ### Local models and services (source update)
 

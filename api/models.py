@@ -54,10 +54,10 @@ def hosted_model_catalog():
         _cloud_proxy,
         _resolve_token_user,
         current_user,
-        is_desktop_client,
+        is_desktop_cloud_client,
     )
 
-    if is_desktop_client():
+    if is_desktop_cloud_client():
         payload, status = _cloud_proxy("GET", "/api/models/catalog", None)
         if status == 200 and isinstance(payload, dict):
             from data.auth_store import get_desktop_token

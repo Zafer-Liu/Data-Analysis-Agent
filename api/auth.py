@@ -3,9 +3,9 @@
 Three run modes govern behaviour (see :func:`run_mode`):
 
 * ``cloud``   — Railway/Vercel hosted; owns the user DB, SMTP registration, quota.
-* ``desktop`` — PyWebView packaged client; proxies auth to the cloud backend and
-  persists the issued token locally so the user does not re-login on every launch.
-* ``local``   — ``python app.py`` direct launch; no auth, no quota, local-first.
+* ``desktop`` — Explicitly cloud-linked PyWebView client; proxies auth to the
+  configured backend and persists its issued token locally.
+* ``local``   — Direct launch or standalone desktop; no auth, no quota, local-first.
 """
 from __future__ import annotations
 
@@ -190,14 +190,19 @@ def is_desktop_client() -> bool:
 def run_mode() -> str:
     """Classify the current process: ``cloud`` | ``desktop`` | ``local``.
 
-    ``cloud`` and ``desktop`` both require authentication (one owns the user DB,
-    the other proxies to it); ``local`` is the no-auth direct launch.
+    ``cloud`` owns the user DB; ``desktop`` requires an explicitly configured
+    auth backend. Direct launches and standalone desktop clients use ``local``.
     """
     if is_cloud_managed():
         return "cloud"
-    if is_desktop_client():
+    if is_desktop_client() and _cloud_auth_base():
         return "desktop"
     return "local"
+
+
+def is_desktop_cloud_client() -> bool:
+    """True only for a desktop client explicitly linked to an auth backend."""
+    return run_mode() == "desktop"
 
 
 def _cloud_auth_base() -> str:
@@ -263,7 +268,7 @@ def current_user() -> dict | None:
     Cloud mode reads the Flask session; desktop mode reads the persisted local
     token row; local mode has no auth (returns None, callers short-circuit).
     """
-    if is_desktop_client():
+    if is_desktop_cloud_client():
         stored = get_desktop_token()
         if not stored:
             return None
@@ -324,8 +329,8 @@ def _agreement_ctx() -> dict:
 
 @bp.get("/login")
 def login_page():
-    """Serve the login page (cloud or desktop). Redirect to app if already authed."""
-    if not (is_cloud_managed() or is_desktop_client()):
+    """Serve login for cloud-linked modes; standalone/local has no login page."""
+    if run_mode() == "local":
         return ("", 403)
     if current_user():
         return render_template("agent_chat.html",
@@ -346,7 +351,7 @@ def send_verification_code():
     if not email or "@" not in email:
         return jsonify({"error": "请输入有效邮箱"}), 400
 
-    if is_desktop_client():
+    if is_desktop_cloud_client():
         payload, status = _cloud_proxy("POST", "/api/auth/send-code", data)
         return jsonify(payload), status
 
@@ -378,7 +383,7 @@ def register():
     password = data.get("password") or ""
     referral_code = (data.get("ref") or "").strip()
 
-    if is_desktop_client():
+    if is_desktop_cloud_client():
         payload, status = _cloud_proxy("POST", "/api/auth/register", data)
         # The cloud response carries a desktop_token for proxy callers; persist
         # it locally and strip it from the browser-facing response.
@@ -423,7 +428,7 @@ def login():
     email = (data.get("email") or "").strip().lower()
     password = data.get("password") or ""
 
-    if is_desktop_client():
+    if is_desktop_cloud_client():
         payload, status = _cloud_proxy("POST", "/api/auth/login", data)
         # The cloud response carries a desktop_token for proxy callers; persist
         # it locally and strip it from the browser-facing response.
@@ -459,7 +464,7 @@ def send_password_reset_code():
     data = request.get_json(silent=True) or {}
     email = (data.get("email") or "").strip().lower()
 
-    if is_desktop_client():
+    if is_desktop_cloud_client():
         payload, status = _cloud_proxy(
             "POST", "/api/auth/password-reset/send-code", data
         )
@@ -503,7 +508,7 @@ def password_reset():
     code = (data.get("code") or "").strip()
     password = data.get("password") or ""
 
-    if is_desktop_client():
+    if is_desktop_cloud_client():
         payload, status = _cloud_proxy("POST", "/api/auth/password-reset", data)
         if status == 200:
             clear_desktop_token()
@@ -560,7 +565,7 @@ def logout():
     user = current_user()
     if user:
         _audit_auth("logout", True, user_id=user["id"], email=user["email"])
-    if is_desktop_client():
+    if is_desktop_cloud_client():
         clear_desktop_token()
     session.clear()
     return jsonify({"ok": True})
@@ -571,7 +576,7 @@ def me():
     user = current_user()
     if not user:
         return jsonify({"authenticated": False}), 401
-    if is_desktop_client():
+    if is_desktop_cloud_client():
         # Validate the persisted token against the cloud and pull live quota.
         payload, status = _cloud_proxy("GET", "/api/auth/me-by-token", None)
         if status == 200:
@@ -657,7 +662,7 @@ def sponsor_info():
         user = _resolve_token_user()
     if not user:
         return jsonify({"error": "未登录"}), 401
-    if is_desktop_client():
+    if is_desktop_cloud_client():
         payload, status = _cloud_proxy("GET", "/api/auth/sponsor", None)
         return jsonify(payload), status
 
@@ -708,7 +713,7 @@ def sponsor_prompt_shown():
         user = _resolve_token_user()
     if not user:
         return jsonify({"error": "未登录"}), 401
-    if is_desktop_client():
+    if is_desktop_cloud_client():
         payload, status = _cloud_proxy("POST", "/api/auth/sponsor/shown", {})
         return jsonify(payload), status
     return jsonify(mark_sponsor_prompt_shown(user["id"]))
@@ -721,7 +726,7 @@ def referral_code():
         user = _resolve_token_user()
     if not user:
         return jsonify({"error": "未登录"}), 401
-    if is_desktop_client():
+    if is_desktop_cloud_client():
         payload, status = _cloud_proxy("POST", "/api/auth/referral/code", {})
         return jsonify(payload), status
     code = get_or_create_referral_code(user["id"])
@@ -748,7 +753,7 @@ def referral_stats():
         user = _resolve_token_user()
     if not user:
         return jsonify({"error": "未登录"}), 401
-    if is_desktop_client():
+    if is_desktop_cloud_client():
         payload, status = _cloud_proxy("GET", "/api/auth/referral/stats", None)
         return jsonify(payload), status
     return jsonify(get_referral_stats(user["id"]))

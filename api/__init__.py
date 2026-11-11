@@ -91,7 +91,12 @@ def create_app() -> Flask:
         static_folder=str(resource_path("static")),
     )
     _enforce_static_mime(app)
-    from .auth import SECRET_KEY as _AUTH_SECRET, is_cloud_managed as _is_cloud, run_mode as _run_mode
+    from .auth import (
+        SECRET_KEY as _AUTH_SECRET,
+        is_cloud_managed as _is_cloud,
+        is_desktop_client as _is_desktop,
+        run_mode as _run_mode,
+    )
     app.secret_key = _AUTH_SECRET
     app.config.update(
         SESSION_COOKIE_HTTPONLY=True,
@@ -204,7 +209,7 @@ def create_app() -> Flask:
 
     @app.before_request
     def cloud_auth_guard():
-        """Require authentication in cloud *and* desktop modes; local CLI is open."""
+        """Require auth for cloud-linked modes; standalone desktop/local is open."""
         mode = _run_mode()
         if mode == "local":
             return None
@@ -235,7 +240,7 @@ def create_app() -> Flask:
                 return render_template("login.html", quota_limit=__import__("data.auth_store", fromlist=["DAILY_TOKEN_LIMIT"]).DAILY_TOKEN_LIMIT, **_agreement_ctx())
         resp = render_template(
             "agent_chat.html",
-            desktop_lifecycle_enabled=mode == "desktop",
+            desktop_lifecycle_enabled=_is_desktop() and mode != "cloud",
             is_cloud_managed=mode == "cloud",
             run_mode=mode,
         )

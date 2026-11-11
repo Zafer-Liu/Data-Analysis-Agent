@@ -2,8 +2,9 @@
 
 Starts the local Waitress server and hosts the existing web application in a
 native pywebview window (WebView2 on Windows, WKWebView on macOS). A browser
-mode remains available as an explicit fallback for diagnostics. The launcher
-never installs Python dependencies or touches source-checkout uploads/outputs.
+mode remains available as an explicit fallback for diagnostics. Packaged apps
+use local mode unless an operator explicitly configures a cloud auth backend.
+The launcher never installs Python dependencies or touches source-checkout uploads/outputs.
 """
 
 from __future__ import annotations
@@ -28,7 +29,6 @@ from urllib.parse import urljoin, urlsplit
 log = logging.getLogger("desktop_launcher")
 SERVICE_ID = "business-analytics-agent"
 APP_TITLE = "Business Analytics Agent"
-DEFAULT_CLOUD_AUTH_URL = "https://app.sage-agent.online"
 
 _DESKTOP_BRIDGE_SCRIPT = r"""
 (function () {
@@ -68,12 +68,6 @@ def _normalize_windows_environment() -> None:
     """Supply a standard Windows variable omitted by some CI launch shells."""
     if os.name == "nt" and not os.environ.get("WINDIR"):
         os.environ["WINDIR"] = os.environ.get("SystemRoot", r"C:\Windows")
-
-
-def _configure_cloud_auth_url() -> None:
-    """Set the packaged client's cloud auth endpoint unless explicitly overridden."""
-    configured = (os.environ.get("BAA_CLOUD_AUTH_URL") or "").strip().rstrip("/")
-    os.environ["BAA_CLOUD_AUTH_URL"] = configured or DEFAULT_CLOUD_AUTH_URL
 
 
 def _health_url(host: str, port: int) -> str:
@@ -262,7 +256,6 @@ def _monitor_desktop_clients(registry, shutdown_event, close_server) -> None:
 def main() -> int:
     multiprocessing.freeze_support()
     _normalize_windows_environment()
-    _configure_cloud_auth_url()
     if not getattr(sys, "frozen", False):
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
