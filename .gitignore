@@ -161,6 +161,8 @@ scripts/*
 !scripts/clean-chat-chunks.mjs
 !scripts/verify-chat-bundle.mjs
 !scripts/generate_tool_inventory.py
+# Public version updater used by the root double-click launcher.
+!scripts/update-frontend-version.ps1
 # Untracked assets
 Information/assets/LOGO.png
 
@@ -181,3 +183,4 @@ business_canvas/*.sqlite-journal
 /.zvec-grep
 /docs
 /tests
+更新前端版本号.bat

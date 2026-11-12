@@ -28,8 +28,8 @@ _directory_picker_lock = threading.Lock()
 # Project root: api/system.py → api/ → project root
 PROJECT_ROOT = resource_root()
 
-# ── Current version (keep in sync with templates/agent_chat.html footer) ──
-CURRENT_VERSION = "v1.4.0"
+# ── Current version (updated by scripts/update-frontend-version.ps1) ──
+CURRENT_VERSION = "v1.5.2"
 
 # ── GitHub Releases API ──
 GITHUB_OWNER = "Zafer-Liu"

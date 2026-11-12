@@ -4,11 +4,11 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Dashboard</title>
-<script src="{{ url_for('static', filename='js/theme_bootstrap.js', v='fe1') }}"></script>
-<link rel="stylesheet" href="{{ url_for('static', filename='css/parts/tokens.css', v='v1.4.0-polish-2') }}">
+<script src="{{ url_for('static', filename='js/theme_bootstrap.js', v='v1.5.2') }}"></script>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/parts/tokens.css', v='v1.5.2') }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='vendor/gridstack.min.css') }}">
-<link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css', v='v1.4.0-motion-1') }}">
-<script defer src="{{ url_for('static', filename='js/modules/desktop_lifecycle.js', v='desktop-lease-1') }}"></script>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css', v='v1.5.2') }}">
+<script defer src="{{ url_for('static', filename='js/modules/desktop_lifecycle.js', v='v1.5.2') }}"></script>
 </head>
 <body>
 
@@ -83,7 +83,7 @@
 <div class="db-toast" id="db-toast"></div>
 
 <script src="{{ url_for('static', filename='vendor/gridstack-all.js') }}"></script>
-<script src="{{ url_for('static', filename='js/dashboard.js', v='v1.4.0-motion-1') }}"></script>
+<script src="{{ url_for('static', filename='js/dashboard.js', v='v1.5.2') }}"></script>
 <!-- dashboard 页面为纯原生 JS，无 Vue island；vite 入口（仅注入 BAA.api）
      在 dashboard 上无消费者，故不引用。chat 页面才有 Vue island。
      <script type="module" src="{{ url_for('static', filename='dist/dashboard.js') }}"></script>

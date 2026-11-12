@@ -5,10 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>智析Agent</title>
 <link rel="icon" href="{{ url_for('static', filename='Images/icon.png') }}">
-<script src="{{ url_for('static', filename='js/theme_bootstrap.js', v='fe1') }}"></script>
-<link rel="stylesheet" href="{{ url_for('static', filename='css/agent_chat.css', v='v1.4.0-motion-3') }}">
+<script src="{{ url_for('static', filename='js/theme_bootstrap.js', v='v1.5.2') }}"></script>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/agent_chat.css', v='v1.5.2') }}">
 {% if desktop_lifecycle_enabled %}
-<script defer src="{{ url_for('static', filename='js/modules/desktop_lifecycle.js', v='desktop-lease-1') }}"></script>
+<script defer src="{{ url_for('static', filename='js/modules/desktop_lifecycle.js', v='v1.5.2') }}"></script>
 {% endif %}
 {% if is_cloud_managed %}
 <style>
@@ -22,9 +22,9 @@
   .cloud-banner-close:hover{background:rgba(102,77,3,.3)}
   .cloud-banner.hidden{display:none}
 </style>
-<script defer src="{{ url_for('static', filename='js/modules/cloud_banner.js', v='cloud-banner-1') }}"></script>
+<script defer src="{{ url_for('static', filename='js/modules/cloud_banner.js', v='v1.5.2') }}"></script>
 {% endif %}
-<script defer src="{{ url_for('static', filename='js/modules/account_menu.js', v='account-menu-10') }}"></script>
+<script defer src="{{ url_for('static', filename='js/modules/account_menu.js', v='v1.5.2') }}"></script>
 </head>
 <body data-cloud-managed="{{ '1' if is_cloud_managed else '0' }}" data-run-mode="{{ run_mode }}">
 <div class="layout">
@@ -120,7 +120,7 @@
               title="为当前对话临时设定一段补充指令" aria-hidden="true" tabindex="-1"></button>
 
       <footer class="sb-footer">
-        <div class="sb-footer-meta" style="font-size:var(--fs-xs);font-weight:600;color:var(--color-sidebar-fg);opacity:.85">v1.4.0 LTS · <a href="https://www.zaferliu.me" target="_blank" rel="noopener noreferrer" style="color:#a78bfa;text-decoration:none;font-weight:700;font-size:calc(var(--fs-xs) * 1.05)">@Zafer_Liu</a></div>
+        <div class="sb-footer-meta" style="font-size:var(--fs-xs);font-weight:600;color:var(--color-sidebar-fg);opacity:.85">v1.5.2 LTS · <a href="https://www.zaferliu.me" target="_blank" rel="noopener noreferrer" style="color:#a78bfa;text-decoration:none;font-weight:700;font-size:calc(var(--fs-xs) * 1.05)">@Zafer_Liu</a></div>
         {% if is_cloud_managed or run_mode == 'desktop' %}
         <div class="sb-account-wrap">
         <div class="sb-account" id="sb-account" data-action="toggleAccountMenu" role="button" tabindex="0" aria-haspopup="true" aria-expanded="false">
@@ -1670,6 +1670,6 @@
 <script src="{{ url_for('static', filename='vendor/vue.global.prod.js') }}"></script>
 
 <!-- ── ES module entry; non-critical UI islands load from dist/chunks on demand ── -->
-<script type="module" src="{{ url_for('static', filename='dist/chat-app.js', v='local-service-draft-2') }}"></script>
+<script type="module" src="{{ url_for('static', filename='dist/chat-app.js', v='v1.5.2') }}"></script>
 </body>
 </html>
