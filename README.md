@@ -64,7 +64,7 @@ Mozhenzhen — a consumer anti-pitfall guide for developers and AI enthusiasts. 
 
 ### ☁️ Sponsored by Infistar
 
-<p align="center"><a href="https://www.infistar.cc/register?aff=U2DQQJPT&ref_source=link"><img src="./Information/assets/Infistar.png" alt="Infistar logo" height="80" /></a></p>
+<p align="center"><a href="https://www.infistar.cc/register?aff=U2DQQJPT&ref_source=link"><img src="./Information/assets/InfistarEN.png" alt="Infistar banner" height="160" /></a></p>
 
 Thank you to Infistar.cc for sponsoring Data-Analysis-Agent! It provides stable and efficient multi-model API services that fit perfectly into data cleaning, code generation, chart plotting and automated analysis report workflows.
 
