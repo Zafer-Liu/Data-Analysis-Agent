@@ -1,4 +1,5 @@
 import { registerUiIsland } from "../../core/ui-registry.js";
+import { computeText, executionStateLabel, openComputeDataPanel } from "../compute-data.js";
 
 // Durable Job history panel (B5), mounted on first use.
 export function mountJobHistoryUi() {
@@ -59,7 +60,13 @@ export function mountJobHistoryUi() {
       createdAt: job.created_at || "",
       updatedAt: job.updated_at || "",
       finishedAt: job.finished_at || "",
-      cancelPending: false,
+      executionBackend: job.execution_backend || job.result?.execution_backend || "local",
+      externalId: job.external_id || job.remote_task_id || "",
+      runId: job.run_id || job.recovery_metadata?.run_id || job.result?.run_id || "",
+      recoveryPhase: job.recovery_phase || "",
+      exitAcknowledged: job.exit_acknowledged ?? job.recovery_metadata?.exit_acknowledged ?? null,
+      cancelRequested: Boolean(job.cancel_requested || job.cancel_pending),
+      cancelPending: Boolean(job.cancel_requested || job.cancel_pending || job.status === "canceling"),
       expanded: Boolean(job.expanded),
     };
   }
@@ -102,6 +109,12 @@ export function mountJobHistoryUi() {
     if (ev.job_type) job.type = ev.job_type;
     if (ev.label) job.label = ev.label;
     if (ev.status) job.status = ev.status;
+    if (ev.execution_backend) job.executionBackend = ev.execution_backend;
+    if (ev.external_id) job.externalId = ev.external_id;
+    if (ev.run_id || ev.recovery_metadata?.run_id) job.runId = ev.run_id || ev.recovery_metadata.run_id;
+    if (ev.recovery_phase !== undefined) job.recoveryPhase = ev.recovery_phase || "";
+    if (ev.exit_acknowledged !== undefined || ev.recovery_metadata?.exit_acknowledged !== undefined) job.exitAcknowledged = ev.exit_acknowledged ?? ev.recovery_metadata.exit_acknowledged;
+    if (ev.cancel_requested !== undefined || ev.cancel_pending !== undefined) job.cancelRequested = Boolean(ev.cancel_requested || ev.cancel_pending);
     if (ev.progress !== undefined) job.progress = Number(ev.progress) || 0;
     if (ev.message !== undefined) job.message = ev.message || "";
     if (ev.type === "conversation_activation" && ev.activation) job.activation = ev.activation;
@@ -141,6 +154,7 @@ export function mountJobHistoryUi() {
       job.status = ev.status || "canceled";
       job.cancelPending = false;
     }
+    if (job.executionBackend === "local" && ["job_done", "job_error", "job_canceled"].includes(ev.type)) job.cancelRequested = false;
     sortJobs();
     draw();
     return true;
@@ -178,8 +192,10 @@ export function mountJobHistoryUi() {
   }
 
   function renderJob(job) {
-    const terminal = ["succeeded", "failed", "canceled"].includes(job.status);
-    const canCancel = !terminal && job.status !== "canceling"
+    const executionStatus = executionStateLabel({ status: job.status, recovery_phase: job.recoveryPhase,
+      exit_acknowledged: job.exitAcknowledged, cancel_requested: job.cancelRequested || job.cancelPending });
+    const terminal = ["succeeded", "failed", "canceled", "cancelled", "exited"].includes(executionStatus);
+    const canCancel = !terminal && executionStatus !== "cancel_pending"
       && job.type !== "filehistory_rewind" && job.type !== "memory_extraction";
     const progress = Math.max(0, Math.min(100, Number(job.progress) || 0));
     const title = job.label || job.type || text("job.default_label", "Background job");
@@ -190,8 +206,8 @@ export function mountJobHistoryUi() {
     const children = [
       h("div", { class: "job-history-card-head" }, [
         h("div", { class: "job-history-card-title" }, title),
-        h("span", { class: `job-status job-status-${job.status}` },
-          text(`job.status.${job.status}`, job.status)),
+        h("span", { class: `job-status job-status-${job.status}`, role: "status" },
+          computeText(`status.${executionStatus}`, text(`job.status.${job.status}`, job.status))),
       ]),
       h("div", { class: "job-history-time" }, formatTime(job.createdAt)),
       job.workspaceId ? h("div", {
@@ -207,6 +223,19 @@ export function mountJobHistoryUi() {
         job.message && !isConversation ? h("span", { class: "job-message" }, job.message) : null,
       ]),
     ];
+    if (executionStatus === "cancel_pending" || executionStatus === "recovery_pending") {
+      children.push(h("p", { class: "job-history-summary", role: "status" }, executionStatus === "cancel_pending"
+        ? computeText("cancelPending", "Cancellation requested. Resources remain reserved until the executor confirms exit.")
+        : computeText("recoveryPending", "The remote state is being reconciled. This does not prove the process has stopped.")));
+    }
+    if (job.executionBackend !== "local") {
+      children.push(h("div", { class: "job-card-meta" }, [
+        h("span", null, `${computeText("executionBackend", "Execution backend")}: ${job.executionBackend}`),
+        job.externalId ? h("span", null, `${computeText("nativeReference", "Remote reference")}: ${job.externalId}`) : null,
+      ]));
+      children.push(h("button", { class: "btn-sm btn-sm-ghost", type: "button", onClick: () => openComputeDataPanel("training", job.runId ? { runId: job.runId } : {}) },
+        computeText("remoteTrainingJob", "View remote training")));
+    }
     if (activation?.kind && activation.kind !== "none") {
       const prefix = activation.kind === "skill" ? "分析技能" : activation.kind === "command" ? "命令" : "内部操作";
       children.splice(2, 0, h("div", {
@@ -245,12 +274,16 @@ export function mountJobHistoryUi() {
         disabled: job.cancelPending,
         onClick: async () => {
           if (!callbacks.onCancel || job.cancelPending) return;
+          const previousStatus = job.status;
           job.cancelPending = true;
+          job.cancelRequested = true;
           job.status = "canceling";
           draw();
           try { await callbacks.onCancel(job.id); }
           catch (error) {
             job.cancelPending = false;
+            job.cancelRequested = false;
+            if (job.status === "canceling") job.status = previousStatus;
             job.error = error?.message || text("job.cancel_failed", "Could not cancel job");
             draw();
           }

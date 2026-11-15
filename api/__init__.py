@@ -102,7 +102,13 @@ def create_app() -> Flask:
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
         SESSION_COOKIE_SECURE=bool(_is_cloud()),
+        MAX_CONTENT_LENGTH=8 * 1024 ** 3 + 16 * 1024 ** 2,
     )
+    @app.errorhandler(413)
+    def upload_budget_exceeded(_error):
+        return jsonify({"ok": False, "code": "budget_exceeded",
+                        "error": "上传内容超过服务器请求预算 / Upload exceeds the server request budget"}), 413
+
     local_origins = [
         r"http://localhost(?::\d+)?",
         r"http://127\.0\.0\.1(?::\d+)?",
@@ -111,7 +117,7 @@ def create_app() -> Flask:
     CORS(
         app,
         resources={r"/api/*": {"origins": local_origins}},
-        allow_headers=["Content-Type", "X-Requested-With"],
+        allow_headers=["Content-Type", "X-Requested-With", "A2A-Version"],
         methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     )
 
@@ -145,6 +151,9 @@ def create_app() -> Flask:
     from .forecast         import bp as forecast_bp
     from .local_services   import bp as local_services_bp
     from .feishu_bot       import bp as feishu_bot_bp
+    from .datasets         import bp as datasets_bp
+    from .training         import bp as training_bp
+    from .cluster          import bp as cluster_bp
 
     app.register_blueprint(models_bp)
     app.register_blueprint(datasource_bp)
@@ -174,6 +183,9 @@ def create_app() -> Flask:
     app.register_blueprint(forecast_bp)
     app.register_blueprint(local_services_bp)
     app.register_blueprint(feishu_bot_bp)
+    app.register_blueprint(datasets_bp)
+    app.register_blueprint(training_bp)
+    app.register_blueprint(cluster_bp)
     try:
         from infrastructure.feishu_long_connection import start_long_connection
 
@@ -188,6 +200,11 @@ def create_app() -> Flask:
             resume_enabled()
         except Exception as exc:
             log.warning("[forecast] optional auto-start unavailable: %s", type(exc).__name__)
+        try:
+            from infrastructure.remote_training_recovery import start_remote_reconciliation
+            start_remote_reconciliation(app)
+        except Exception as exc:
+            log.warning("[training] durable reconciliation unavailable: %s", type(exc).__name__)
 
     @app.before_request
     def reject_cross_origin_writes():

@@ -84,9 +84,15 @@ def create_connection(payload: dict[str, Any], *, credential_ref: Optional[str] 
     name = str(payload.get("name") or "").strip()
     if not name or len(name) > 80:
         raise ValueError("name 不能为空且最长 80 个字符")
+    purpose = str(payload.get("purpose") or "inference").strip()
+    if purpose not in {"inference", "training", "both"}:
+        raise ValueError("purpose 必须是 inference、training 或 both")
+    if purpose != "inference" and connection_type != "ssh":
+        raise ValueError("训练连接必须使用 SSH")
     config: dict[str, Any] = {
         "name": name,
         "connection_type": connection_type,
+        "purpose": purpose,
     }
     if connection_type == "direct":
         config["base_url"] = _base_url(payload.get("base_url"))
@@ -95,10 +101,11 @@ def create_connection(payload: dict[str, Any], *, credential_ref: Optional[str] 
             "host": _host(payload.get("host"), "host"),
             "port": _port(payload.get("port", 22), "port"),
             "username": str(payload.get("username") or "").strip(),
-            "target_host": _host(payload.get("target_host", "127.0.0.1"), "target_host"),
-            "target_port": _port(payload.get("target_port"), "target_port"),
             "auth_method": auth_method,
         })
+        if purpose != "training":
+            config["target_host"] = _host(payload.get("target_host", "127.0.0.1"), "target_host")
+            config["target_port"] = _port(payload.get("target_port"), "target_port")
         if not config["username"]:
             raise ValueError("username 不能为空")
         if auth_method == "password":
@@ -124,6 +131,17 @@ def delete_connection(connection_id: str) -> Optional[dict[str, Any]]:
     return {"id": connection_id, **config}
 
 
+def set_host_fingerprint(connection_id: str, value: str) -> None:
+    if not re.fullmatch(r"SHA256:[A-Za-z0-9+/]{43}", value):
+        raise ValueError("Invalid SSH SHA256 fingerprint")
+    data = _read()
+    if connection_id not in data:
+        raise ValueError("Connection not found")
+    data[connection_id]["host_fingerprint"] = value
+    data[connection_id].pop("training_runner", None)
+    _write(data)
+
+
 def set_training_runner_status(connection_id: str, status: dict[str, Any]) -> Optional[dict[str, Any]]:
     """Persist only non-secret, validated M3 preflight metadata."""
     data = _read()
@@ -136,6 +154,13 @@ def set_training_runner_status(connection_id: str, status: dict[str, Any]) -> Op
         "python": str(status.get("python") or "unknown")[:120],
         "cuda": bool(status.get("cuda")),
         "gpu_name": str(status.get("gpu_name") or "")[:160],
+        "runner_instance_id": str(status.get("runner_instance_id") or "")[:160],
+        "host_fingerprint": str(status.get("host_fingerprint") or "")[:160],
+        "expires_at": status.get("expires_at"),
+        "protocol_version": status.get("protocol_version", 1),
+        "families": list(status.get("families") or [])[:10],
+        **{key: str(status.get(key) or "")[:256] for key in
+           ("kernel_version", "device", "gpu_uuid", "torch", "cuda_version", "supervision", "limits")},
     }
     _write(data)
     return {"id": connection_id, **config}

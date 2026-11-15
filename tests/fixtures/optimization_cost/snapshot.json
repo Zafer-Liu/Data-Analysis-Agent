@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "source_id": "synthetic-shop-v1",
+  "orders": [
+    [1, "a", "2026-01-10", 100, "paid"],
+    [2, "b", "2026-01-20", 200, "paid"],
+    [3, "a", "2026-02-10", 150, "paid"],
+    [4, "c", "2026-02-20", 50, "paid"],
+    [5, "d", "2026-02-25", null, "canceled"],
+    [6, "a", "2026-03-10", 120, "paid"]
+  ],
+  "refunds": [
+    [1, 1, 20, "confirmed"],
+    [2, 2, 10, "pending"],
+    [3, 3, 30, "confirmed"],
+    [4, 3, 5, "confirmed"],
+    [5, 4, 50, "confirmed"]
+  ],
+  "documents": [
+    ["refund-policy", "Refund rate counts distinct paid orders with confirmed refunds divided by distinct paid orders in the selected order date window. Null amounts are excluded from revenue."],
+    ["inventory-policy", "Inventory stock counts use warehouse locations and available units."]
+  ],
+  "definition": {
+    "id": "synthetic-shop/refund_rate",
+    "version": "v1",
+    "grain": "order_id",
+    "time_window": ["2026-01-01", "2026-03-01"],
+    "unit": "percent",
+    "numerator": "distinct paid orders with confirmed refunds",
+    "denominator": "distinct paid orders",
+    "deduplication": "order_id",
+    "null_rule": "null amounts excluded from revenue",
+    "refund_attribution": "order_date"
+  },
+  "expected": {
+    "window_gross": 500,
+    "window_refunds": 105,
+    "window_net": 395,
+    "window_paid_orders": 4,
+    "window_refunded_orders": 3,
+    "refund_rate_percent": 75,
+    "all_gross": 620,
+    "null_amount_count": 1
+  }
+}

@@ -415,6 +415,19 @@ class WorkflowScheduler:
         self.run_store.transition_run(run_id, RunStatus.FAILED, failure_code="workflow_token_budget_exceeded", failure_message=f"workflow consumed {used} tokens, at max_total_tokens={limit}")
         return True
 
+    @staticmethod
+    def _verifier_payload(output: Any) -> Mapping[str, Any]:
+        if not isinstance(output, Mapping):
+            return {}
+        if "decision" in output:
+            return output
+        # Single named verification artifacts retain the raw structured review.
+        if len(output) == 1:
+            value = next(iter(output.values()))
+            if isinstance(value, Mapping) and "decision" in value:
+                return value
+        return {}
+
     def _reconcile_jobs(self, run_id: str, graph: Mapping[str, Any]) -> None:
         nodes_by_id = {
             str(node["node_id"]): dict(node)
@@ -476,11 +489,15 @@ class WorkflowScheduler:
                     )
                     continue
                 node_definition = nodes_by_id.get(node_run["node_id"], {})
-                is_verifier_rework = (
-                    node_definition.get("type") == "verifier"
-                    and isinstance(job_result, Mapping)
-                    and job_result.get("decision") == "rework"
-                )
+                verifier_decision = self._verifier_payload(job_result).get("decision")
+                retry_nodes = self._retry_iteration_nodes(graph, str(node_run["node_id"]))
+                is_verifier_rework = node_definition.get("type") == "verifier" and verifier_decision == "rework"
+                can_retry_review = bool(retry_nodes) and int(node_run.get("iteration") or 0) < self._retry_iteration_limit(graph, str(node_run["node_id"]))
+                if node_definition.get("type") == "verifier" and verifier_decision != "pass" and not (
+                    is_verifier_rework and can_retry_review
+                ):
+                    self._open_node_approval(run_id, node_run, mode=mode.value, reason="quality_review")
+                    continue
                 if is_verifier_rework:
                     # A failed independent check never opens a side-effect
                     # approval.  It returns to the graph's bounded rework
@@ -499,7 +516,7 @@ class WorkflowScheduler:
                         if latest:
                             self.run_store.create_retry_iteration(
                                 latest["id"],
-                                max_iteration=self._retry_limit(
+                                max_iteration=self._retry_iteration_limit(
                                     graph, str(node_run["node_id"])
                                 ),
                             )
@@ -1196,7 +1213,7 @@ class WorkflowScheduler:
             if (
                 canonical in {"approve", "approve_with_changes"}
                 and node_definition.get("type") == "verifier"
-                and str((node_run.get("output") or {}).get("decision") or "") != "pass"
+                and str(self._verifier_payload(node_run.get("output")).get("decision") or "") != "pass"
             ):
                 raise WorkflowContractError(
                     WorkflowErrorCode.GRAPH_INVALID,

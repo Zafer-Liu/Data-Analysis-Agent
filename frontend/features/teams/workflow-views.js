@@ -13,6 +13,7 @@ import {
   isWorkflowActive,
 } from "./shared.js";
 import { WORKFLOW_TEMPLATES } from "./workflow-actions.js";
+import { requestMessage } from "../../core/api-client.js";
 
 const Vue = window.Vue;
 
@@ -58,7 +59,7 @@ export function createWorkflowViews(ctx) {
     decideWorkflowApproval,
   } = ctx.wActions;
 
-  const { h } = Vue;
+  const { h } = Vue || {};
 
   function renderWorkflowCreate() {
     const form = normalizedWorkflowCreate();
@@ -208,10 +209,10 @@ export function createWorkflowViews(ctx) {
 
   function renderWorkflowList() {
     if (local.workflowsLoading && !local.workflows.length) {
-      return h("div", { class: "teams-empty" }, "正在读取 Workflow...");
+      return h("div", { class: "teams-empty", role: "status" }, requestMessage("loading"));
     }
     if (!local.workflows.length) {
-      return h("div", { class: "teams-empty" }, "还没有 Workflow。创建或保存动态协作路径后会显示在这里。");
+      return h("div", { class: "teams-empty", role: "status" }, requestMessage("workflowsEmpty"));
     }
     return h("div", { class: "workflow-list" }, local.workflows.map((workflow, index) => {
       const version = workflow.current_version || {};
@@ -406,10 +407,10 @@ export function createWorkflowViews(ctx) {
 
   function renderRunList() {
     if (local.workflowsLoading && !local.runs.length) {
-      return h("div", { class: "teams-empty compact" }, "正在读取运行记录...");
+      return h("div", { class: "teams-empty compact", role: "status" }, requestMessage("loading"));
     }
     if (!local.runs.length) {
-      return h("div", { class: "teams-empty compact" }, "暂无 Workflow Run。");
+      return h("div", { class: "teams-empty compact", role: "status" }, requestMessage("runsEmpty"));
     }
     return h("div", { class: "workflow-run-list" }, local.runs.map(run => {
       const workflow = workflowForRun(run);
@@ -1231,8 +1232,8 @@ export function createWorkflowViews(ctx) {
     if (!local.selectedRun) {
       return h("div", { class: "teams-empty" }, "选择一个 Workflow Run 查看节点、事件和材料。");
     }
-    if (local.workflowsLoading && !detail) {
-      return h("div", { class: "teams-empty" }, "正在读取运行详情...");
+    if ((local.workflowsLoading || local.runDetailLoading) && !detail) {
+      return h("div", { class: "teams-empty", role: "status" }, requestMessage("loading"));
     }
     if (!detail?.run) {
       return h("div", { class: "teams-empty" }, "未找到运行详情。");
@@ -1303,7 +1304,7 @@ export function createWorkflowViews(ctx) {
   function renderWorkflowPanel() {
     return h("div", { class: "workflow-panel" }, [
       local.workflowsError
-        ? h("div", { class: "teams-inline-error" }, local.workflowsError)
+        ? h("div", { class: "teams-inline-error", role: "alert" }, local.workflowsError)
         : null,
       h("section", { class: "workflow-sidebar" }, [
         h("div", { class: "team-section-title" }, "创建 Workflow"),

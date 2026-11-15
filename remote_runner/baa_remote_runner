@@ -1,0 +1,9 @@
+#!/usr/bin/env python3
+"""Administrator-installed fixed entry; resolves only its trusted installation tree."""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from remote_runner.baa_remote_runner import main
+
+raise SystemExit(main())

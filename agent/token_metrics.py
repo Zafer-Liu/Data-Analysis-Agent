@@ -1,8 +1,4 @@
-"""Per-call Token observability helpers.
-
-The estimates are intentionally fast and provider-neutral. Actual usage remains
-authoritative; the breakdown exists to show which payload component is growing.
-"""
+"""Fast prompt estimates with explicitly sourced, nullable provider usage."""
 from __future__ import annotations
 
 import json
@@ -44,11 +40,7 @@ def build_prompt_breakdown(
     memory_chars: int = 0,
     chars_per_token: float = DEFAULT_CHARS_PER_TOKEN,
 ) -> dict[str, Any]:
-    """Estimate the actual payload immediately before one model call.
-
-    ``history_chars`` includes tool-result messages. ``tool_result_chars`` is a
-    diagnostic subset, so callers must not add it to the component total.
-    """
+    """Estimate a payload; tool results are a subset of history, not additive."""
     normalized_messages = [dict(message) for message in messages]
     normalized_tools = [dict(tool) for tool in tools]
     current_index = None
@@ -75,7 +67,6 @@ def build_prompt_breakdown(
     tool_results = [
         message for message in normalized_messages if message.get("role") == "tool"
     ]
-
     system_chars = len(_json_text(system_messages))
     tool_schema_chars = len(_json_text(normalized_tools))
     history_chars = len(_json_text(history_messages))
@@ -84,12 +75,10 @@ def build_prompt_breakdown(
         len(_json_text(message.get("content") or "")) for message in tool_results
     )
     payload_chars = len(_json_text({
-        "messages": normalized_messages,
-        "tools": normalized_tools,
+        "messages": normalized_messages, "tools": normalized_tools,
     }))
     tool_names = [_tool_name(tool) for tool in normalized_tools]
     mcp_tool_count = sum(name.startswith("mcp__") for name in tool_names)
-
     return {
         "model": str(model or ""),
         "provider": str(provider or ""),
@@ -115,59 +104,112 @@ def build_prompt_breakdown(
         "payload_tokens_est": _tokens(payload_chars, chars_per_token),
         "builtin_tool_count": max(0, len(tool_names) - mcp_tool_count),
         "mcp_tool_count": mcp_tool_count,
+        "estimate_method": "characters_v1",
+        "usage_source": "unavailable",
+        "measurement_mode": "actual_model",
+        "usage_available": False,
+        "usage_complete": False,
         "actual_prompt_tokens": None,
         "actual_completion_tokens": None,
-        "cached_input_tokens": 0,
-        "cache_miss_tokens": 0,
-        "cache_write_tokens": 0,
+        "actual_total_tokens": None,
+        "cached_input_tokens": None,
+        "cache_miss_tokens": None,
+        "cache_write_tokens": None,
         "recorded_at": time.time(),
     }
 
 
-def _value(obj: Any, name: str, default: Any = 0) -> Any:
+def _value(obj: Any, name: str, default: Any = None) -> Any:
     if isinstance(obj, Mapping):
         return obj.get(name, default)
     return getattr(obj, name, default)
 
 
-def _nested_value(obj: Any, parent: str, child: str) -> int:
-    nested = _value(obj, parent, None)
-    return int(_value(nested, child, 0) or 0) if nested is not None else 0
+def _usage_number(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (ValueError, TypeError, OverflowError):
+        return None
+    return int(number) if math.isfinite(number) and number >= 0 and number.is_integer() else None
+
+
+def _first_number(obj: Any, *names: str) -> int | None:
+    for name in names:
+        value = _usage_number(_value(obj, name))
+        if value is not None:
+            return value
+    return None
+
+
+def _nested_number(obj: Any, parent: str, child: str) -> int | None:
+    return _usage_number(_value(_value(obj, parent), child))
+
+
+def _maximum_known(*values: int | None) -> int | None:
+    known = [value for value in values if value is not None]
+    return max(known) if known else None
 
 
 def finalize_prompt_breakdown(
-    breakdown: Mapping[str, Any],
-    usage: Any,
+    breakdown: Mapping[str, Any], usage: Any,
+    *, usage_source: str = "provider_reported", measurement_mode: str = "actual_model",
 ) -> dict[str, Any]:
-    """Attach normalized provider usage and Prompt Cache counters."""
-    prompt_tokens = int(
-        _value(usage, "prompt_tokens", _value(usage, "input_tokens", 0)) or 0
+    """Attach usage without converting absence into zero.
+
+    Provider-neutral ``prompt_tokens`` includes cache reads/writes. Anthropic's
+    ``input_tokens`` excludes them, so add reported cache counters on that path.
+    Missing cache counters remain unknown; a provider-reported zero stays zero.
+    Controlled adapters must pass ``usage_source='offline_adapter'``.
+    """
+    from data.cost_event_store import MEASUREMENT_MODES, USAGE_SOURCES
+
+    if usage_source not in USAGE_SOURCES or measurement_mode not in MEASUREMENT_MODES:
+        raise ValueError("unsupported usage source or measurement mode")
+    if usage_source == "offline_adapter" and measurement_mode == "actual_model":
+        measurement_mode = "offline_contract"
+    if usage_source == "unavailable":
+        usage = None
+    cached_input = _maximum_known(
+        _usage_number(_value(usage, "cache_read_input_tokens")),
+        _usage_number(_value(usage, "prompt_cache_hit_tokens")),
+        _nested_number(usage, "prompt_tokens_details", "cached_tokens"),
+        _nested_number(usage, "input_tokens_details", "cached_tokens"),
     )
-    completion_tokens = int(
-        _value(usage, "completion_tokens", _value(usage, "output_tokens", 0)) or 0
+    cache_write = _maximum_known(
+        _usage_number(_value(usage, "cache_creation_input_tokens")),
+        _nested_number(usage, "prompt_tokens_details", "cache_creation_tokens"),
+        _nested_number(usage, "input_tokens_details", "cache_creation_tokens"),
     )
-    cached_input = max(
-        int(_value(usage, "cache_read_input_tokens", 0) or 0),
-        int(_value(usage, "prompt_cache_hit_tokens", 0) or 0),
-        _nested_value(usage, "prompt_tokens_details", "cached_tokens"),
-        _nested_value(usage, "input_tokens_details", "cached_tokens"),
-    )
-    cache_miss = int(_value(usage, "prompt_cache_miss_tokens", 0) or 0)
-    cache_write = max(
-        int(_value(usage, "cache_creation_input_tokens", 0) or 0),
-        _nested_value(usage, "prompt_tokens_details", "cache_creation_tokens"),
-        _nested_value(usage, "input_tokens_details", "cache_creation_tokens"),
-    )
+    prompt_tokens = _first_number(usage, "prompt_tokens", "input_tokens")
+    if (
+        _usage_number(_value(usage, "prompt_tokens")) is None
+        and prompt_tokens is not None
+        and any(_value(usage, key) is not None for key in (
+            "cache_read_input_tokens", "cache_creation_input_tokens",
+        ))
+    ):
+        prompt_tokens += (cached_input or 0) + (cache_write or 0)
+    completion_tokens = _first_number(usage, "completion_tokens", "output_tokens")
+    available = prompt_tokens is not None and completion_tokens is not None
+    total_tokens = _usage_number(_value(usage, "total_tokens"))
+    if total_tokens is None and available:
+        total_tokens = prompt_tokens + completion_tokens
+    counters_known = any(value is not None for value in (prompt_tokens, completion_tokens, cached_input, cache_write, total_tokens))
+    consistent = bool(available and total_tokens == prompt_tokens + completion_tokens
+                      and (cached_input or 0) + (cache_write or 0) <= prompt_tokens)
     result = dict(breakdown)
     result.update({
+        "usage_source": usage_source if counters_known else "unavailable",
+        "measurement_mode": measurement_mode,
+        "usage_available": available,
+        "usage_complete": consistent,
         "actual_prompt_tokens": prompt_tokens,
         "actual_completion_tokens": completion_tokens,
-        "actual_total_tokens": int(
-            _value(usage, "total_tokens", prompt_tokens + completion_tokens)
-            or prompt_tokens + completion_tokens
-        ),
+        "actual_total_tokens": total_tokens,
         "cached_input_tokens": cached_input,
-        "cache_miss_tokens": cache_miss,
+        "cache_miss_tokens": _usage_number(_value(usage, "prompt_cache_miss_tokens")),
         "cache_write_tokens": cache_write,
     })
     return result

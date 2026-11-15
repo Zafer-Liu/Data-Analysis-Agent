@@ -7,7 +7,7 @@ import sqlite3
 import threading
 import uuid
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 
@@ -954,22 +954,33 @@ class WorkflowRunStore:
 
             provider = str(usage.get("provider") or "")
             model = str(usage.get("model") or "")
-            get_cost_event_store().record(
-                event_id=f"workflow-node:{node_run_id}",
-                occurred_at=_now(),
-                scope_type="workflow_node",
-                scope_id=node_run_id,
-                parent_scope_id=str(row["run_id"]),
-                workspace_id=self.workspace_id,
-                session_id=str(row["session_id"] or ""),
-                provider=provider,
-                model=model,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                cached_input_tokens=max(0, int(usage.get("cached_input_tokens") or 0)),
-                tool_call_count=max(0, int(usage.get("tool_calls") or 0)),
-                estimated_cost=estimate_model_cost(provider, model, input_tokens, output_tokens),
-            )
+            measurements = usage.get("model_calls") or [usage]
+            store = get_cost_event_store()
+            for index, measurement in enumerate(measurements):
+                if not isinstance(measurement, Mapping):
+                    continue
+                available = measurement.get("usage_available", usage.get("usage_available", False)) is True
+                call_id = str(measurement.get("model_call_id") or measurement.get("call_id") or "")
+                attempt = max(1, int(measurement.get("attempt") or 1))
+                call_input = measurement.get("input_tokens") if available else None
+                call_output = measurement.get("output_tokens") if available else None
+                event_id = f"workflow-node:{node_run_id}" + (f":call:{index}" if usage.get("model_calls") else "")
+                if call_id:
+                    from data.cost_event_store import model_cost_event_id
+                    event_id = model_cost_event_id(call_id, attempt=attempt, scope_type="workflow_node")
+                store.record(
+                    event_id=event_id, occurred_at=datetime.now(timezone.utc).isoformat(timespec="seconds"), scope_type="workflow_node",
+                    scope_id=node_run_id, parent_scope_id=str(row["run_id"]), workspace_id=self.workspace_id,
+                    session_id=str(row["session_id"] or ""), provider=provider,
+                    model=str(measurement.get("model") or model), input_tokens=call_input, output_tokens=call_output,
+                    cached_input_tokens=measurement.get("cached_input_tokens") if available else None,
+                    tool_call_count=max(0, int(measurement.get("tool_calls") or 0)),
+                    estimated_cost=estimate_model_cost(provider, model, call_input or 0, call_output or 0) if available else None,
+                    status=str(measurement.get("status") or "succeeded"),
+                    usage_source=str(measurement.get("usage_source") or usage.get("usage_source") or "legacy_unknown") if available else "unavailable",
+                    measurement_mode=str(measurement.get("measurement_mode") or "actual_model"),
+                    model_call_id=call_id, attempt=attempt,
+                )
         except Exception:
             # Observability must not make a durable Workflow node fail after
             # its result has already been committed.

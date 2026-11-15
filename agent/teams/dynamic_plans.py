@@ -1,7 +1,7 @@
 """Bounded dynamic team plans recorded around existing team_delegate execution."""
 from __future__ import annotations
 import json, os, re, threading, time, uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from infrastructure.paths import content_data_path
 from data.workspace import workspace_manager
 from agent.tools.workspace.teams import WorkspaceTeamError
@@ -60,6 +60,10 @@ class DynamicTeamPlanStore:
             "output_tokens":count("output_tokens"),
             "cached_input_tokens":count("cached_input_tokens"),
             "tool_calls":count("tool_calls"),
+            "usage_available":usage.get("usage_available", "input_tokens" in usage and "output_tokens" in usage),
+            "usage_source":str(usage.get("usage_source") or "legacy_unknown"),
+            "measurement_mode":str(usage.get("measurement_mode") or "actual_model"),
+            "model_calls":[dict(item) for item in (usage.get("model_calls") or []) if isinstance(item,dict)][:100],
         }
 
     @staticmethod
@@ -202,7 +206,7 @@ class DynamicTeamPlanStore:
         with _LOCK: plan=next((p for p in self._load()["plans"] if p["id"]==pid),None)
         if not plan: raise WorkspaceTeamError(f"dynamic plan not found: {pid}")
         return plan
-    def task(self,pid,tid,status,result="",error="",tool_events=None,job_id="",artifacts=None,usage=None):
+    def task(self,pid,tid,status,result="",error="",tool_events=None,job_id="",artifacts=None,usage=None,a2a_task_id="",a2a_context_id=""):
         with _LOCK:
             data=self._load(); plan=next((p for p in data["plans"] if p["id"]==pid),None)
             if not plan: raise WorkspaceTeamError(f"dynamic plan not found: {pid}")
@@ -210,6 +214,9 @@ class DynamicTeamPlanStore:
             if plan["status"]=="canceled": return task
             if not task: raise WorkspaceTeamError(f"dynamic task not found: {tid}")
             now=self._now(); task["status"]=status; task["updated_at"]=now
+            if a2a_task_id:
+                task["a2a_task_id"]=str(a2a_task_id)
+                task["a2a_context_id"]=str(a2a_context_id)
             if job_id:
                 task["job_id"]=str(job_id)[:160]
                 job_ids=task.setdefault("job_ids",[])
@@ -244,26 +251,45 @@ class DynamicTeamPlanStore:
                 # One event per task attempt.  A repeated terminal callback
                 # updates that attempt rather than inflating plan cost.
                 try:
-                    from agent.workflows.pricing import estimate_model_cost
-                    from data.cost_event_store import get_cost_event_store
-                    measured=task["usage"]
-                    provider=str(measured.get("provider") or "")
-                    model=str(measured.get("model") or "")
-                    get_cost_event_store().record(
+                    self._record_usage_cost(
                         event_id=f"team-task:{plan['id']}:{task['id']}:{int(task.get('attempt') or 1)}",
-                        occurred_at=now, scope_type="team_task", scope_id=str(task["id"]),
-                        parent_scope_id=str(plan["id"]), workspace_id=self.workspace_id,
-                        session_id=self.session_id, provider=provider, model=model,
-                        input_tokens=measured.get("input_tokens"), output_tokens=measured.get("output_tokens"),
-                        cached_input_tokens=measured.get("cached_input_tokens"),
-                        tool_call_count=measured.get("tool_calls"),
-                        estimated_cost=estimate_model_cost(provider, model, measured.get("input_tokens", 0), measured.get("output_tokens", 0)),
+                        occurred_at=now, scope_id=task["id"], parent_scope_id=plan["id"],
+                        usage=task["usage"], status="succeeded" if status=="completed" else "canceled" if status=="canceled" else "failed",
                     )
                 except Exception:
                     # Team state remains authoritative when optional telemetry
                     # storage is unavailable.
                     pass
             return task
+    def _record_usage_cost(self, *, event_id, occurred_at, scope_id, parent_scope_id, usage, status):
+        from agent.workflows.pricing import estimate_model_cost
+        from data.cost_event_store import get_cost_event_store, model_cost_event_id
+
+        calls = usage.get("model_calls") or []
+        measurements = calls if calls else [usage]
+        store = get_cost_event_store()
+        for index, measurement in enumerate(measurements):
+            provider = str(measurement.get("provider") or usage.get("provider") or "")
+            model = str(measurement.get("model") or usage.get("model") or "")
+            available = measurement.get("usage_available", usage.get("usage_available", False)) is True
+            source = str(measurement.get("usage_source") or usage.get("usage_source") or "legacy_unknown") if available else "unavailable"
+            input_tokens = measurement.get("input_tokens") if available else None
+            output_tokens = measurement.get("output_tokens") if available else None
+            call_id = str(measurement.get("model_call_id") or measurement.get("call_id") or "")
+            attempt = max(1, int(measurement.get("attempt") or 1))
+            identity = model_cost_event_id(call_id, attempt=attempt, scope_type="team_task") if call_id else event_id + (f":call:{index}" if calls else "")
+            store.record(
+                event_id=identity, occurred_at=datetime.now(timezone.utc).isoformat(timespec="seconds"), scope_type="team_task", scope_id=str(scope_id),
+                parent_scope_id=str(parent_scope_id), workspace_id=self.workspace_id, session_id=self.session_id,
+                provider=provider, model=model, input_tokens=input_tokens, output_tokens=output_tokens,
+                cached_input_tokens=measurement.get("cached_input_tokens") if available else None,
+                tool_call_count=int(measurement.get("tool_calls") or 0),
+                estimated_cost=estimate_model_cost(provider, model, input_tokens or 0, output_tokens or 0) if available else None,
+                status=str(measurement.get("status") or status), usage_source=source,
+                measurement_mode=str(measurement.get("measurement_mode") or usage.get("measurement_mode") or "actual_model"),
+                model_call_id=call_id, attempt=attempt,
+            )
+
     def record_quality_review_usage(self,pid,usage):
         with _LOCK:
             data=self._load(); plan=next((p for p in data["plans"] if p["id"]==pid),None)
@@ -273,20 +299,10 @@ class DynamicTeamPlanStore:
             plan.setdefault("quality_review_usage_history",[]).append(plan["quality_review_usage"])
             self._refresh_budget(plan); now=self._now(); plan["updated_at"]=now; self._save(data)
             try:
-                from agent.workflows.pricing import estimate_model_cost
-                from data.cost_event_store import get_cost_event_store
-                measured=plan["quality_review_usage"]
-                provider=str(measured.get("provider") or "")
-                model=str(measured.get("model") or "")
-                get_cost_event_store().record(
+                self._record_usage_cost(
                     event_id=f"team-review:{plan['id']}:{len(plan.get('quality_review_usage_history') or [])}",
-                    occurred_at=now, scope_type="team_task", scope_id="quality-review",
-                    parent_scope_id=str(plan["id"]), workspace_id=self.workspace_id,
-                    session_id=self.session_id, provider=provider, model=model,
-                    input_tokens=measured.get("input_tokens"), output_tokens=measured.get("output_tokens"),
-                    cached_input_tokens=measured.get("cached_input_tokens"),
-                    tool_call_count=measured.get("tool_calls"),
-                    estimated_cost=estimate_model_cost(provider, model, measured.get("input_tokens", 0), measured.get("output_tokens", 0)),
+                    occurred_at=now, scope_id="quality-review", parent_scope_id=plan["id"],
+                    usage=plan["quality_review_usage"], status="succeeded",
                 )
             except Exception:
                 pass

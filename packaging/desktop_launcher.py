@@ -258,6 +258,14 @@ def main() -> int:
     _normalize_windows_environment()
     if not getattr(sys, "frozen", False):
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    if sys.argv[1:2] == ["--baa-dataset-worker"]:
+        # A fixed internal child entry must never start Flask, a browser, the
+        # native window, dependency installation or desktop lifecycle services.
+        if len(sys.argv) != 3:
+            return 2
+        from data.import_pipeline import _worker_main
+        _worker_main(sys.argv[2])
+        return 0
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     # Frozen builds run with console=False: basicConfig writes to a lost stderr.
     # Mirror everything to a log file so native-window failures are diagnosable

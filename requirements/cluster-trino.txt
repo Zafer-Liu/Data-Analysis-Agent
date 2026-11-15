@@ -1,0 +1,5 @@
+# Optional cluster integration. The bounded statement HTTP transport lives in-tree.
+# The official client pin records the supported protocol/client acceptance baseline.
+trino==0.340.0
+pyarrow==24.0.0
+sqlglot==30.21.0

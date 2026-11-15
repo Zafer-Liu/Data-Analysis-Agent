@@ -21,6 +21,7 @@
 """
 import logging
 import threading
+import tempfile
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -53,7 +54,18 @@ class MergedDataSource(DataSource):
         self.name = "merged"
         self._sources = sources
         self._conn = _new_conn()
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._registered: set[str] = set()
+        self._conn.execute("SET memory_limit='512MiB'")
+        self._conn.execute("SET threads=2")
+        self._spill_directory = tempfile.TemporaryDirectory(prefix="baa-merged-")
+        self._conn.execute("SET temp_directory = ?", [self._spill_directory.name])
+        self._spill_limit_enforced = False
+        try:
+            self._conn.execute("SET max_temp_directory_size='8GiB'")
+            self._spill_limit_enforced = True
+        except Exception:
+            log.info("[MergedDS] temporary storage limit is unavailable in this engine")
 
         # 已注册的带前缀表名 → (src_index, bare_table_name)
         self._prefix_map: Dict[str, Tuple[int, str]] = {}
@@ -65,36 +77,71 @@ class MergedDataSource(DataSource):
     # ── 内部构建 ──────────────────────────────────────────────────────────────
 
     def _build(self) -> None:
-        """将所有数据源的表以带前缀名注册到合并连接。
-
-        对于 SQLDataSource：只注册已缓存到 DuckDB 的表 + 分析表。
-        未缓存的大表不在合并连接中（仍走各自数据源）。
-
-        对于 ExcelDataSource / CSVDataSource：直接从各自连接查全量数据
-        后重新注册到合并连接（DataFrame 零拷贝路径）。
-        """
-        for idx, src in enumerate(self._sources, start=1):
-            prefix = f"src{idx}__"
+        """Index metadata only. Materialize only tables a query actually uses."""
+        for index, source in enumerate(self._sources, 1):
             try:
-                bare_tables = src.list_tables()
+                tables = source.list_tables()
             except Exception as exc:
-                log.warning("[MergedDS] list_tables failed for src%d (%s): %s", idx, src.name, exc)
-                bare_tables = []
+                log.warning("[MergedDS] source catalog unavailable: %s", type(exc).__name__)
+                tables = []
+            for table in tables:
+                self._prefix_map[f"src{index}__{table}"] = (index, table)
 
-            for bare in bare_tables:
-                prefixed = f"{prefix}{bare}"
-                try:
-                    df, err = src.execute_query(f'SELECT * FROM "{bare}"')
-                    if err or df is None or df.empty:
-                        log.debug("[MergedDS] src%d table %r empty/error, skipping: %s",
-                                  idx, bare, err)
+    def _prepare_query(self, sql: str) -> None:
+        import sqlglot
+        from sqlglot import expressions as exp
+        from pathlib import Path
+
+        parsed = sqlglot.parse_one(sql, dialect="duckdb", error_level=sqlglot.ErrorLevel.RAISE)
+        if parsed is None:
+            raise ValueError("SQL is required")
+        for table in parsed.find_all(exp.Table):
+            name = table.name
+            if name not in self._prefix_map or name in self._registered:
+                continue
+            index, bare = self._prefix_map[name]
+            source = self._sources[index - 1]
+            handle = getattr(source, "handle", None)
+            if handle is not None:
+                if not self._spill_limit_enforced:
+                    raise ValueError("A supported DuckDB engine with bounded spill storage is required for dataset joins")
+                root = Path(handle.root).resolve(strict=True)
+                files = handle.manifest.get("files", [])
+                paths = []
+                for item in files:
+                    if item.get("table") and item["table"] != bare:
                         continue
-                    _register(self._conn, prefixed, df)
-                    self._prefix_map[prefixed] = (idx, bare)
-                    log.info("[MergedDS] registered src%d::%r → %r  rows=%d",
-                             idx, bare, prefixed, len(df))
-                except Exception as exc:
-                    log.warning("[MergedDS] failed to register src%d::%r: %s", idx, bare, exc)
+                    relative = item.get("relative_path")
+                    if not isinstance(relative, str) or Path(relative).is_absolute() or ".." in Path(relative).parts:
+                        raise ValueError("Invalid immutable dataset file")
+                    candidate = root / relative
+                    if candidate.is_symlink() or not candidate.resolve(strict=True).is_relative_to(root) or not candidate.is_file():
+                        raise ValueError("Dataset file is unavailable or changed")
+                    if candidate.suffix.lower() != ".parquet":
+                        raise ValueError("Merged datasets require immutable Parquet snapshots")
+                    paths.append(str(candidate))
+                if not paths:
+                    raise ValueError("Dataset has no committed Parquet files for this table")
+                self._conn.read_parquet(paths).create_view(name, replace=True)
+            else:
+                loaded = getattr(source, "_loaded", None)
+                if loaded is not None and bare not in loaded and bare not in getattr(source, "_cache_tables", set()):
+                    raise ValueError("Materialize a bounded remote query as a dataset before a cross-source JOIN")
+                capabilities = source.get_capabilities() if callable(getattr(source, "get_capabilities", None)) else {}
+                if capabilities.get("native_query") or capabilities.get("cluster"):
+                    raise ValueError("Materialize a bounded cluster result before a cross-source JOIN")
+                quoted = '"' + bare.replace('"', '""') + '"'
+                frame, error = source.execute_query(f"SELECT * FROM {quoted}")
+                if error:
+                    raise ValueError(error)
+                if len(frame) > 100_000 or int(frame.memory_usage(index=True, deep=True).sum()) > 64 * 1024 * 1024:
+                    raise ValueError("budget_exceeded: create an immutable dataset before merging large sources")
+                _register(self._conn, name, frame)
+            self._registered.add(name)
+
+    def get_capabilities(self) -> dict:
+        return {"batch_reader": True, "large": True, "immutable": False,
+                "query_dialect": "duckdb", "bounded_result": True}
 
     # ── DataSource interface ──────────────────────────────────────────────────
 
@@ -113,12 +160,12 @@ class MergedDataSource(DataSource):
             table_parts: List[str] = []
             for prefixed in sorted(src_sections.get(idx, [])):
                 try:
-                    rows = self._conn.execute(
-                        f'SELECT COUNT(*) FROM "{prefixed}"'
-                    ).fetchone()[0]
-                    table_parts.append(_table_schema_str(self._conn, prefixed, rows))
+                    _index, bare = self._prefix_map[prefixed]
+                    metadata = src.get_table_schema(bare)
+                    columns = metadata.get("columns") or []
+                    table_parts.append(f"Table: {prefixed}\n  " + ", ".join(str(column) for column in columns))
                 except Exception:
-                    table_parts.append(f"Table: {prefixed}  (unavailable)")
+                    table_parts.append(f"Table: {prefixed}  (metadata unavailable)")
             if table_parts:
                 header = (
                     f"=== 数据源 {idx}: {getattr(src, 'name', '未命名')} ===\n"
@@ -138,8 +185,33 @@ class MergedDataSource(DataSource):
 
     def execute_query(self, sql: str) -> Tuple[pd.DataFrame, str]:
         """在合并连接上执行 SQL。SQL 中的表名应使用 src{N}__ 前缀。"""
+        try:
+            import pyarrow as pa
+            batches, count, size = [], 0, 0
+            for batch in self.execute_query_batches(sql):
+                count += batch.num_rows
+                size += batch.nbytes
+                if count > 100_000 or size > 64 * 1024 * 1024:
+                    return pd.DataFrame(), "budget_exceeded: aggregate or materialize the merged result"
+                batches.append(batch)
+            if batches:
+                return pa.Table.from_batches(batches).to_pandas(), ""
+            return pd.DataFrame(), ""
+        except Exception as exc:
+            return pd.DataFrame(), str(exc)
+
+    def execute_query_batches(self, sql: str, *, budget=None, cancel=None):
         with self._lock:
-            return _query(self._conn, sql)
+            self._prepare_query(sql)
+            reader = self._conn.execute(sql).fetch_record_batch(rows_per_batch=4096)
+            try:
+                for batch in reader:
+                    if cancel is not None and cancel():
+                        self._conn.interrupt()
+                        raise RuntimeError("Query canceled")
+                    yield batch
+            finally:
+                reader.close()
 
     def create_analysis_table(self, sql: str, table_name: str = "analysis_data",
                               _df=None) -> str:
@@ -150,6 +222,7 @@ class MergedDataSource(DataSource):
                 rows = len(_df)
             else:
                 try:
+                    self._prepare_query(sql)
                     self._conn.execute(
                         f'CREATE OR REPLACE TABLE "{table_name}" AS ({sql})'
                     )
@@ -168,21 +241,23 @@ class MergedDataSource(DataSource):
         return list(self._prefix_map.keys()) + list(self._analysis_tables)
 
     def get_preview(self) -> List[dict]:
-        result: List[dict] = []
-        for prefixed in sorted(self._prefix_map.keys()):
+        result = []
+        for prefixed, (index, bare) in sorted(self._prefix_map.items()):
             try:
-                cols  = [r[0] for r in self._conn.execute(f'DESCRIBE "{prefixed}"').fetchall()]
-                total = self._conn.execute(
-                    f'SELECT COUNT(*) FROM "{prefixed}"'
-                ).fetchone()[0]
-                result.append({"name": prefixed, "columns": cols, "total_rows": total})
+                metadata = self._sources[index - 1].get_table_schema(bare)
+                result.append({"name": prefixed, "columns": metadata.get("columns") or [], "total_rows": None})
             except Exception:
-                continue
+                result.append({"name": prefixed, "columns": [], "total_rows": None})
         return result
 
     def get_preview_table(self, table_name: str, max_rows: int = 100) -> dict:
         from .sources._utils import _preview_table_dict
-        return _preview_table_dict(self._conn, table_name, table_name, max_rows)
+        if table_name not in self._prefix_map and table_name not in self._analysis_tables:
+            return {"name": table_name, "columns": [], "rows": [], "error": "Table is unavailable"}
+        quoted = '"' + table_name.replace('"', '""') + '"'
+        with self._lock:
+            self._prepare_query(f"SELECT * FROM {quoted} LIMIT 0")
+            return _preview_table_dict(self._conn, table_name, table_name, min(100, max(1, max_rows)))
 
     # ── 辅助方法 ──────────────────────────────────────────────────────────────
 
@@ -197,6 +272,8 @@ class MergedDataSource(DataSource):
         """关闭合并连接（数据源变化时调用），下次使用时由 session 重建。"""
         try:
             self._conn.close()
-        except Exception:
-            pass
+        finally:
+            self._spill_directory.cleanup()
         log.info("[MergedDS] invalidated")
+
+    close = invalidate

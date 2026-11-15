@@ -12,6 +12,14 @@ from copy import deepcopy
 from agent.tools.workspace.teams import WorkspaceTeamError
 
 
+# Shared by Agent Cards and the executor so advertised capabilities cannot drift.
+DELEGATED_READ_TOOLS = frozenset({
+    "workspace_status", "workspace_glob", "workspace_grep", "workspace_read_file",
+    "get_schema", "get_table_detail", "query_data", "query_knowledge",
+    "memory_read", "select_chart", "profile_data",
+})
+
+
 TEAM_PROFILE_PRESETS = {
     "data-scout": {
         "key": "data-scout",
@@ -69,7 +77,7 @@ TEAM_PROFILE_PRESETS = {
 def normalize_team_profile(value) -> dict:
     """Return a serializable preset snapshot, or an explicit inherit policy."""
     key = str(value or "").strip().lower()
-    if not key:
+    if not key or key == "inherit":
         return {
             "key": "inherit",
             "version": 1,

@@ -209,30 +209,12 @@ class SQLDataSource(DataSource):
             return False  # already decided: remote-only
 
         q = self._quote(table_name)
-        # ── Row count check ────────────────────────────────────────────────────
-        row_count: Optional[int] = None
+        # Do not run an unbounded COUNT or download a whole unknown table just
+        # to decide whether it fits the local cache. A bounded attempt either
+        # returns the complete small table or marks this source table remote-only.
+        log.info("[SQLDataSource] bounded cache admission for %r", table_name)
         try:
-            from sqlalchemy import text as _text
-            with self._engine.connect() as _c:
-                row_count = _c.execute(_text(f"SELECT COUNT(*) FROM {q}")).scalar()
-        except Exception as exc:
-            log.warning("[SQLDataSource] row count check failed for %r: %s", table_name, exc)
-
-        if row_count is not None and row_count > _LAZY_LOAD_ROW_LIMIT:
-            self._large_tables.add(table_name)
-            log.warning(
-                "[SQLDataSource] table %r has %d rows (> limit %d) — "
-                "marked as large table, queries will run on remote DB",
-                table_name, row_count, _LAZY_LOAD_ROW_LIMIT,
-            )
-            return False
-
-        # ── Pull into DuckDB ───────────────────────────────────────────────────
-        log.info("[SQLDataSource] loading table %r into DuckDB …", table_name)
-        try:
-            from sqlalchemy import text as _text
-            with self._engine.connect() as conn:
-                df = pd.read_sql(_text(f"SELECT * FROM {q}"), conn)
+            df = self._read_remote_bounded(f"SELECT * FROM {q}", row_limit=_LAZY_LOAD_ROW_LIMIT)
             # Register directly without _sanitize_df — SQL types are already correct
             # and _sanitize_df's float→datetime heuristic is for Excel files only.
             # The shared "_tmp_sql_" view name makes concurrent loads of different
@@ -248,8 +230,45 @@ class SQLDataSource(DataSource):
             log.info("[SQLDataSource] loaded %r → %d rows into DuckDB", table_name, len(df))
             return True
         except Exception as exc:
-            log.warning("[SQLDataSource] failed to load %r: %s", table_name, exc)
+            self._large_tables.add(table_name)
+            log.warning("[SQLDataSource] cache admission rejected %r: %s", table_name, exc)
             return False
+
+    def _read_remote_bounded(self, sql: str, *, row_limit: int = 100_000, byte_limit: int = 64 * 1024 * 1024):
+        """Bound the retained result; streaming also depends on the DB driver."""
+        from sqlalchemy import text
+        import time
+
+        frames, rows, size = [], 0, 0
+        started = time.monotonic()
+        with self._engine.connect() as connection:
+            streamed = connection.execution_options(stream_results=True, max_row_buffer=1024)
+            result = streamed.execute(text(sql))
+            try:
+                columns = list(result.keys())
+                while True:
+                    cancel = getattr(self, "_query_cancel_check", None)
+                    if callable(cancel) and cancel():
+                        raise RuntimeError("query_canceled")
+                    if time.monotonic() - started > 300:
+                        raise ValueError("budget_exceeded: remote query runtime")
+                    batch = result.fetchmany(min(1024, max(1, row_limit - rows + 1)))
+                    if not batch:
+                        break
+                    frame = pd.DataFrame.from_records(batch, columns=columns)
+                    rows += len(frame)
+                    size += int(frame.memory_usage(index=True, deep=True).sum())
+                    if rows > row_limit or size > byte_limit:
+                        raise ValueError("budget_exceeded: remote result must be filtered or aggregated before download")
+                    frames.append(frame)
+            finally:
+                result.close()
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=columns)
+
+    def get_capabilities(self) -> dict:
+        return {"batch_reader": False, "large": True, "immutable": False,
+                "requires_table_selection": True, "query_dialect": "duckdb",
+                "native_cancel": False, "bounded_result": True}
 
     def _tables_in_sql(self, sql: str) -> List[str]:
         """Extract table names referenced in a SQL string via sqlglot AST.
@@ -415,6 +434,8 @@ class SQLDataSource(DataSource):
             if t not in self._large_tables and t not in self._loaded and t not in self._cache_tables:
                 self._ensure_loaded(t)
 
+        # Cache admission can discover a table is large during this very call.
+        large_refs = [t for t in referenced if t in self._large_tables]
         # If any large table is involved, run the whole query on the remote DB
         if large_refs:
             if writing:
@@ -428,9 +449,7 @@ class SQLDataSource(DataSource):
                 large_refs,
             )
             try:
-                from sqlalchemy import text as _text
-                with self._engine.connect() as conn:
-                    df = pd.read_sql(_text(sql), conn)
+                df = self._read_remote_bounded(sql)
                 # Register result as a temporary view so downstream analysis can use it.
                 # The shared view name "_large_query_result_" needs the lock to avoid
                 # two concurrent large-table queries clobbering each other's result.
@@ -453,10 +472,7 @@ class SQLDataSource(DataSource):
         # DuckDB failed — fall back to remote DB for safety (reads only)
         log.warning("[SQLDataSource] DuckDB query failed (%s), trying remote DB", err)
         try:
-            from sqlalchemy import text as _text
-            with self._engine.connect() as conn:
-                df = pd.read_sql(_text(sql), conn)
-            return df, ""
+            return self._read_remote_bounded(sql), ""
         except Exception as exc:
             return pd.DataFrame(), str(exc)
 
@@ -530,6 +546,24 @@ class SQLDataSource(DataSource):
                     result.append({"name": t, "columns": [], "total_rows": None})
 
         return result
+
+    def get_table_schema(self, table_name: str) -> dict:
+        """Inspect only the requested table without caching stale remote columns."""
+        try:
+            if table_name.startswith("[分析表] "):
+                real_name = table_name[len("[分析表] "):]
+                with self._duck_lock:
+                    rows = self._duck.execute(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = ? ORDER BY ordinal_position", [real_name],
+                    ).fetchall()
+                columns = [str(row[0]) for row in rows]
+            else:
+                from sqlalchemy import inspect
+                columns = [str(column["name"]) for column in inspect(self._engine).get_columns(table_name)]
+            return {"name": table_name, "columns": columns, "schema_available": bool(columns)}
+        except Exception as exc:
+            return {"name": table_name, "columns": [], "schema_available": False, "error": str(exc)}
 
     def get_preview_table(self, table_name: str, max_rows: int = 100) -> dict:
         # Analysis cache

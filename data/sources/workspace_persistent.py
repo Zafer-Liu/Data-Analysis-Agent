@@ -1,524 +1,512 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""WorkspacePersistentSource — 持久化 DuckDB 数据源（A5+）。
+"""Workspace facade: one live DuckDB owner, immutable imports, bounded shadows.
 
-与 CSVDataSource / ExcelDataSource 不同，本类使用工作目录下的
-``.zhixi/workspace.duckdb`` 持久化文件连接，关闭软件后表仍在。
-
-设计要点：
-  - 连接：``duckdb.connect(str(db_path))`` 持久化到磁盘
-  - 表注册：工作目录内文件通过 ``_register_file`` 注册到此连接
-  - 增量更新：配合 ``WorkspaceRuntime.load_registry()`` / ``save_registry()``
-    检测文件 sha256 变化，未变则跳过解析（大 Excel 秒开）
-  - 安全：不设 ``enable_external_access=false``（A4 已移除），依赖
-    ``agent/validate.py`` 的 SQL AST 路径白名单做安全控制
+Import workers only touch private files. The owner installs views in a single
+transaction. The legacy registry is a cache; mount metadata in DuckDB is the
+source for reconciliation after a registry write failure.
 """
 from __future__ import annotations
 
-import logging
+import json
 import os
 import threading
 import time
-import uuid
 from pathlib import Path
-from typing import List, Tuple
 
 import duckdb
 import pandas as pd
 
-from ._utils import (
-    _clean_identifier, _dedup_columns, _list_tables, _table_schema_str,
-    _preview_table_dict, _query, _register, is_write_sql,
-    snapshot_tables_to_memory,
-)
-from .excel import _excel_engine, _parse_sheets_parallel
 from .base import DataSource
-from data.workspace_write_lease import (
-    acquire_synchronous_workspace_write_lease,
-    acquire_workspace_write_lease,
-)
-from data.large_import_limiter import acquire_large_import_slot
+from ._utils import _clean_identifier, _list_tables, _table_schema_str, _preview_table_dict, _query, is_write_sql
+from .dataset import quote_identifier, snapshot_scan_sql, validate_snapshot_query, validate_snapshot_precision, query_batch_rows
+from data.dataset_manifest import DatasetHandle, validate_manifest
+from data.import_schema import ImportFailure
+from data.workspace_db_owner import WorkspaceDBOwner
 
-log = logging.getLogger(__name__)
-
-CSV_JOB_THRESHOLD_BYTES = int(os.environ.get("BAA_CSV_JOB_THRESHOLD", 25_000_000))
+CSV_JOB_THRESHOLD_BYTES = int(os.environ.get('BAA_CSV_JOB_THRESHOLD', '25000000'))
 
 
 def csv_requires_job(path: str) -> bool:
-    """Return whether a CSV should avoid blocking the request thread."""
     try:
         return Path(path).stat().st_size > CSV_JOB_THRESHOLD_BYTES
     except OSError:
         return False
 
 
-def _csv_scan_sql(file_path: str) -> str:
-    """Return the DuckDB CSV scan expression with a safely quoted path."""
-    quoted_path = str(Path(file_path).resolve()).replace("'", "''")
-    return (
-        f"read_csv_auto('{quoted_path}', header=true, null_padding=true, "
-        "ignore_errors=true, "
-        "nullstr=['', 'null', 'NULL', 'Null', 'nan', 'NaN', 'N/A', 'n/a'])"
-    )
+class _OwnerConnection:
+    """Detached, bounded compatibility results; never expose a live cursor."""
+    def __init__(self, owner):
+        self.owner = owner
+
+    def execute(self, sql, parameters=None):
+        return self.owner.execute(sql, parameters, max_rows=100000, max_bytes=64 << 20)
+
+    def close(self):
+        self.owner.close()
 
 
-def _configure_bulk_connection(conn: duckdb.DuckDBPyConnection) -> None:
-    """Apply conservative, locally configurable settings to a bulk import."""
-    threads = max(1, int(os.environ.get("BAA_DUCKDB_THREADS", "4")))
-    conn.execute(f"PRAGMA threads={threads}")
-    memory_limit = os.environ.get("BAA_DUCKDB_MEMORY_LIMIT", "").strip()
-    if memory_limit:
-        conn.execute("SET memory_limit = ?", [memory_limit])
+def _catalog(runtime):
+    from data.dataset_catalog import DatasetCatalog
+    # Catalog roots use the existing user content boundary. Workspace IDs are
+    # scope values, never interpolated into paths.
+    return DatasetCatalog(owner_id=str(getattr(runtime, 'owner_user_id', '') or 'local-default'),
+                          session_id='', workspace_id=str(runtime.workspace_id))
 
 
-def _import_metrics(file_path: str, started_at: float, tables: list[str], conn) -> dict:
-    row_count = sum(
-        int(conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
-        for table in tables
-    )
-    return {
-        "source_bytes": Path(file_path).stat().st_size,
-        "row_count": row_count,
-        "table_count": len(tables),
-        "elapsed_ms": round((time.perf_counter() - started_at) * 1000),
-    }
+def _install_snapshot(owner, handle, *, old_tables=(), file_key='', file_hash='', cancel=None, expected_snapshot=Ellipsis):
+    from data.dataset_snapshot import check_cancel
+    manifest = validate_manifest(handle.manifest, root=handle.root, verify_files=True)
+    tables = [t['name'] for t in manifest['tables']]
+    def install(conn):
+        check_cancel(cancel)
+        conn.execute('CREATE TABLE IF NOT EXISTS _baa_dataset_mounts (file_key VARCHAR PRIMARY KEY, payload VARCHAR NOT NULL)')
+        previous = conn.execute('SELECT payload FROM _baa_dataset_mounts WHERE file_key=?', [file_key]).fetchone()
+        previous = json.loads(previous[0]) if previous else None
+        current_snapshot = previous.get('snapshot_id') if previous else None
+        if expected_snapshot is not Ellipsis and current_snapshot != expected_snapshot:
+            raise ValueError('workspace_version_conflict: file mount changed while importing')
+        replaceable = previous['tables'] if previous else list(old_tables)
+        # A distinct source may already own a name. Reject it before dropping
+        # anything; replacement is allowed only for this file's old mapping.
+        for table in tables:
+            existing = conn.execute('SELECT table_type FROM information_schema.tables WHERE table_schema=\'main\' AND table_name=?', [table]).fetchone()
+            if existing and table not in replaceable:
+                raise ValueError(f'workspace_table_conflict: {table}')
+        for table in set(replaceable) | set(tables):
+            kind = conn.execute('SELECT table_type FROM information_schema.tables WHERE table_schema=\'main\' AND table_name=?', [table]).fetchone()
+            if kind:
+                command = 'DROP VIEW' if kind[0] == 'VIEW' else 'DROP TABLE'
+                conn.execute(f'{command} {quote_identifier(table)}')
+        for table in tables:
+            conn.execute(f'CREATE VIEW {quote_identifier(table)} AS SELECT * FROM {snapshot_scan_sql(handle, table)}')
+        record = {'file_key': file_key, 'sha256': file_hash or manifest['source'].get('sha256', ''), 'tables': tables,
+                  'source_type': manifest['source'].get('format', 'dataset'), 'dataset_handle': handle.to_dict(),
+                  'dataset_id': handle.dataset_id, 'snapshot_id': handle.snapshot_id}
+        conn.execute('INSERT OR REPLACE INTO _baa_dataset_mounts VALUES (?,?)', [file_key, json.dumps(record, ensure_ascii=False)])
+        check_cancel(cancel)
+        return record
+    return owner.transaction(install)
 
 
-def parse_workspace_csv_job(
-    ctx,
-    runtime,
-    file_path: str,
-    table_name: str,
-    file_key: str,
-    file_hash: str,
-    old_tables=None,
-) -> dict:
-    """Bulk-import a CSV with a worker-owned DuckDB connection.
-
-    The Workspace lock protects the single persistent DuckDB writer.  Parsing
-    and CTAS happen in DuckDB, so no Python row-by-row inserts are involved.
-    """
-    old_tables = list(old_tables or [])
-    started_at = time.perf_counter()
-    ctx.set_progress(2, f"正在批量导入 {file_key}")
+def _workspace_import(ctx, runtime, file_path, table_name, file_key, file_hash, old_tables):
+    from data.import_pipeline import import_file_source
+    started = time.monotonic()
     ctx.check_canceled()
-    conn = None
-    with acquire_large_import_slot(ctx):
-        with acquire_workspace_write_lease(ctx, runtime):
-            with runtime.db_lock:
-                try:
-                    conn = duckdb.connect(str(runtime.db_path))
-                    _configure_bulk_connection(conn)
-                    conn.execute("BEGIN TRANSACTION")
-                    for table in old_tables:
-                        conn.execute(f'DROP TABLE IF EXISTS "{table}"')
-                    conn.execute(
-                        f'CREATE OR REPLACE TABLE "{table_name}" AS '
-                        f"SELECT * FROM {_csv_scan_sql(file_path)}"
-                    )
-                    _clean_table_columns(conn, table_name)
-                    ctx.check_canceled()
-                    metrics = _import_metrics(file_path, started_at, [table_name], conn)
-                    conn.execute("COMMIT")
-                except Exception:
-                    if conn is not None:
-                        try:
-                            conn.execute("ROLLBACK")
-                        except Exception:
-                            pass
-                    raise
-                finally:
-                    if conn is not None:
-                        conn.close()
-
-                registry = runtime.load_registry()
-                registry[file_key] = {
-                    "sha256": file_hash,
-                    "tables": [table_name],
-                    "source_type": "csv",
-                    "file_path": file_path,
-                    "import_metrics": metrics,
-                }
+    options = {'table_name': _clean_identifier(table_name)}
+    catalog = _catalog(runtime)
+    with runtime.db_lock, WorkspaceDBOwner(runtime.db_path) as owner:
+        def prior(conn):
+            exists = conn.execute("SELECT 1 FROM information_schema.tables WHERE table_name='_baa_dataset_mounts'").fetchone()
+            row = conn.execute('SELECT payload FROM _baa_dataset_mounts WHERE file_key=?', [file_key]).fetchone() if exists else None
+            return json.loads(row[0]).get('snapshot_id') if row else None
+        expected_snapshot = owner.call(prior)
+    source = import_file_source(file_path, owner_id=catalog.owner_id, session_id=catalog.session_id,
+                               workspace_id=catalog.workspace_id, options=options, catalog=catalog,
+                               progress=ctx.set_progress, cancel=ctx.is_canceled)
+    try:
+        if file_hash and source.manifest['source']['sha256'] != file_hash:
+            raise ValueError('dataset_changed: workspace file changed after selection')
+        # The heavy process has really exited before opening this owner facade.
+        with runtime.db_lock, WorkspaceDBOwner(runtime.db_path) as owner:
+            record = _install_snapshot(owner, source.handle, old_tables=old_tables or [], file_key=file_key,
+                                       file_hash=file_hash, cancel=ctx.is_canceled, expected_snapshot=expected_snapshot)
+            registry = runtime.load_registry()
+            registry[file_key] = {**record, 'file_path': str(file_path)}
+            registry_warning = ''
+            try:
                 runtime.save_registry(registry)
-    ctx.set_progress(100, f"{file_key} 导入完成，共 {metrics['row_count']:,} 行")
-    return {"workspace_id": runtime.workspace_id, "source_name": file_key, "tables": [table_name], "metrics": metrics}
+            except OSError as exc:
+                # Data committed. Reattaching the source reconstructs this cache.
+                registry_warning = str(exc)[:240]
+        metrics = {'source_bytes': Path(file_path).stat().st_size, 'row_count': source.manifest['row_count'],
+                   'table_count': len(record['tables']), 'elapsed_ms': round((time.monotonic() - started) * 1000)}
+        try:
+            ctx.set_progress(100, f"已导入 {metrics['row_count']:,} 行")
+        except Exception:
+            pass
+        return {'workspace_id': runtime.workspace_id, 'source_name': file_key, 'tables': record['tables'],
+                'metrics': metrics, 'dataset_handle': source.handle.to_dict(), 'registry_warning': registry_warning,
+                'result_committed': True}
+    finally:
+        source.close()
 
 
-def _clean_table_columns(conn: duckdb.DuckDBPyConnection, table_name: str) -> None:
-    cols_raw = [row[0] for row in conn.execute(f'DESCRIBE "{table_name}"').fetchall()]
-    cleaned = _dedup_columns([_clean_identifier(col) for col in cols_raw])
-    for old, new in zip(cols_raw, cleaned):
-        if old != new:
-            conn.execute(f'ALTER TABLE "{table_name}" RENAME COLUMN "{old}" TO "{new}"')
+def parse_workspace_csv_job(ctx, runtime, file_path: str, table_name: str, file_key: str, file_hash: str, old_tables=None):
+    return _workspace_import(ctx, runtime, file_path, table_name, file_key, file_hash, old_tables)
 
 
-def parse_workspace_excel_job(
-    ctx,
-    runtime,
-    file_path: str,
-    base_table_name: str,
-    file_key: str,
-    file_hash: str,
-    old_tables=None,
-) -> dict:
-    """Parse/register a mounted workbook with a worker-owned DuckDB connection."""
-    old_tables = list(old_tables or [])
-    engine, sheet_names = _excel_engine(file_path)
-    if not sheet_names:
-        raise ValueError("Excel 文件中未发现工作表。")
-    ctx.set_progress(2, f"正在读取 {file_key} 的工作表")
-    ctx.check_canceled()
-
-    total = len(sheet_names)
-
-    def _sheet_done(sheet, done, _total):
-        ctx.set_progress(
-            5 + int(done * 78 / total),
-            f"已解析工作表 {done}/{total}：{sheet}",
-        )
-
-    with acquire_large_import_slot(ctx):
-        parsed = _parse_sheets_parallel(
-            file_path,
-            sheet_names,
-            engine,
-            check_canceled=ctx.check_canceled,
-            on_complete=_sheet_done,
-        )
-        ctx.check_canceled()
-
-        registered: List[str] = []
-        conn = None
-        with acquire_workspace_write_lease(ctx, runtime):
-            with runtime.db_lock:
-                try:
-                    conn = duckdb.connect(str(runtime.db_path))
-                    _configure_bulk_connection(conn)
-                    conn.execute("BEGIN TRANSACTION")
-                    for table in old_tables:
-                        conn.execute(f'DROP TABLE IF EXISTS "{table}"')
-                    for index, (sheet, df) in enumerate(parsed, start=1):
-                        ctx.check_canceled()
-                        if df is not None:
-                            if total == 1:
-                                table_name = base_table_name
-                            else:
-                                table_name = _clean_identifier(sheet) or f"{base_table_name}_{index}"
-                            base, suffix = table_name, 2
-                            while table_name in registered:
-                                table_name = f"{base}_{suffix}"
-                                suffix += 1
-                            _register(conn, table_name, df)
-                            registered.append(table_name)
-                        ctx.set_progress(
-                            83 + int(index * 14 / total),
-                            f"正在注册工作表 {index}/{total}：{sheet}",
-                        )
-                    if not registered:
-                        raise ValueError("Excel 文件中未发现有效工作表。")
-                    conn.execute("COMMIT")
-                except Exception:
-                    if conn is not None:
-                        try:
-                            conn.execute("ROLLBACK")
-                        except Exception:
-                            pass
-                    raise
-                finally:
-                    if conn is not None:
-                        conn.close()
-
-                registry = runtime.load_registry()
-                registry[file_key] = {
-                    "sha256": file_hash,
-                    "tables": registered,
-                    "source_type": Path(file_path).suffix.lower().lstrip("."),
-                    "file_path": file_path,
-                }
-                runtime.save_registry(registry)
-
-    ctx.set_progress(100, f"{file_key} 解析完成，共 {len(registered)} 个工作表")
-    return {
-        "workspace_id": runtime.workspace_id,
-        "workdir": str(runtime.workdir),
-        "source_name": file_key,
-        "tables": registered,
-    }
+def parse_workspace_excel_job(ctx, runtime, file_path: str, base_table_name: str, file_key: str, file_hash: str, old_tables=None):
+    if Path(file_path).suffix.lower() != '.xlsx':
+        raise ValueError('Large XLS requires conversion to XLSX/CSV/Parquet')
+    return _workspace_import(ctx, runtime, file_path, base_table_name, file_key, file_hash, old_tables)
 
 
 class WorkspacePersistentSource(DataSource):
-    """使用持久化 DuckDB 文件的数据源。
-
-    一个工作目录对应一个 ``workspace.duckdb`` 文件，所有表注册到此连接。
-    关闭软件后 ``.duckdb`` 文件保留，下次挂载时表已就绪。
-    """
-
-    def __init__(
-        self,
-        db_path: str,
-        display_name: str = "工作目录",
-        db_lock: threading.RLock | None = None,
-    ):
-        self.name = display_name
-        self.file_path = db_path  # 兼容 workspace.py 卸载时的 file_path 检查
+    def __init__(self, db_path: str, display_name='工作目录', db_lock=None):
+        self.name, self.file_path = display_name, db_path
         self._db_path = Path(db_path)
         self._db_lock = db_lock or threading.RLock()
-        self._lease_owner_id = f"source-{os.getpid()}-{uuid.uuid4().hex}"
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        # 持久化连接：read_write 模式
-        with self._db_lock:
-            self._conn = duckdb.connect(str(self._db_path))
-            self._conn.execute("PRAGMA threads=4")
-        # A6 内存影子：Agent 写 SQL 首次触达时把全库快照进 :memory:，
-        # 之后所有读写都走影子（副 sheet），磁盘文件零改动。
-        self._shadow_conn: duckdb.DuckDBPyConnection | None = None
         self._shadow_lock = threading.RLock()
-        log.info("[WorkspaceDS] opened persistent duckdb: %s  tables=%s",
-                 self._db_path, self.list_tables())
+        self._shadow_conn = None
+        self._owner = WorkspaceDBOwner(db_path)
+        self._conn = _OwnerConnection(self._owner)
+        self._closed = False
+        self.reconcile_mounts()
 
-    # ── A6 shadow (副 sheet) support ─────────────────────────────────────────
-
-    def writable_conn(self):
-        """Return the in-memory shadow, building it on first write.
-
-        All write SQL from the agent executes against this snapshot; the
-        on-disk ``workspace.duckdb`` is never modified by agent SQL.
-        """
-        if self._shadow_conn is not None:
-            return self._shadow_conn
-        with self._shadow_lock:
-            if self._shadow_conn is None:
-                with self._db_lock:
-                    self._shadow_conn = snapshot_tables_to_memory(self._conn)
-                log.info("[WorkspaceDS] shadow snapshot built  tables=%s",
-                         self.list_tables())
-        return self._shadow_conn
+    def reconcile_mounts(self, runtime=None):
+        def load(conn):
+            exists = conn.execute("SELECT 1 FROM information_schema.tables WHERE table_name='_baa_dataset_mounts'").fetchone()
+            return [json.loads(r[0]) for r in conn.execute('SELECT payload FROM _baa_dataset_mounts').fetchall()] if exists else []
+        self._mounts = self._owner.call(load)
+        if runtime is not None:
+            registry = runtime.load_registry()
+            for record in self._mounts:
+                # Keep the original registry key inside authoritative metadata.
+                key = record.get('file_key')
+                if key:
+                    registry[key] = record
+            runtime.save_registry(registry)
+        return list(self._mounts)
 
     def _active_conn(self):
-        """The connection reflecting agent writes: shadow once materialized."""
         return self._shadow_conn if self._shadow_conn is not None else self._conn
 
-    def _register_csv(self, file_path: str, table_name: str) -> bool:
-        """注册 CSV 文件到持久化连接。返回是否成功。"""
-        try:
-            with acquire_synchronous_workspace_write_lease(self._db_path, self._lease_owner_id):
-                # 先删旧表（如果存在）
-                self._conn.execute(f'DROP TABLE IF EXISTS "{table_name}"')
-                self._conn.execute(
-                    f'CREATE OR REPLACE TABLE "{table_name}" AS '
-                    f"SELECT * FROM {_csv_scan_sql(file_path)}"
-                )
-                # 清理列名
-                self._clean_columns(table_name)
-            self._invalidate_shadow()
-            log.info("[WorkspaceDS] registered CSV %s → %s", file_path, table_name)
-            return True
-        except Exception as e:
-            log.warning("[WorkspaceDS] CSV %s failed (%s), trying pandas", file_path, e)
-            try:
-                df = pd.read_csv(
-                    file_path,
-                    encoding="utf-8-sig",
-                    na_values=["", "null", "NULL", "Null", "nan", "NaN", "N/A", "n/a"],
-                    keep_default_na=True,
-                )
-                df.columns = _dedup_columns([_clean_identifier(c) for c in df.columns])
-                df = df.dropna(how="all")
-                with acquire_synchronous_workspace_write_lease(self._db_path, self._lease_owner_id):
-                    self._conn.register("_tmp_ws_", df)
-                    self._conn.execute(
-                        f'CREATE OR REPLACE TABLE "{table_name}" AS SELECT * FROM _tmp_ws_'
-                    )
-                    self._conn.unregister("_tmp_ws_")
-                self._invalidate_shadow()
-                return True
-            except Exception as e2:
-                log.error("[WorkspaceDS] CSV %s pandas fallback failed: %s", file_path, e2)
-                return False
-
-    def _register_excel(self, file_path: str, base_table_name: str) -> List[str]:
-        """注册 Excel 文件所有 sheet 到持久化连接。返回注册成功的表名列表。"""
-        from concurrent.futures import ThreadPoolExecutor
-        import python_calamine  # 优先 calamine
-
-        registered: List[str] = []
-        try:
-            xl_meta = pd.ExcelFile(file_path, engine="calamine")
-            sheet_names = xl_meta.sheet_names
-            xl_meta.close()
-        except Exception:
-            try:
-                xl_meta = pd.ExcelFile(file_path, engine="openpyxl")
-                sheet_names = xl_meta.sheet_names
-                xl_meta.close()
-            except Exception as e:
-                log.error("[WorkspaceDS] Excel %s cannot read sheets: %s", file_path, e)
-                return []
-
-        # 并行解析所有 sheet
-        def _parse(sheet):
-            try:
-                df = pd.read_excel(file_path, sheet_name=sheet, engine="calamine")
-                return sheet, df
-            except Exception:
-                try:
-                    df = pd.read_excel(file_path, sheet_name=sheet, engine="openpyxl")
-                    return sheet, df
-                except Exception as e:
-                    log.warning("[WorkspaceDS] sheet %s failed: %s", sheet, e)
-                    return sheet, None
-
-        # calamine (Rust engine) releases the GIL → real parallelism.
-        # 4 → 8 capped by sheet count; registration itself stays serialized
-        # behind the workspace db_lock, only parsing is parallel.
-        with ThreadPoolExecutor(max_workers=min(8, len(sheet_names))) as pool:
-            results = list(pool.map(_parse, sheet_names))
-
-        with acquire_synchronous_workspace_write_lease(self._db_path, self._lease_owner_id):
-            for sheet, df in results:
-                if df is None or df.empty:
-                    continue
-                df.columns = _dedup_columns([_clean_identifier(c) for c in df.columns])
-                df = df.dropna(how="all")
-                # 表名：sheet 名（多 sheet 时用 sheet 名，单 sheet 时用文件名）
-                if len(sheet_names) == 1:
-                    table_name = base_table_name
-                else:
-                    table_name = _clean_identifier(sheet) or f"{base_table_name}_{sheet}"
-                try:
-                    self._conn.register("_tmp_ws_", df)
-                    self._conn.execute(
-                        f'CREATE OR REPLACE TABLE "{table_name}" AS SELECT * FROM _tmp_ws_'
-                    )
-                    self._conn.unregister("_tmp_ws_")
-                    registered.append(table_name)
-                except Exception as e:
-                    log.error("[WorkspaceDS] register sheet %s failed: %s", sheet, e)
+    def writable_conn(self):
+        """Only a small, exact Arrow copy is permitted; large views need a plan."""
+        with self._shadow_lock:
+            if self._shadow_conn is not None:
+                return self._shadow_conn
+            def detach_tables(conn, pins):
+                from data.dataset_manifest import PinnedSnapshot
+                exists = conn.execute("SELECT 1 FROM information_schema.tables WHERE table_name='_baa_dataset_mounts'").fetchone()
+                records = [json.loads(r[0]) for r in conn.execute('SELECT payload FROM _baa_dataset_mounts').fetchall()] if exists else []
+                for record in records:
+                    handle = DatasetHandle.from_dict(record['dataset_handle'])
+                    for table in handle.manifest['tables']:
+                        tree = validate_snapshot_query(f'SELECT * FROM {quote_identifier(table["name"])}', [table['name']])
+                        validate_snapshot_precision(tree, [table])
+                    pins.enter_context(PinnedSnapshot(handle))
+                names = [r[0] for r in conn.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='main' AND NOT starts_with(table_name, '_baa_') ORDER BY table_name").fetchall()]
+                tables, size, rows = [], 0, 0
+                for name in names:
+                    reader = conn.execute(f'SELECT * FROM {quote_identifier(name)}').to_arrow_reader(batch_size=1024)
+                    batches = []
                     try:
-                        self._conn.unregister("_tmp_ws_")
-                    except Exception:
-                        pass
-
-        log.info("[WorkspaceDS] registered Excel %s → tables=%s", file_path, registered)
-        if registered:
-            self._invalidate_shadow()
-        return registered
-
-    def _clean_columns(self, table_name: str):
-        """重命名表的列为合法标识符。"""
-        _clean_table_columns(self._conn, table_name)
+                        schema = reader.schema
+                        for batch in reader:
+                            rows += batch.num_rows
+                            size += batch.nbytes
+                            if rows > 100000 or size > 32 << 20:
+                                raise ValueError('immutable_dataset: large workspace writes require a derived snapshot plan')
+                            batches.append(batch)
+                    finally:
+                        reader.close()
+                    import pyarrow as pa
+                    tables.append((name, pa.Table.from_batches(batches, schema=schema)))
+                return tables
+            def detach(conn):
+                from contextlib import ExitStack
+                with ExitStack() as pins:
+                    return detach_tables(conn, pins)
+            tables = self._owner.call(detach, transaction=True)
+            shadow = duckdb.connect(':memory:')
+            try:
+                for name, table in tables:
+                    shadow.register('_typed_copy', table)
+                    shadow.execute(f'CREATE TABLE {quote_identifier(name)} AS SELECT * FROM _typed_copy')
+                    shadow.unregister('_typed_copy')
+            except BaseException:
+                shadow.close()
+                raise
+            self._shadow_conn = shadow
+            return shadow
 
     def _invalidate_shadow(self):
-        """Discard the in-memory snapshot (user imports changed the file DB)."""
-        stale = self._shadow_conn
-        self._shadow_conn = None
-        if stale is not None:
-            try:
-                stale.close()
-            except Exception:
-                pass
-            log.info("[WorkspaceDS] shadow dropped — file DB changed")
+        with self._shadow_lock:
+            if self._shadow_conn is not None:
+                self._shadow_conn.close()
+                self._shadow_conn = None
 
-    # ── DataSource 接口实现 ──────────────────────────────────────────────────
-
-    def get_schema(self) -> str:
-        parts: List[str] = []
-        with self._shadow_or_db_lock():
-            conn = self._active_conn()
-            for table in (self.list_tables() or []):
-                try:
-                    rows = conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
-                    parts.append(_table_schema_str(conn, table, rows))
-                except Exception as e:
-                    log.warning("[WorkspaceDS] schema for %s failed: %s", table, e)
-        return "\n\n".join(parts) if parts else "No tables in workspace."
-
-    def execute_query(self, sql: str) -> Tuple[pd.DataFrame, str]:
-        # A6: agent writes go to the in-memory shadow, never the file DB.
-        if is_write_sql(sql):
-            with self._shadow_lock:
-                return _query(self.writable_conn(), sql)
-        with self._db_lock:
-            # Reads also prefer the shadow once it exists, so post-write
-            # SELECTs observe the agent's own modifications.
-            return _query(self._active_conn(), sql)
-
-    def get_preview(self) -> List[dict]:
-        result = []
-        with self._shadow_or_db_lock():
-            conn = self._active_conn()
-            for table in self.list_tables():
-                try:
-                    rows = conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
-                    info = _preview_table_dict(conn, table, table, 0)
-                    info["total_rows"] = rows
-                    result.append(info)
-                except Exception:
-                    pass
-        return result
-
-    def get_preview_table(self, table_name: str, max_rows: int = 100) -> dict:
-        with self._shadow_or_db_lock():
-            return _preview_table_dict(self._active_conn(), table_name, table_name, max_rows)
-
-    def create_analysis_table(self, sql: str, table_name: str = "analysis_data", _df=None) -> str:
+    def _register_snapshot(self, file_path, table_name):
+        from data.import_pipeline import import_file_source
+        source = import_file_source(file_path, options={'table_name': _clean_identifier(table_name)})
         try:
-            if self._shadow_conn is not None or is_write_sql(sql or ""):
-                # A6: once the shadow is active (agent wrote SQL), derived
-                # tables must live in it too — the file DB never sees agent
-                # writes, and the shadow is the only consistent view.
-                with self._shadow_lock:
-                    conn = self.writable_conn()
-                    if _df is not None:
-                        temp_name = "_workspace_analysis_frame_"
-                        conn.register(temp_name, _df)
-                        try:
-                            conn.execute(
-                                f'CREATE OR REPLACE TABLE "{table_name}" AS '
-                                f'SELECT * FROM "{temp_name}"'
-                            )
-                        finally:
-                            conn.unregister(temp_name)
-                    else:
-                        conn.execute(
-                            f'CREATE OR REPLACE TABLE "{table_name}" AS ({sql})'
-                        )
-                    rows = conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
-            else:
-                with acquire_synchronous_workspace_write_lease(self._db_path, self._lease_owner_id):
-                    with self._db_lock:
-                        if _df is not None:
-                            temp_name = "_workspace_analysis_frame_"
-                            self._conn.register(temp_name, _df)
-                            try:
-                                self._conn.execute(
-                                    f'CREATE OR REPLACE TABLE "{table_name}" AS '
-                                    f'SELECT * FROM "{temp_name}"'
-                                )
-                            finally:
-                                self._conn.unregister(temp_name)
-                        else:
-                            self._conn.execute(
-                                f'CREATE OR REPLACE TABLE "{table_name}" AS ({sql})'
-                            )
-                        rows = self._conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
-            return f"表 '{table_name}' 已创建，共 {rows} 行。"
-        except Exception as e:
-            return f"创建表失败：{e}"
+            key = str(Path(file_path).name)
+            prior = self._owner.call(lambda c: c.execute("SELECT 1 FROM information_schema.tables WHERE table_name='_baa_dataset_mounts'").fetchone())
+            old_tables = []
+            if prior:
+                row = self._owner.execute('SELECT payload FROM _baa_dataset_mounts WHERE file_key=?', [key]).fetchone()
+                if row:
+                    old_tables = json.loads(row[0])['tables']
+            record = _install_snapshot(self._owner, source.handle, old_tables=old_tables, file_key=key)
+            self._invalidate_shadow()
+            self.reconcile_mounts()
+            return record['tables']
+        finally:
+            source.close()
 
-    def list_tables(self) -> List[str]:
-        with self._shadow_or_db_lock():
-            return _list_tables(self._active_conn())
+    def _register_csv(self, file_path: str, table_name: str) -> bool:
+        self._register_snapshot(file_path, table_name)
+        return True
+
+    def _register_excel(self, file_path: str, base_table_name: str):
+        if Path(file_path).suffix.lower() == '.xlsx':
+            return self._register_snapshot(file_path, base_table_name)
+        # Historical XLS stays explicitly small and installs exact Arrow types.
+        if Path(file_path).stat().st_size > 5_000_000:
+            raise ValueError('Large XLS requires conversion to XLSX/CSV/Parquet')
+        from .excel import ExcelDataSource
+        source = ExcelDataSource(file_path, Path(file_path).name)
+        try:
+            tables = []
+            for name in source.list_tables():
+                target = _clean_identifier(base_table_name) if len(source.list_tables()) == 1 else name
+                table = source._conn.execute(f'SELECT * FROM {quote_identifier(name)}').to_arrow_table()
+                if table.nbytes > 32 << 20 or table.num_rows > 100000:
+                    raise ValueError('Small XLS exceeds decoded compatibility limit')
+                def install(conn):
+                    conn.register('_xls_batch', table)
+                    try:
+                        conn.execute(f'CREATE OR REPLACE TABLE {quote_identifier(target)} AS SELECT * FROM _xls_batch')
+                    finally:
+                        conn.unregister('_xls_batch')
+                self._owner.transaction(install)
+                tables.append(target)
+            self._invalidate_shadow()
+            return tables
+        finally:
+            source.close()
+
+    def list_tables(self):
+        with self._shadow_lock:
+            if self._shadow_conn is not None:
+                return _list_tables(self._shadow_conn)
+            return [r[0] for r in self._owner.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='main' AND NOT starts_with(table_name, '_baa_') ORDER BY table_name").fetchall()]
+
+    def get_schema(self):
+        with self._shadow_lock:
+            conn = self._active_conn()
+            return '\n\n'.join(_table_schema_str(conn, t, conn.execute(f'SELECT COUNT(*) FROM {quote_identifier(t)}').fetchone()[0]) for t in self.list_tables())
+
+    def execute_query(self, sql):
+        try:
+            with self._shadow_lock:
+                conn = self.writable_conn() if is_write_sql(sql) else self._active_conn()
+                if conn is self._conn:
+                    import pyarrow as pa
+                    from infrastructure.resource_budget import BudgetSpec
+                    limits = BudgetSpec(max_rows=100000, max_output_bytes=64 << 20)
+                    batches = list(self.execute_query_batches(sql, budget=limits))
+                    return pa.Table.from_batches(batches, schema=self._result_schema).to_pandas(types_mapper=pd.ArrowDtype), ''
+                import pyarrow as pa
+                reader = conn.execute(sql).to_arrow_reader(batch_size=1024)
+                batches, rows, size = [], 0, 0
+                try:
+                    schema = reader.schema
+                    for batch in reader:
+                        rows += batch.num_rows
+                        size += batch.nbytes
+                        if rows > 100000 or size > 64 << 20:
+                            raise ValueError('Workspace result exceeds bounded legacy limit')
+                        batches.append(batch)
+                finally:
+                    reader.close()
+                return pa.Table.from_batches(batches, schema=schema).to_pandas(types_mapper=pd.ArrowDtype), ''
+        except Exception as exc:
+            return pd.DataFrame(), str(exc)
+
+    def execute_query_batches(self, sql, *, budget=None, cancel=None):
+        """Owner-thread producer with bounded backpressure and fixed mount pins."""
+        import queue
+        import uuid
+        from contextlib import ExitStack
+        from data.dataset_snapshot import check_cancel
+        from data.dataset_manifest import PinnedSnapshot
+        from infrastructure.resource_budget import BudgetSpec, BudgetExceeded, ResourceCoordinator
+        limits = BudgetSpec.from_dict(budget)
+        tree = validate_snapshot_query(sql, self.list_tables())
+        with self._shadow_lock:
+            if self._shadow_conn is not None:
+                # Shadow creation is restricted to small inputs; result bounds
+                # still apply when a SELECT expands it with joins.
+                reader = self._shadow_conn.execute(sql).to_arrow_reader(batch_size=1024)
+                rows = size = 0
+                try:
+                    self._result_schema = reader.schema
+                    for batch in reader:
+                        check_cancel(cancel)
+                        rows += batch.num_rows
+                        size += batch.nbytes
+                        limits.check_usage(rows=rows, output_bytes=size)
+                        if batch.nbytes > limits.batch_bytes:
+                            raise BudgetExceeded('batch_bytes', batch.nbytes, limits.batch_bytes)
+                        yield batch
+                finally:
+                    reader.close()
+                return
+            reservation = limits.to_dict()
+            reservation.update(max_input_bytes=1, max_output_bytes=1)
+            coordinator = ResourceCoordinator()
+            coordinator.register_account_path(self._db_path)
+            coordinator.register_account_path(self._db_path.with_name(self._db_path.name + '.spill'))
+            with coordinator.reserve('workspace', 'query-' + uuid.uuid4().hex, reservation):
+                pending = queue.Queue(maxsize=limits.queue_batches)
+                stop, errors = threading.Event(), []
+                started = time.monotonic()
+                def check():
+                    if errors:
+                        raise errors[0]
+                    if stop.is_set():
+                        raise ImportFailure('canceled', 'Workspace stream closed')
+                    check_cancel(cancel)
+                    limits.check_usage(run_seconds=time.monotonic() - started)
+                def send(kind, value):
+                    while True:
+                        check()
+                        try:
+                            pending.put((kind, value), timeout=0.05)
+                            return
+                        except queue.Full:
+                            pass
+                def produce(conn):
+                    check()
+                    with ExitStack() as pins:
+                        exists = conn.execute("SELECT 1 FROM information_schema.tables WHERE table_name='_baa_dataset_mounts'").fetchone()
+                        records = [json.loads(r[0]) for r in conn.execute('SELECT payload FROM _baa_dataset_mounts').fetchall()] if exists else []
+                        pinned, table_metadata = [], []
+                        input_bytes = 0
+                        for record in records:
+                            handle = DatasetHandle.from_dict(record['dataset_handle'])
+                            validate_snapshot_precision(tree, handle.manifest['tables'])
+                            table_metadata.extend(handle.manifest['tables'])
+                            input_bytes += sum(f['size_bytes'] for f in handle.manifest['files'])
+                            limits.check_usage(input_bytes=input_bytes)
+                            pinned.append(pins.enter_context(PinnedSnapshot(handle, budget=limits, cancel=lambda: stop.is_set() or bool(cancel and cancel()))))
+                        self._last_read_tables = table_metadata
+                        previous = conn.execute("SELECT current_setting('memory_limit'),current_setting('threads'),current_setting('max_temp_directory_size')").fetchone()
+                        reader = None
+                        try:
+                            conn.execute('SET memory_limit=?', [f'{min(limits.duckdb_memory_bytes, 1 << 30)}B'])
+                            conn.execute('SET threads=?', [min(limits.threads, 4)])
+                            conn.execute('SET max_temp_directory_size=?', [f'{min(limits.temp_bytes, 8 << 30)}B'])
+                            cursor = conn.execute(sql)
+                            reader = cursor.to_arrow_reader(batch_size=query_batch_rows(cursor, tree, table_metadata, limits, ceiling=1024))
+                            send('schema', reader.schema)
+                            rows = size = 0
+                            def pieces(batch):
+                                if batch.nbytes <= limits.batch_bytes:
+                                    yield batch
+                                elif batch.num_rows > 1:
+                                    middle = batch.num_rows // 2
+                                    yield from pieces(batch.slice(0, middle))
+                                    yield from pieces(batch.slice(middle))
+                                else:
+                                    raise BudgetExceeded('batch_bytes', batch.nbytes, limits.batch_bytes)
+                            for batch in reader:
+                                for piece in pieces(batch):
+                                    check()
+                                    for pin in pinned:
+                                        pin.check()
+                                    rows += piece.num_rows
+                                    size += piece.nbytes
+                                    limits.check_usage(rows=rows, output_bytes=size)
+                                    send('batch', piece)
+                        finally:
+                            if reader is not None:
+                                reader.close()
+                            for setting, value in zip(('memory_limit', 'threads', 'max_temp_directory_size'), previous):
+                                conn.execute(f'SET {setting}=?', [value])
+                future = self._owner.submit(produce)
+                def watch():
+                    import psutil
+                    while not stop.wait(0.05):
+                        try:
+                            check()
+                            limits.check_usage(rss_bytes=psutil.Process().memory_info().rss)
+                            from infrastructure.resource_budget import directory_usage
+                            limits.check_usage(temp_bytes=directory_usage(self._db_path.with_name(self._db_path.name + '.spill'))['bytes'])
+                        except BaseException as exc:
+                            errors.append(exc)
+                            future.cancel()
+                            self._owner.interrupt(future)
+                            return
+                watcher = threading.Thread(target=watch, name='workspace-query-budget', daemon=True)
+                watcher.start()
+                try:
+                    while True:
+                        check()
+                        try:
+                            kind, value = pending.get(timeout=0.05)
+                        except queue.Empty:
+                            if future.done():
+                                future.result()
+                                break
+                            continue
+                        if kind == 'schema':
+                            self._result_schema = value
+                        else:
+                            yield value
+                    if errors:
+                        raise errors[0]
+                finally:
+                    stop.set()
+                    future.cancel()
+                    self._owner.interrupt(future)
+                    watcher.join(timeout=1)
+                    # The producer observes stop while waiting on a full queue;
+                    # retain the lease until it actually leaves the connection.
+                    try:
+                        future.result()
+                    except BaseException:
+                        pass
+
+    def get_preview(self):
+        with self._shadow_lock:
+            return [self.get_preview_table(t, max_rows=0) for t in self.list_tables()]
+
+    def get_preview_table(self, table_name, max_rows=100):
+        if table_name not in self.list_tables():
+            return {'name': table_name, 'columns': [], 'rows': [], 'total_rows': 0, 'error': 'unknown_table'}
+        with self._shadow_lock:
+            if self._shadow_conn is not None:
+                return _preview_table_dict(self._shadow_conn, table_name, table_name, max(0, min(int(max_rows), 1000)))
+            frame, error = self.execute_query(f'SELECT * FROM {quote_identifier(table_name)} LIMIT {max(0, min(int(max_rows), 1000))}')
+            metadata = next((t for t in getattr(self, '_last_read_tables', []) if t['name'] == table_name), None)
+            total = metadata['row_count'] if metadata else self._owner.execute(f'SELECT COUNT(*) FROM {quote_identifier(table_name)}').fetchone()[0]
+            rows = [[None if v is None or v is pd.NA or v is pd.NaT else str(v) for v in row]
+                    for row in frame.itertuples(index=False, name=None)]
+            result = {'name': table_name, 'columns': list(frame.columns), 'rows': rows, 'total_rows': total}
+            if error:
+                result['error'] = error
+            return result
+
+    def create_analysis_table(self, sql, table_name='analysis_data', _df=None):
+        try:
+            with self._shadow_lock:
+                conn = self.writable_conn()
+                if _df is not None:
+                    import pyarrow as pa
+                    table = pa.Table.from_pandas(_df, preserve_index=False)
+                    if table.nbytes > 32 << 20 or table.num_rows > 100000:
+                        raise ValueError('Analysis result exceeds small workspace limit')
+                    conn.register('_analysis_batch', table)
+                    try:
+                        conn.execute(f'CREATE OR REPLACE TABLE {quote_identifier(table_name)} AS SELECT * FROM _analysis_batch')
+                    finally:
+                        conn.unregister('_analysis_batch')
+                else:
+                    conn.execute(f'CREATE OR REPLACE TABLE {quote_identifier(table_name)} AS ({sql})')
+                return _table_schema_str(conn, table_name, conn.execute(f'SELECT COUNT(*) FROM {quote_identifier(table_name)}').fetchone()[0])
+        except Exception as exc:
+            return f'创建表失败：{exc}'
+
+    def get_capabilities(self):
+        self.reconcile_mounts()
+        return {'query_dialect': 'duckdb', 'batch_reader': True, 'execute_query_batches': True, 'immutable': False, 'large': bool(self._mounts),
+                'bounded_legacy_result': True, 'requires_table_selection': bool(self._mounts),
+                'database_access': 'single_owner_thread', 'large_writes': 'derived_snapshot_required'}
 
     def close(self):
-        """关闭持久化连接。"""
-        for conn in (self._conn, self._shadow_conn):
-            try:
-                if conn is not None:
-                    conn.close()
-            except Exception:
-                pass
-
-    def _shadow_or_db_lock(self):
-        """Lock guarding whichever connection is currently active."""
-        return self._shadow_lock if self._shadow_conn is not None else self._db_lock
+        if not self._closed:
+            self._invalidate_shadow()
+            self._owner.close()
+            self._closed = True

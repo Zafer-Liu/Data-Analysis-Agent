@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "snapshot_file": "snapshot.json",
+  "snapshot_sha256": "8ecb1da2fb129327c3cd77f8a79fd9e9873cb291cfc94079a0cc19db1d8f6895",
+  "cases": [
+    {"id":"single-table-v1","category":"single_table_query","snapshot_id":"sha256:8ecb1da2fb129327c3cd77f8a79fd9e9873cb291cfc94079a0cc19db1d8f6895","prompt":"Sum paid order revenue in January and February 2026, excluding null amounts.","expected_evidence":["source_window","gross_result"],"min_trials":3},
+    {"id":"cross-table-v1","category":"cross_table_analysis","snapshot_id":"sha256:8ecb1da2fb129327c3cd77f8a79fd9e9873cb291cfc94079a0cc19db1d8f6895","prompt":"Calculate net revenue after confirmed partial refunds without duplicating order revenue.","expected_evidence":["join_grain","net_result"],"min_trials":3},
+    {"id":"knowledge-v1","category":"knowledge_retrieval","snapshot_id":"sha256:8ecb1da2fb129327c3cd77f8a79fd9e9873cb291cfc94079a0cc19db1d8f6895","prompt":"Find the refund-rate policy and reject unrelated inventory evidence.","expected_evidence":["policy_reference","unrelated_empty"],"min_trials":3},
+    {"id":"report-v1","category":"long_report","snapshot_id":"sha256:8ecb1da2fb129327c3cd77f8a79fd9e9873cb291cfc94079a0cc19db1d8f6895","prompt":"Deliver a long local report with exact revenue evidence and full artifact readback.","expected_evidence":["report_sections","full_artifact"],"min_trials":3},
+    {"id":"chart-v1","category":"chart","snapshot_id":"sha256:8ecb1da2fb129327c3cd77f8a79fd9e9873cb291cfc94079a0cc19db1d8f6895","prompt":"Prepare a monthly paid-revenue chart specification tied to the source rows.","expected_evidence":["chart_spec","data_basis"],"min_trials":3},
+    {"id":"file-read-v1","category":"file_read","snapshot_id":"sha256:8ecb1da2fb129327c3cd77f8a79fd9e9873cb291cfc94079a0cc19db1d8f6895","prompt":"Read a bounded synthetic policy file and verify its content hash.","expected_evidence":["file_hash","bounded_read"],"min_trials":3},
+    {"id":"mcp-v1","category":"mcp_query","snapshot_id":"sha256:8ecb1da2fb129327c3cd77f8a79fd9e9873cb291cfc94079a0cc19db1d8f6895","prompt":"Query the synthetic local MCP adapter and retain its source identity.","expected_evidence":["adapter_identity","adapter_result"],"min_trials":3},
+    {"id":"workflow-v1","category":"workflow","snapshot_id":"sha256:8ecb1da2fb129327c3cd77f8a79fd9e9873cb291cfc94079a0cc19db1d8f6895","prompt":"Run a local query-transform-deliver workflow and reconnect without re-execution.","expected_evidence":["node_evidence","reconnect_once"],"min_trials":3},
+    {"id":"dynamic-team-v1","category":"dynamic_team","snapshot_id":"sha256:8ecb1da2fb129327c3cd77f8a79fd9e9873cb291cfc94079a0cc19db1d8f6895","prompt":"Combine local analyst and checker results only after structured evidence review.","expected_evidence":["member_evidence","review_gate"],"min_trials":3},
+    {"id":"retry-v1","category":"failure_retry","snapshot_id":"sha256:8ecb1da2fb129327c3cd77f8a79fd9e9873cb291cfc94079a0cc19db1d8f6895","prompt":"Recover from one controlled adapter timeout and count both attempts.","expected_evidence":["failure_recorded","retry_result"],"min_trials":3},
+    {"id":"quality-v1","category":"data_quality","snapshot_id":"sha256:8ecb1da2fb129327c3cd77f8a79fd9e9873cb291cfc94079a0cc19db1d8f6895","prompt":"Check null amounts, duplicate order IDs and the paid-order population.","expected_evidence":["null_rule","unique_grain"],"min_trials":3},
+    {"id":"delivery-v1","category":"structured_delivery","snapshot_id":"sha256:8ecb1da2fb129327c3cd77f8a79fd9e9873cb291cfc94079a0cc19db1d8f6895","prompt":"Persist and validate a structured local result with a denominator and evidence.","expected_evidence":["structured_format","denominator"],"min_trials":3},
+    {"id":"revision-v1","category":"semantic_revision","snapshot_id":"sha256:8ecb1da2fb129327c3cd77f8a79fd9e9873cb291cfc94079a0cc19db1d8f6895","prompt":"Keep the original definition snapshot interpretable after same-version content replacement.","expected_evidence":["immutable_revision","historic_rule"],"min_trials":3},
+    {"id":"cancel-v1","category":"cancellation_replay","snapshot_id":"sha256:8ecb1da2fb129327c3cd77f8a79fd9e9873cb291cfc94079a0cc19db1d8f6895","prompt":"Cancel a local child before another tool starts, then replay the durable receipt.","expected_evidence":["canceled_boundary","receipt_replay"],"min_trials":3}
+  ]
+}

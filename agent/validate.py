@@ -443,7 +443,7 @@ def _validate_sql_ast(sql: str, allowed_roots: Optional[List[Path]] = None) -> O
 
 
 def validate_sql_structured(
-    sql: str, allowed_roots: Optional[List[Path]] = None
+    sql: str, allowed_roots: Optional[List[Path]] = None, *, dialect: str = "duckdb", strict: bool = False
 ) -> SqlValidationResult:
     """AST-level SQL validation with a structured three-state outcome.
 
@@ -462,6 +462,8 @@ def validate_sql_structured(
     except ImportError:
         # sqlglot not installed — fall back to conservative heuristic
         log.debug("[validate] sqlglot not available, using heuristic fallback")
+        if strict:
+            return SqlValidationResult("failed", "Target-dialect SQL parser is unavailable", code=SQLG_NOT_INSTALLED)
         err = _validate_sql_heuristic(sql)
         if err:
             return SqlValidationResult("failed", err, used_heuristic=True)
@@ -474,8 +476,16 @@ def validate_sql_structured(
 
     # ── Parse ──────────────────────────────────────────────────────────────────
     try:
-        statements = sqlglot.parse(sql, dialect="duckdb", error_level=sqlglot.ErrorLevel.RAISE)
+        if dialect not in {"duckdb", "trino", "hive", "spark"}:
+            return SqlValidationResult("failed", "Unsupported SQL target dialect", code=SQLG_PARSE_FAILED)
+        statements = sqlglot.parse(sql, dialect=dialect, error_level=sqlglot.ErrorLevel.RAISE)
+        if dialect != "duckdb" and (len(statements) != 1 or not isinstance(statements[0], exp.Query)
+                                   or any(isinstance(node, (exp.Insert, exp.Update, exp.Delete, exp.Create, exp.Drop, exp.Merge))
+                                          for node in statements[0].walk())):
+            return SqlValidationResult("failed", "Cluster queries must be one read-only SELECT/WITH statement")
     except Exception as exc:
+        if strict or dialect != "duckdb":
+            return SqlValidationResult("failed", "SQL could not be verified for the selected target dialect", code=SQLG_PARSE_FAILED)
         # Parse error — could be valid DuckDB but not parseable by sqlglot.
         # Fall back to heuristic rather than blocking legitimate queries.
         log.debug("[validate] sqlglot parse error (%s), falling back to heuristic", exc)
@@ -578,6 +588,7 @@ def validate_tool_args(
     args: Dict[str, Any],
     allowed_roots: Optional[List[Path]] = None,
     workspace_authorization: Optional["WorkspacePathAuthorization"] = None,
+    sql_dialect: str = "duckdb",
 ) -> Optional[str]:
     """Return an error string if args are obviously invalid, else None.
 
@@ -605,7 +616,7 @@ def validate_tool_args(
         sql = (args.get("sql") or "").strip()
         if not sql:
             return f"'{name}' requires a non-empty 'sql' argument."
-        validation = validate_sql_structured(sql, allowed_roots=allowed_roots)
+        validation = validate_sql_structured(sql, allowed_roots=allowed_roots, dialect=sql_dialect, strict=sql_dialect != "duckdb")
         if validation.status == "failed":
             return f"'{name}' SQL validation failed: {validation.message}"
 

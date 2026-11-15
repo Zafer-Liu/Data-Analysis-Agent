@@ -23,6 +23,10 @@ const islandLoaders = Object.freeze({
     const { mountWorkspaceUi } = await import("./ui/workspace-ui.js");
     mountWorkspaceUi();
   },
+  computeData: async () => {
+    const { mountComputeDataUi } = await import("./ui/compute-data-ui.js");
+    await mountComputeDataUi();
+  },
   businessCanvas: async () => {
     const { mountBusinessCanvasUi } = await import("./ui/business-canvas-ui.js");
     mountBusinessCanvasUi();

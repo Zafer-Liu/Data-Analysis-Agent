@@ -1,8 +1,99 @@
 {
-  "frontend/entries/dashboard.js": {
-    "file": "dashboard.js",
-    "name": "dashboard",
-    "src": "frontend/entries/dashboard.js",
-    "isEntry": true
+  "_api-client-DBwfUb_k.js": {
+    "file": "chunks/api-client-DBwfUb_k.js",
+    "name": "api-client"
+  },
+  "_ui-registry-DFa9M3jC.js": {
+    "file": "chunks/ui-registry-DFa9M3jC.js",
+    "name": "ui-registry",
+    "imports": [
+      "_api-client-DBwfUb_k.js"
+    ],
+    "dynamicImports": [
+      "frontend/features/ui/compute-data-ui.js"
+    ]
+  },
+  "frontend/entries/chat-app.js": {
+    "file": "chat-app.js",
+    "name": "chat-app",
+    "src": "frontend/entries/chat-app.js",
+    "isEntry": true,
+    "imports": [
+      "_ui-registry-DFa9M3jC.js",
+      "_api-client-DBwfUb_k.js"
+    ],
+    "dynamicImports": [
+      "frontend/features/ui/job-history-ui.js",
+      "frontend/features/ui/knowledge-ui.js",
+      "frontend/features/ui/mcp-ui.js",
+      "frontend/features/ui/settings-ui.js",
+      "frontend/features/ui/workspace-ui.js",
+      "frontend/features/ui/compute-data-ui.js",
+      "frontend/features/ui/business-canvas-ui.js"
+    ]
+  },
+  "frontend/features/ui/business-canvas-ui.js": {
+    "file": "chunks/business-canvas-ui-BtrSxKuR.js",
+    "name": "business-canvas-ui",
+    "src": "frontend/features/ui/business-canvas-ui.js",
+    "isDynamicEntry": true,
+    "imports": [
+      "_ui-registry-DFa9M3jC.js"
+    ]
+  },
+  "frontend/features/ui/compute-data-ui.js": {
+    "file": "chunks/compute-data-ui-3ofdtUKo.js",
+    "name": "compute-data-ui",
+    "src": "frontend/features/ui/compute-data-ui.js",
+    "isDynamicEntry": true,
+    "imports": [
+      "_ui-registry-DFa9M3jC.js"
+    ]
+  },
+  "frontend/features/ui/job-history-ui.js": {
+    "file": "chunks/job-history-ui-CZgEnPcH.js",
+    "name": "job-history-ui",
+    "src": "frontend/features/ui/job-history-ui.js",
+    "isDynamicEntry": true,
+    "imports": [
+      "_ui-registry-DFa9M3jC.js"
+    ]
+  },
+  "frontend/features/ui/knowledge-ui.js": {
+    "file": "chunks/knowledge-ui-C36WV9wU.js",
+    "name": "knowledge-ui",
+    "src": "frontend/features/ui/knowledge-ui.js",
+    "isDynamicEntry": true,
+    "imports": [
+      "_ui-registry-DFa9M3jC.js",
+      "_api-client-DBwfUb_k.js"
+    ]
+  },
+  "frontend/features/ui/mcp-ui.js": {
+    "file": "chunks/mcp-ui-RtWwrHNF.js",
+    "name": "mcp-ui",
+    "src": "frontend/features/ui/mcp-ui.js",
+    "isDynamicEntry": true,
+    "imports": [
+      "_ui-registry-DFa9M3jC.js"
+    ]
+  },
+  "frontend/features/ui/settings-ui.js": {
+    "file": "chunks/settings-ui-CRSc7Can.js",
+    "name": "settings-ui",
+    "src": "frontend/features/ui/settings-ui.js",
+    "isDynamicEntry": true,
+    "imports": [
+      "_ui-registry-DFa9M3jC.js"
+    ]
+  },
+  "frontend/features/ui/workspace-ui.js": {
+    "file": "chunks/workspace-ui-BNKFR_LL.js",
+    "name": "workspace-ui",
+    "src": "frontend/features/ui/workspace-ui.js",
+    "isDynamicEntry": true,
+    "imports": [
+      "_ui-registry-DFa9M3jC.js"
+    ]
   }
 }

@@ -17,6 +17,7 @@ ALLOWED_ROOT_DIRS = (
     "Information",
     "LLM",
     "packaging",
+    "remote_runner",
     "skills",
     "static",
     "templates",

@@ -61,7 +61,21 @@ AGENT_TOOLS = [
                             "Use the original user wording — e.g. '日活', 'DAU', '次日留存率', "
                             "'客户流失', 'LTV', '复购率'. Both Chinese and English are supported."
                         ),
-                    }
+                    },
+                    "definition_ref": {
+                        "type": "object",
+                        "description": "Read a named ontology definition/revision exactly instead of repeating semantic search. Follow next_offset until the required definition is complete.",
+                        "properties": {
+                            "ontology_id": {"type": "string", "description": "Exact ontology ID returned by retrieval; stringify numeric IDs."},
+                            "path": {"type": "string", "description": "Exact definition path returned by retrieval."},
+                            "revision_id": {"type": "string", "description": "Optional immutable revision ID; preserve it across follow-up pages."},
+                            "replace_context": {"type": "boolean", "default": False, "description": "After the user selects one business definition, begin a new semantic selection using this definition. Only use on its first page; otherwise preserve the pinned context."},
+                            "offset": {"type": "integer", "minimum": 0, "default": 0},
+                            "limit": {"type": "integer", "minimum": 1, "maximum": 4000, "default": 4000},
+                        },
+                        "required": ["ontology_id", "path"],
+                        "additionalProperties": False,
+                    },
                 },
                 "required": ["question"],
             },
@@ -244,7 +258,7 @@ AGENT_TOOLS = [
                     },
                     "analysis_options": {
                         "type": "object",
-                        "description": "Analysis-specific options. For AB_Test_Analysis: control_group, metric_type (auto/binary/continuous), expected_allocation. For Time_Series_TimesFM3: time_column, series_column OR target_columns, horizon (default 7), frequency, backtest_steps (default 0), make_positive, use_symmetric_averaging. Only use an already configured local forecast service; never download models or pass URLs.",
+                        "description": "Analysis-specific options. For AB_Test_Analysis: control_group, metric_type (auto/binary/continuous), expected_allocation. For Time_Series_TimesFM3: time_column, series_column OR target_columns, horizon (default 7), frequency, backtest_steps (default 0), make_positive, use_symmetric_averaging. For approved remote Torch_MLP/Torch_RNN: execution_target=remote, approved_plan_id, grant_id, idempotency_key; the server validates an existing user-approved plan and immutable snapshot before dispatch. A queued remote job is not a completed analysis. Only use configured services; never download models, invent grants or pass URLs.",
                     },
                     "purpose": {
                         "type": "string",
@@ -1338,14 +1352,67 @@ TASK_TOOL_SCHEMAS = [
 AGENT_TOOLS.extend(TASK_TOOL_SCHEMAS)
 
 TEAM_TOOL_SCHEMAS = [
-    {"type": "function", "function": {"name": "team_create", "description": "Create a persistent analyst team definition in the mounted workspace. Members are roles, not unrestricted OS processes. Team and member names may be Chinese or English. Pass members as an array of objects, not a string. The platform automatically adds a fixed read-only quality reviewer member for data/SQL evidence checks.", "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "description": {"type": "string"}, "members": {"type": "array", "items": {"type": "object", "properties": {"name": {"type": "string"}, "role": {"type": "string"}, "instructions": {"type": "string"}}, "required": ["name"]}}}, "required": ["name", "members"]}}},
-    {"type": "function", "function": {"name": "team_delete", "description": "Delete a team definition and mailbox from the mounted workspace. Protected by default: if the team has messages, errors, or quality-review evidence, first inspect team_status and keep it for audit. Only pass force=true when the user explicitly confirms deletion after review.", "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "force": {"type": "boolean", "description": "Set true only after explicit user confirmation; bypasses evidence-retention protection but still refuses active queued/running teams."}}, "required": ["name"]}}},
-    {"type": "function", "function": {"name": "team_list", "description": "List persistent analyst teams in the mounted workspace with member statuses.", "parameters": {"type": "object", "properties": {}}}},
-    {"type": "function", "function": {"name": "team_status", "description": "Get one workspace team status, member inbox counts, and recent mailbox messages.", "parameters": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}}},
-    {"type": "function", "function": {"name": "send_message", "description": "Store a message for a named member in a mounted-workspace team mailbox. Use recipient='*' to broadcast to all members.", "parameters": {"type": "object", "properties": {"team_name": {"type": "string"}, "recipient": {"type": "string"}, "message": {"type": "string"}}, "required": ["team_name", "recipient", "message"]}}},
-    {"type": "function", "function": {"name": "agent_delegate", "description": "Delegate a bounded reasoning task to a named workspace team member. The delegated member has a limited read-only toolset for schema inspection, data queries, knowledge search, and workspace reading; it consumes unread mailbox messages and writes the result back to the team leader mailbox. When team_name/member_name are used, the fixed quality reviewer runs after the member as a second data/SQL evidence barrier.", "parameters": {"type": "object", "properties": {"prompt": {"type": "string"}, "description": {"type": "string"}, "team_name": {"type": "string"}, "member_name": {"type": "string"}}, "required": ["prompt"]}}},
-    {"type": "function", "function": {"name": "team_plan_create", "description": "Create a bounded dynamic team plan without running members. Use this when the user explicitly asks to create, preview, or confirm a team plan first. Execute the returned plan_id later with team_delegate(plan_id=...). Optional max_total_tokens emits one warning at 80% and prevents pending members from starting at 100%. Each assignment may use a constrained profile; omitted means inherit the existing team policy.", "parameters": {"type": "object", "properties": {"team_name": {"type": "string"}, "goal": {"type": "string"}, "max_total_tokens": {"type": "integer", "minimum": 1000, "maximum": 1000000}, "assignments": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "object", "properties": {"task_id": {"type": "string"}, "member_name": {"type": "string"}, "prompt": {"type": "string"}, "description": {"type": "string"}, "profile": {"type": "string", "enum": ["data-scout", "sql-analyst", "knowledge-researcher", "quality-reviewer", "report-writer"]}, "depends_on": {"type": "array", "items": {"type": "string"}}}, "required": ["member_name", "prompt"]}}}, "required": ["team_name", "goal", "assignments"]}}},
-    {"type": "function", "function": {"name": "team_delegate", "description": "Delegate multiple independent bounded reasoning tasks to named team members in parallel. Prefer this over repeated agent_delegate calls when Teams are enabled. Keep each member prompt focused and concise. Each teammate has a limited read-only toolset for schema inspection, data queries, knowledge search, and workspace reading; it consumes unread mailbox messages and writes the result back to the leader mailbox. After member results complete, the fixed quality reviewer automatically runs as a second data/SQL evidence barrier.", "parameters": {"type": "object", "properties": {"team_name": {"type": "string"}, "goal": {"type": "string", "description": "Bounded overall goal recorded on the dynamic plan."}, "max_total_tokens": {"type": "integer", "minimum": 1000, "maximum": 1000000, "description": "Optional cap when creating a new plan; existing plans retain their stored limit."}, "retry_plan_id": {"type": "string", "description": "Existing dynamic plan ID for retrying failed tasks."}, "review_plan_id": {"type": "string", "description": "Review-blocked dynamic plan ID to revise."}, "review_task_ids": {"type": "array", "items": {"type": "string"}, "description": "Completed tasks requiring revision; downstream tasks rerun automatically."}, "plan_id": {"type": "string", "description": "Existing planned dynamic plan ID to execute after explicit confirmation."}, "retry_task_ids": {"type": "array", "items": {"type": "string"}}, "assignments": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "object", "properties": {"task_id": {"type": "string"}, "member_name": {"type": "string"}, "prompt": {"type": "string"}, "description": {"type": "string"}, "profile": {"type": "string", "enum": ["data-scout", "sql-analyst", "knowledge-researcher", "quality-reviewer", "report-writer"]}, "depends_on": {"type": "array", "items": {"type": "string"}}}, "required": ["member_name", "prompt"]}}, "timeout_seconds": {"type": "integer", "minimum": 10, "maximum": 300, "description": "Per-member timeout. Default 300."}, "max_concurrency": {"type": "integer", "minimum": 1, "maximum": 8, "description": "Parallel worker count. Default is assignments count capped at 6."}, "result_max_tokens": {"type": "integer", "minimum": 400, "maximum": 2500, "description": "Per-member output cap. Default 1200 for speed."}}, "required": ["team_name"]}}},
+    {
+        "type": "function",
+        "function": {
+            "name": "agent_create",
+            "description": "Create a session-scoped subagent without executing it. Returns the member and its Agent Card discovery path. A workspace and Teams mode are not required. Use agent_delegate to run work; it can also create missing members automatically.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Subagent member name."},
+                    "team_name": {"type": "string", "default": "default"},
+                    "role": {"type": "string"},
+                    "instructions": {"type": "string"},
+                    "profile": {"type": "string", "enum": ["inherit", "data-scout", "sql-analyst", "knowledge-researcher", "quality-reviewer", "report-writer"], "default": "inherit", "description": "Restricted read-only tool profile; inherit preserves the team policy."},
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {"type": "function", "function": {"name": "team_create", "description": "Create an analyst team definition scoped to the current session. A workspace and Teams mode are not required. Members are bounded model roles. Team and member names may be Chinese or English. Pass members as an array of objects, not a string. Each member may select a restricted read-only profile. The platform automatically adds a fixed read-only quality reviewer member for data/SQL evidence checks.", "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "description": {"type": "string"}, "members": {"type": "array", "items": {"type": "object", "properties": {"name": {"type": "string"}, "role": {"type": "string"}, "instructions": {"type": "string"}, "profile": {"type": "string", "enum": ["inherit", "data-scout", "sql-analyst", "knowledge-researcher", "quality-reviewer", "report-writer"], "default": "inherit"}}, "required": ["name"]}}}, "required": ["name", "members"]}}},
+    {"type": "function", "function": {"name": "team_delete", "description": "Delete a team definition and mailbox from the current session. Protected by default: if the team has messages, errors, or quality-review evidence, first inspect team_status and keep it for audit. Only pass force=true when the user explicitly confirms deletion after review.", "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "force": {"type": "boolean", "description": "Set true only after explicit user confirmation; bypasses evidence-retention protection but still refuses active queued/running teams."}}, "required": ["name"]}}},
+    {"type": "function", "function": {"name": "team_list", "description": "List analyst teams scoped to the current session with member statuses.", "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "team_status", "description": "Get one session team status, member inbox counts, and recent mailbox messages.", "parameters": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}}},
+    {"type": "function", "function": {"name": "send_message", "description": "Store a message for a named member in a session-scoped team mailbox. Use recipient='*' to broadcast to all members.", "parameters": {"type": "object", "properties": {"team_name": {"type": "string"}, "recipient": {"type": "string"}, "message": {"type": "string"}}, "required": ["team_name", "recipient", "message"]}}},
+    {
+        "type": "function",
+        "function": {
+            "name": "agent_delegate",
+            "description": "Run a bounded subagent task in an independent context using restricted read-only tools for schema inspection, data queries, knowledge search, and relevant workspace reading. A workspace and Teams mode are not required. Missing teams or members are created automatically; omitted names use default/analyst. Pass necessary business and data context explicitly in prompt; the member does not inherit the main conversation. Messages and results carry A2A taskId/contextId and Artifact evidence. The member consumes unread mailbox messages and writes back to the leader; the fixed quality reviewer checks data/SQL evidence.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "description": "Bounded goal, explicit context, evidence requirements and expected result."},
+                    "description": {"type": "string"},
+                    "team_name": {"type": "string", "default": "default"},
+                    "member_name": {"type": "string", "default": "analyst"},
+                    "role": {"type": "string"},
+                    "instructions": {"type": "string"},
+                    "profile": {"type": "string", "enum": ["inherit", "data-scout", "sql-analyst", "knowledge-researcher", "quality-reviewer", "report-writer"], "default": "inherit", "description": "Restricted read-only tool profile; inherit preserves the team policy."},
+                },
+                "required": ["prompt"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "agent_task",
+            "description": "Read or cancel one persisted A2A Task in a team scoped to the current session. Use the exact returned taskId as task_id. Returns task status and available contextId/Artifact evidence. action=get reads state; action=cancel mutates task state. A workspace and Teams mode are not required. This is separate from workspace task-board tools.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "team_name": {"type": "string"},
+                    "task_id": {"type": "string", "description": "A2A taskId returned by delegation."},
+                    "action": {"type": "string", "enum": ["get", "cancel"], "default": "get"},
+                },
+                "required": ["team_name", "task_id"],
+            },
+        },
+    },
+    {"type": "function", "function": {"name": "team_plan_create", "description": "Create a bounded dynamic team plan in the current session without running members. Use this when the user explicitly asks to create, preview, or confirm a team plan first. Execute the returned plan_id later with team_delegate(plan_id=...). Optional max_total_tokens emits one warning at 80% and prevents pending members from starting at 100%. Each assignment may use a constrained profile; omitted means inherit the existing team policy.", "parameters": {"type": "object", "properties": {"team_name": {"type": "string"}, "goal": {"type": "string"}, "max_total_tokens": {"type": "integer", "minimum": 1000, "maximum": 1000000}, "assignments": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "object", "properties": {"task_id": {"type": "string"}, "member_name": {"type": "string"}, "prompt": {"type": "string"}, "description": {"type": "string"}, "profile": {"type": "string", "enum": ["data-scout", "sql-analyst", "knowledge-researcher", "quality-reviewer", "report-writer"]}, "depends_on": {"type": "array", "items": {"type": "string"}}}, "required": ["member_name", "prompt"]}}}, "required": ["team_name", "goal", "assignments"]}}},
+    {"type": "function", "function": {"name": "team_delegate", "description": "Delegate multiple independent bounded reasoning tasks to named session team members in parallel. A workspace and Teams mode are not required; prefer this for parallel assignments when team collaboration is preferred. Keep each member prompt focused and pass necessary context explicitly. Each teammate has an independent context and a restricted read-only toolset for schema inspection, data queries, knowledge search, and workspace reading; it consumes unread mailbox messages and writes results with A2A taskId/contextId and Artifact evidence back to the leader mailbox. After member results complete, the fixed quality reviewer automatically runs as a second data/SQL evidence barrier.", "parameters": {"type": "object", "properties": {"team_name": {"type": "string"}, "goal": {"type": "string", "description": "Bounded overall goal recorded on the dynamic plan."}, "max_total_tokens": {"type": "integer", "minimum": 1000, "maximum": 1000000, "description": "Optional cap when creating a new plan; existing plans retain their stored limit."}, "retry_plan_id": {"type": "string", "description": "Existing dynamic plan ID for retrying failed tasks."}, "review_plan_id": {"type": "string", "description": "Review-blocked dynamic plan ID to revise."}, "review_task_ids": {"type": "array", "items": {"type": "string"}, "description": "Completed tasks requiring revision; downstream tasks rerun automatically."}, "plan_id": {"type": "string", "description": "Existing planned dynamic plan ID to execute after explicit confirmation."}, "retry_task_ids": {"type": "array", "items": {"type": "string"}}, "assignments": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "object", "properties": {"task_id": {"type": "string"}, "member_name": {"type": "string"}, "prompt": {"type": "string"}, "description": {"type": "string"}, "profile": {"type": "string", "enum": ["data-scout", "sql-analyst", "knowledge-researcher", "quality-reviewer", "report-writer"]}, "depends_on": {"type": "array", "items": {"type": "string"}}}, "required": ["member_name", "prompt"]}}, "timeout_seconds": {"type": "integer", "minimum": 10, "maximum": 300, "description": "Per-member timeout. Default 300."}, "max_concurrency": {"type": "integer", "minimum": 1, "maximum": 8, "description": "Parallel worker count. Default is assignments count capped at 6."}, "result_max_tokens": {"type": "integer", "minimum": 400, "maximum": 2500, "description": "Per-member output cap. Default 1200 for speed."}}, "required": ["team_name"]}}},
 ]
 
 AGENT_TOOLS.extend(TEAM_TOOL_SCHEMAS)
@@ -1363,7 +1430,19 @@ AGENT_TOOLS.extend(WORKFLOW_TOOL_SCHEMAS)
 
 
 CONTROL_TOOL_SCHEMAS = [
-    {"type": "function", "function": {"name": "read_tool_result", "description": "Read a recoverable tool-result Artifact that belongs to this session. Use query for matching snippets or offset/limit for bounded character pagination. Never guess missing Artifact content.", "parameters": {"type": "object", "properties": {"artifact_id": {"type": "string", "description": "Opaque tr_... id from a prior tool result."}, "offset": {"type": "integer", "minimum": 0, "default": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 4000, "default": 4000}, "query": {"type": "string", "description": "Optional case-insensitive text to find with bounded context."}}, "required": ["artifact_id"]}}},
+    {"type": "function", "function": {
+        "name": "prepare_training",
+        "description": "Prepare an owned immutable dataset for built-in Torch_MLP or Torch_RNN on an already configured remote training connection. Returns a plan and data-transfer review; never approves it or starts computation. Ask the user to review/approve in the compute-data panel. Use only returned IDs; never pass hosts, commands, arbitrary paths or credentials.",
+        "parameters": {"type": "object", "properties": {
+            "dataset_id": {"type": "string"}, "snapshot_id": {"type": "string"},
+            "analysis_name": {"type": "string", "enum": ["Torch_MLP", "Torch_RNN"]},
+            "connection_id": {"type": "string"}, "target_column": {"type": "string"},
+            "feature_columns": {"type": "array", "items": {"type": "string"}, "maxItems": 128},
+            "parameters": {"type": "object", "description": "Only bounded built-in family options such as epochs, batch_size, window, seed and task_type; no executable code."},
+            "budget": {"type": "object", "description": "Requested limits; the backend may only tighten the allowed resource budget."}
+        }, "required": ["dataset_id", "analysis_name", "connection_id", "target_column"], "additionalProperties": False}
+    }},
+    {"type": "function", "function": {"name": "read_tool_result", "description": "Read an authorized tool-result Artifact or evidence claim from this session/workspace. Use section for evidence lineage, full SQL, or original result and offset/limit for bounded pagination. Never guess missing evidence.", "parameters": {"type": "object", "properties": {"artifact_id": {"type": "string", "description": "Exact tr_... artifact ID or ec_... claim ID from a prior result; never invent IDs."}, "offset": {"type": "integer", "minimum": 0, "default": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 4000, "default": 4000}, "query": {"type": "string", "description": "Optional text search for tr_ tool results."}, "section": {"type": "string", "enum": ["lineage", "sql", "result"], "default": "lineage", "description": "For ec_ evidence claims only; tr_ result reads keep their existing behavior."}}, "required": ["artifact_id"]}}},
     {"type": "function", "function": {"name": "search_mcp_tools", "description": "Search the compact catalog of currently connected MCP tools. Returns up to 5 names and summaries without loading every full parameter schema. Use when the user needs an external capability that is not already exposed.", "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "Capability, service, or exact MCP tool name to find."}, "server": {"type": "string", "description": "Optional exact MCP server id."}, "limit": {"type": "integer", "minimum": 1, "maximum": 5, "default": 5}}, "required": ["query"]}}},
     {"type": "function", "function": {"name": "plan_complete", "description": "Return a completed structured plan in coordinator workflows.", "parameters": {"type": "object", "properties": {"summary": {"type": "string"}, "steps": {"type": "array", "items": {"type": "object"}}}, "required": ["summary", "steps"]}}},
 ]
@@ -1483,6 +1562,7 @@ TOOL_SCHEMA_VERSIONS = {
     for tool in AGENT_TOOLS
     if (tool.get("function") or {}).get("name")
 }
+TOOL_SCHEMA_VERSIONS.update({"query_knowledge": "1.2", "read_tool_result": "1.2"})
 
 
 def get_tool_schema_version(tool_name: str) -> str:

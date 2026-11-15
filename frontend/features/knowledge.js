@@ -4,9 +4,12 @@
  * API routes:  /api/knowledge/*  (api/knowledge.py)
  */
 import { getUiIsland } from "../core/ui-registry.js";
-import { toast } from "../core/overlay.js";
+import { closeOverlay, toast } from "../core/overlay.js";
+import { ApiError, apiClient, isSilentRequestError, requestErrorMessage, requestMessage } from "../core/api-client.js";
+import { createRequestOwner } from "../core/request-state.js";
 import { eventBus } from "../core/event-bus.js";
 import { state } from "../core/runtime.js";
+import { createOntologyPanel } from "./ontology.js";
 import {
   deleteLocalKnowledgeFileByServerFilename,
   deleteLocalKnowledgeFilesByCategory,
@@ -28,20 +31,39 @@ const _kb = {
   activeCategoryId: 1,
   categoriesLoaded: false,
   pendingSourceFile: null,
+  importGeneration: 0,
+  confirming: false,
+  confirmResult: null,
+  localFileSaved: false,
 };
 
+let workspaceGeneration = 0;
+let formGeneration = 0;
+const requests = createRequestOwner({ getScope: () => JSON.stringify([knowledgeSid(), workspaceGeneration, activeCategoryId()]) });
+const ontologyPanel = createOntologyPanel({
+  request: kbJson, categoryId: activeCategoryId,
+  persist: () => kbPersistBrowserSnapshot({ strict: true }), sourceUrl: kbScopeUrl,
+  getScope: () => JSON.stringify([knowledgeSid(), workspaceGeneration, activeCategoryId()]),
+});
 let browserKnowledgeRestorePromise = null;
 
-function kbScopeUrl(path) {
-  // Prefer state.SID (always current) over the legacy SID global or sessionStorage.
-  const sid = state.SID
-            || sessionStorage.getItem("baa_session_id") || "";
-  const sep = path.includes("?") ? "&" : "?";
-  return `${path}${sep}session_id=${encodeURIComponent(sid)}`;
+function knowledgeSid() {
+  return state.SID || sessionStorage.getItem("baa_session_id") || "";
 }
 
-function kbFetch(path, options) {
-  return fetch(kbScopeUrl(path), options);
+function kbScopeUrl(path) {
+  const sep = path.includes("?") ? "&" : "?";
+  return `${path}${sep}session_id=${encodeURIComponent(knowledgeSid())}`;
+}
+
+function staleKnowledgeRequest() {
+  return new ApiError(requestMessage("cancelled"), { code: "STALE_REQUEST", kind: "abort" });
+}
+
+function beginKnowledgeWrite(key) {
+  const ticket = requests.beginWrite(key);
+  if (!ticket) toast(requestMessage("busy"));
+  return ticket;
 }
 
 function activeCategoryId() {
@@ -55,28 +77,30 @@ function kbCategoryUrl(path) {
   return `${path}${sep}category_id=${encodeURIComponent(activeCategoryId())}`;
 }
 
-async function kbJson(path, options) {
-  const response = await kbFetch(path, options);
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error || "知识库请求失败");
-  return data;
+function kbJson(path, options = {}) {
+  return apiClient.request(kbScopeUrl(path), { responseType: "json", ...options });
 }
 
 async function kbBuildBrowserSnapshot() {
+  const scope = requests.capture();
   const categories = await kbJson("/api/knowledge/categories");
+  if (!scope.isCurrent()) throw staleKnowledgeRequest();
   const categoryNames = new Map(categories.map((item) => [Number(item.id), item.name]));
-  const [metrics, rules, notes, documents] = await Promise.all([
+  const [metrics, rules, notes, documents, ontologies] = await Promise.all([
     Promise.all(categories.map((item) => kbJson(`/api/knowledge/metrics?category_id=${item.id}`))).then((rows) => rows.flat()),
     Promise.all(categories.map((item) => kbJson(`/api/knowledge/rules?category_id=${item.id}`))).then((rows) => rows.flat()),
     Promise.all(categories.map((item) => kbJson(`/api/knowledge/notes?category_id=${item.id}`))).then((rows) => rows.flat()),
     listLocalKnowledgeFiles(),
+    kbJson("/api/knowledge/ontologies?export=1"),
   ]);
+  if (!scope.isCurrent()) throw staleKnowledgeRequest();
   const withCategory = (row) => ({
     ...row,
     category_name: categoryNames.get(Number(row.category_id)) || "",
   });
   return {
-    version: 1,
+    version: 2,
+    ontologies,
     categories: categories.map(({ name, enabled }) => ({ name, enabled: Boolean(enabled) })),
     metrics: metrics.map(withCategory),
     rules: rules.map(withCategory),
@@ -90,59 +114,59 @@ async function kbBuildBrowserSnapshot() {
   };
 }
 
-async function kbPersistBrowserSnapshot() {
+async function kbPersistBrowserSnapshot({ strict = false } = {}) {
   if (!isBrowserLocalMode()) return;
+  const scope = requests.capture();
   try {
-    await saveLocalKnowledgeSnapshot(await kbBuildBrowserSnapshot());
+    const snapshot = await kbBuildBrowserSnapshot();
+    if (!scope.isCurrent()) throw staleKnowledgeRequest();
+    await saveLocalKnowledgeSnapshot(snapshot);
   } catch (error) {
+    if (isSilentRequestError(error) || !scope.isCurrent()) { if (strict) throw staleKnowledgeRequest(); return; }
     console.warn("[knowledge] browser snapshot failed", error);
-    toast(`业务知识库本地保存失败：${error.message}`);
+    toast(requestMessage("localSave", { message: error.message }));
+    if (strict) throw error;
   }
 }
 
 async function kbRestoreBrowserKnowledge() {
-  if (!isBrowserLocalMode()) return false;
+  if (!isBrowserLocalMode() || !knowledgeSid()) return false;
   if (!browserKnowledgeRestorePromise) {
+    const scope = requests.capture();
+    const check = () => { if (!scope.isCurrent()) throw staleKnowledgeRequest(); };
     browserKnowledgeRestorePromise = (async () => {
       const snapshot = await getLocalKnowledgeSnapshot();
+      check();
       if (!snapshot) {
-        // First cloud visit: seed the local durable copy from the live temporary store.
         await kbPersistBrowserSnapshot();
         return false;
       }
-      const restored = await kbJson("/api/knowledge/restore", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ snapshot }),
-      });
+      const restored = await kbJson("/api/knowledge/restore", { method: "POST", body: { snapshot } });
+      check();
       const documentMeta = new Map((snapshot.documents || []).map((item) => [item.id, item]));
       const files = await listLocalKnowledgeFiles();
+      check();
       for (const record of files) {
         const meta = documentMeta.get(record.id) || {};
-        const file = record.blob instanceof File
-          ? record.blob
-          : new File([record.blob], record.name, {
-            type: record.type || "application/octet-stream",
-            lastModified: record.last_modified || Date.now(),
-          });
+        const file = record.blob instanceof File ? record.blob : new File([record.blob], record.name, {
+          type: record.type || "application/octet-stream", lastModified: record.last_modified || Date.now(),
+        });
         const formData = new FormData();
         formData.append("file", file, record.name);
         const categoryName = record.category_name || meta.category_name || "";
         formData.append("category_name", categoryName);
-        const response = await kbFetch("/api/knowledge/restore-file", { method: "POST", body: formData });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || `恢复知识文件 ${record.name} 失败`);
-        await updateLocalKnowledgeFile(record.id, {
-          server_filename: data.filename,
-          category_name: categoryName,
-        });
+        const data = await kbJson("/api/knowledge/restore-file", { method: "POST", body: formData });
+        check();
+        await updateLocalKnowledgeFile(record.id, { server_filename: data.filename, category_name: categoryName });
+        check();
       }
       await kbPersistBrowserSnapshot();
       return Boolean(restored.ok);
     })().catch((error) => {
+      if (!scope.isCurrent() || isSilentRequestError(error)) return false;
       browserKnowledgeRestorePromise = null;
       console.warn("[knowledge] browser restore failed", error);
-      toast(`业务知识库本地恢复失败：${error.message}`);
+      toast(requestMessage("restoreFailed", { message: requestErrorMessage(error) }));
       return false;
     });
   }
@@ -152,44 +176,47 @@ async function kbRestoreBrowserKnowledge() {
 
 async function kbLoadCategories() {
   const vk = getUiIsland("knowledge");
+  const ticket = requests.beginRead("categories");
   try {
-    const categories = await kbFetch("/api/knowledge/categories").then(r => r.json());
+    const categories = await kbJson("/api/knowledge/categories", { signal: ticket.signal });
+    if (!ticket.isCurrent()) return;
     _kb.categories = Array.isArray(categories) ? categories : [];
     _kb.categoriesLoaded = true;
     if (!_kb.categories.find(c => Number(c.id) === Number(_kb.activeCategoryId))) {
       _kb.activeCategoryId = Number(_kb.categories[0]?.id || 1);
     }
     vk?.setCategories?.(_kb.categories, _kb.activeCategoryId);
+    return true;
   } catch (e) {
+    if (!ticket.isCurrent() || isSilentRequestError(e)) return;
     _kb.categoriesLoaded = false;
-    toast(`业务分类加载失败: ${e.message}`);
-  }
+    vk?.setCategoryErr?.(requestErrorMessage(e));
+  } finally { ticket.finish(); }
 }
 
 async function kbEnsureCategories() {
-  if (!_kb.categoriesLoaded) await kbLoadCategories();
+  return _kb.categoriesLoaded || await kbLoadCategories();
 }
 
 async function kbAddCategory(name) {
   const value = String(name || "").trim();
   const vk = getUiIsland("knowledge");
-  if (!value) { vk?.setCategoryErr?.("请输入业务名称"); return; }
+  if (!value) { vk?.setCategoryErr?.(requestMessage("enterName")); return; }
+  const ticket = beginKnowledgeWrite("category:add");
+  if (!ticket) return;
+  vk?.setCategoryBusy?.(true);
   try {
-    const res = await kbFetch("/api/knowledge/categories", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: value }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "新增分类失败");
-    _kb.activeCategoryId = Number(data.id || _kb.activeCategoryId);
+    const data = await kbJson("/api/knowledge/categories", { method: "POST", body: { name: value } });
+    if (!ticket.isCurrent()) return;
     vk?.setCategoryErr?.("");
+    // Finish the old category's UI before selecting the newly created scope.
+    vk?.setCategoryBusy?.(false);
+    kbSelectCategory(Number(data.id || _kb.activeCategoryId));
     await kbLoadCategories();
-    loadByTab(_kb.tab);
     await kbPersistBrowserSnapshot();
   } catch (e) {
-    vk?.setCategoryErr?.(e.message);
-  }
+    if (ticket.isCurrent() && !isSilentRequestError(e)) vk?.setCategoryErr?.(requestErrorMessage(e));
+  } finally { if (ticket.isCurrent()) vk?.setCategoryBusy?.(false); ticket.finish(); }
 }
 
 async function kbToggleCategory(id) {
@@ -197,20 +224,21 @@ async function kbToggleCategory(id) {
   const vk = getUiIsland("knowledge");
   const rec = _kb.categories.find(c => Number(c.id) === cid);
   if (!rec) return;
-  const oldEnabled = rec.enabled;
-  rec.enabled = oldEnabled ? 0 : 1;
+  const ticket = beginKnowledgeWrite(`category:${cid}`);
+  if (!ticket) return;
+  rec.pending = true;
   vk?.setCategories?.(_kb.categories, _kb.activeCategoryId);
   try {
-    const res = await kbFetch(`/api/knowledge/categories/${cid}/toggle`, { method: "POST" });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "切换分类失败");
+    const data = await kbJson(`/api/knowledge/categories/${cid}/toggle`, { method: "POST" });
+    if (!ticket.isCurrent()) return;
     Object.assign(rec, data);
-    vk?.setCategories?.(_kb.categories, _kb.activeCategoryId);
     await kbPersistBrowserSnapshot();
   } catch (e) {
-    rec.enabled = oldEnabled;
-    vk?.setCategories?.(_kb.categories, _kb.activeCategoryId);
-    toast(`分类切换失败: ${e.message}`);
+    if (ticket.isCurrent() && !isSilentRequestError(e)) toast(requestErrorMessage(e));
+  } finally {
+    rec.pending = false;
+    if (ticket.isCurrent()) vk?.setCategories?.(_kb.categories, _kb.activeCategoryId);
+    ticket.finish();
   }
 }
 
@@ -218,30 +246,35 @@ async function kbDeleteCategory(id) {
   const cid = Number(id);
   const rec = _kb.categories.find(c => Number(c.id) === cid);
   if (!rec) return;
-  if (!await window.BAA.ui?.confirm?.({
-    title: "删除业务分类",
-    message: `确认删除“${rec.name}”？该分类下的指标、规则、背景知识和文档索引将被永久删除。`,
-    danger: true,
-  })) return;
-
+  const ticket = beginKnowledgeWrite(`category:${cid}`);
+  if (!ticket) return;
   try {
-    const res = await kbFetch(`/api/knowledge/categories/${cid}`, { method: "DELETE" });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "删除分类失败");
-    if (Number(_kb.activeCategoryId) === cid) _kb.activeCategoryId = 1;
+    const accepted = await window.BAA.ui?.confirm?.({
+      title: "删除业务分类", message: `确认删除“${rec.name}”？该分类下的指标、规则、背景知识和文档索引将被永久删除。`, danger: true,
+    });
+    if (!accepted || !ticket.isCurrent()) return;
+    await kbJson(`/api/knowledge/categories/${cid}`, { method: "DELETE" });
+    if (!ticket.isCurrent()) return;
     await deleteLocalKnowledgeFilesByCategory(rec.name);
+    if (!ticket.isCurrent()) return;
+    if (Number(_kb.activeCategoryId) === cid) kbSelectCategory(1);
     await kbLoadCategories();
     await loadByTab(_kb.tab);
     await kbPersistBrowserSnapshot();
-    toast(`已删除业务分类“${rec.name}”`);
   } catch (e) {
-    toast(`分类删除失败: ${e.message}`);
-  }
+    if (ticket.isCurrent() && !isSilentRequestError(e)) toast(requestErrorMessage(e));
+  } finally { ticket.finish(); }
 }
 
 function kbSelectCategory(id) {
+  requests.reset();
+  formGeneration += 1;
+  kbResetImport();
   _kb.activeCategoryId = Number(id) || 1;
   const vk = getUiIsland("knowledge");
+  vk?.closeForm?.();
+  vk?.setCategoryBusy?.(false);
+  for (const type of ["metrics", "rules", "notes"]) vk?.setItems?.(type, []);
   vk?.setActiveCategory?.(_kb.activeCategoryId);
   loadByTab(_kb.tab);
 }
@@ -253,11 +286,13 @@ function kbOpenImport() {
 // ── Tab switching ─────────────────────────────────────────────────────────────
 
 async function loadByTab(tab) {
-  await kbEnsureCategories();
-  if      (tab === "metrics") kbLoadMetrics();
-  else if (tab === "rules")   kbLoadRules();
-  else if (tab === "notes")   kbLoadNotes();
-  else if (tab === "import")  { kbResetImport(); kbLoadFiles(); }
+  const scope = JSON.stringify([knowledgeSid(), workspaceGeneration]);
+  if (!await kbEnsureCategories()) return;
+  if (scope !== JSON.stringify([knowledgeSid(), workspaceGeneration]) || tab !== _kb.tab) return;
+  if      (tab === "metrics") return kbLoadMetrics();
+  else if (tab === "rules")   return kbLoadRules();
+  else if (tab === "notes")   return kbLoadNotes();
+  else if (tab === "import")  { kbResetImport(); ontologyPanel.install(); return Promise.all([kbLoadFiles(), ontologyPanel.load()]); }
 }
 
 function kbSwitchTab(tab, _btn) {
@@ -279,40 +314,28 @@ async function kbRefresh(type) {
 
 // ── Load lists ────────────────────────────────────────────────────────────────
 
-async function kbLoadMetrics() {
+async function kbLoadList(type) {
   const vk = getUiIsland("knowledge");
-  if (!vk || !vk.isAvailable()) return;
-  vk.setListStatus("metrics", { loading: true, err: "" });
+  if (!vk?.isAvailable()) return;
+  const ticket = requests.beginRead(`list:${type}`);
+  vk.setListStatus(type, { loading: true, err: "" });
   try {
-    const data = await kbFetch(kbCategoryUrl("/api/knowledge/metrics")).then(r => r.json());
-    vk.setItems("metrics", data);
-  } catch (e) {
-    vk.setListStatus("metrics", { loading: false, err: e.message });
-  }
+    const data = await kbJson(kbCategoryUrl(`/api/knowledge/${type}`), { signal: ticket.signal });
+    if (!ticket.isCurrent()) return;
+    if (!Array.isArray(data)) throw new ApiError(requestMessage("invalid"), { code: "INVALID_RESPONSE", kind: "parse" });
+    vk.setItems(type, data);
+  } catch (error) {
+    if (ticket.isCurrent() && !isSilentRequestError(error)) vk.setListStatus(type, { loading: false, err: requestErrorMessage(error) });
+  } finally { ticket.finish(); }
 }
 
-async function kbLoadRules() {
-  const vk = getUiIsland("knowledge");
-  if (!vk || !vk.isAvailable()) return;
-  vk.setListStatus("rules", { loading: true, err: "" });
-  try {
-    const data = await kbFetch(kbCategoryUrl("/api/knowledge/rules")).then(r => r.json());
-    vk.setItems("rules", data);
-  } catch (e) {
-    vk.setListStatus("rules", { loading: false, err: e.message });
-  }
-}
+const kbLoadMetrics = () => kbLoadList("metrics");
+const kbLoadRules = () => kbLoadList("rules");
+const kbLoadNotes = () => kbLoadList("notes");
 
-async function kbLoadNotes() {
-  const vk = getUiIsland("knowledge");
-  if (!vk || !vk.isAvailable()) return;
-  vk.setListStatus("notes", { loading: true, err: "" });
-  try {
-    const data = await kbFetch(kbCategoryUrl("/api/knowledge/notes")).then(r => r.json());
-    vk.setItems("notes", data);
-  } catch (e) {
-    vk.setListStatus("notes", { loading: false, err: e.message });
-  }
+function kbCancelList(type) {
+  requests.cancelRead(`list:${type}`);
+  getUiIsland("knowledge")?.setListStatus?.(type, { loading: false, err: requestMessage("cancelled") });
 }
 
 // ── Card renderers ────────────────────────────────────────────────────────────
@@ -327,20 +350,23 @@ function esc(s) {
 
 async function kbToggle(type, id) {
   const vk = getUiIsland("knowledge");
-  if (!vk || !vk.isAvailable()) return;
-  const item = vk.getItem(type, id);
-  if (!item) return;
-  const oldEnabled = item.enabled;
-  vk.updateItem(type, id, { enabled: !oldEnabled });  // 乐观更新
+  if (!vk?.isAvailable() || !vk.getItem(type, id)) return;
+  const ticket = beginKnowledgeWrite(`item:${type}:${id}`);
+  if (!ticket) return;
+  vk.updateItem(type, id, { pending: true });
   try {
-    const res  = await kbFetch(`/api/knowledge/${type}/${id}/toggle`, { method: "POST" });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "切换失败");
-    // 成功：state 已是乐观值，无需 reload
+    const data = await kbJson(`/api/knowledge/${type}/${id}/toggle`, { method: "POST" });
+    if (!ticket.isCurrent()) return;
+    vk.updateItem(type, id, data);
     await kbPersistBrowserSnapshot();
-  } catch (e) {
-    vk.updateItem(type, id, { enabled: oldEnabled });  // 回滚
-    toast(`切换失败: ${e.message}`);
+  } catch (error) {
+    if (ticket.isCurrent() && !isSilentRequestError(error)) {
+      toast(requestErrorMessage(error));
+      if (error.outcomeUnknown) await kbRefresh(type);
+    }
+  } finally {
+    if (ticket.isCurrent()) vk.updateItem(type, id, { pending: false });
+    ticket.finish();
   }
 }
 
@@ -348,16 +374,22 @@ async function kbToggle(type, id) {
 
 async function kbOpenForm(type, id = null) {
   const vk = getUiIsland("knowledge");
-  if (!vk || !vk.isAvailable()) return;
-  let rec = null;
-  if (id !== null) {
-    try {
-      const list = await kbFetch(kbCategoryUrl(`/api/knowledge/${type}`)).then(r => r.json());
+  if (!vk?.isAvailable() || !["metrics", "rules", "notes"].includes(type)) return;
+  const version = ++formGeneration;
+  const ticket = requests.beginRead("form");
+  try {
+    let rec = null;
+    if (id !== null) {
+      const list = await kbJson(kbCategoryUrl(`/api/knowledge/${type}`), { signal: ticket.signal });
+      if (!ticket.isCurrent() || version !== formGeneration) return;
       rec = list.find(r => r.id === id) || null;
-    } catch (_) {}
-  }
-  vk.openForm({ type, mode: id !== null ? "edit" : "add", editId: id, rec });
-  // inline form in sb-panel-knowledge — panel open triggers are in app.js ACTIONS
+      if (!rec) throw new Error(requestMessage("recordMissing"));
+    }
+    vk.openForm({ type, mode: id !== null ? "edit" : "add", editId: id, rec });
+    window.BAA?.sidebar?.openKbInlineForm?.();
+  } catch (error) {
+    if (ticket.isCurrent() && !isSilentRequestError(error)) toast(requestErrorMessage(error));
+  } finally { ticket.finish(); }
 }
 
 // ── Form: submit ──────────────────────────────────────────────────────────────
@@ -368,55 +400,56 @@ async function kbSubmitForm() {
   const fv = vk.getFormValues();
   const { type, mode, editId, body } = fv;
   body.category_id = activeCategoryId();
-  // 校验
-  if (type === "metrics" && !body.name)     { vk.setFormErr("指标名称不能为空"); return; }
-  if (type === "rules"   && !body.rule_id)  { vk.setFormErr("规则 ID 不能为空"); return; }
-  if (type === "notes"   && !body.topic)    { vk.setFormErr("主题不能为空"); return; }
+  if (type === "metrics" && !body.name)    { vk.setFormErr(requestMessage("metricRequired")); return; }
+  if (type === "rules" && !body.rule_id)   { vk.setFormErr(requestMessage("ruleRequired")); return; }
+  if (type === "notes" && !body.topic)     { vk.setFormErr(requestMessage("topicRequired")); return; }
+  const ticket = beginKnowledgeWrite(mode === "edit" ? `item:${type}:${editId}` : "form:add");
+  if (!ticket) return;
+  const version = formGeneration;
+  const currentForm = () => ticket.isCurrent() && version === formGeneration;
   vk.setFormErr("");
   vk.setFormBusy(true);
-
   const method = mode === "edit" ? "PUT" : "POST";
-  const url    = mode === "edit" ? `/api/knowledge/${type}/${editId}` : `/api/knowledge/${type}`;
+  const url = mode === "edit" ? `/api/knowledge/${type}/${editId}` : `/api/knowledge/${type}`;
   try {
-    const res  = await kbFetch(url, {
-      method,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    const data = await res.json();
-    if (!res.ok) { vk.setFormErr(data.error || "保存失败"); vk.setFormBusy(false); return; }
-
-    closeOverlay("ov-kb-form");
-    vk.closeForm();
-    vk.setFormBusy(false);
-    // close inline form in panel too
-    if (window.BAA?.sidebar?.closeKbInlineForm) window.BAA.sidebar.closeKbInlineForm();
-    toast(mode === "edit" ? "已更新 ✓" : "已添加 ✓");
-    loadByTab(type);  // 刷新当前类型列表
-    await kbPersistBrowserSnapshot();
-  } catch (e) {
-    vk.setFormErr(`请求失败: ${e.message}`);
-    vk.setFormBusy(false);
+    await kbJson(url, { method, body });
+    if (!ticket.isCurrent()) return;
+    if (currentForm()) {
+      closeOverlay("ov-kb-form");
+      vk.closeForm();
+      window.BAA?.sidebar?.closeKbInlineForm?.();
+    }
+    toast(requestMessage(mode === "edit" ? "updated" : "saved"));
+    await loadByTab(type);
+    if (ticket.isCurrent()) await kbPersistBrowserSnapshot();
+  } catch (error) {
+    if (currentForm() && !isSilentRequestError(error)) vk.setFormErr(requestErrorMessage(error));
+  } finally {
+    if (currentForm()) vk.setFormBusy(false);
+    ticket.finish();
   }
 }
 
 // ── Delete ────────────────────────────────────────────────────────────────────
 
 async function kbDelete(type, id) {
-  if (!await window.BAA.ui?.confirm?.({
-    title: "删除知识记录", message: "确认删除这条记录？", danger: true,
-  })) return;
   const vk = getUiIsland("knowledge");
-  if (!vk || !vk.isAvailable()) return;
-  vk.removeItem(type, id);  // 乐观删除
+  if (!vk?.isAvailable()) return;
+  const ticket = beginKnowledgeWrite(`item:${type}:${id}`);
+  if (!ticket) return;
+  vk.updateItem(type, id, { pending: true });
   try {
-    const delRes = await kbFetch(`/api/knowledge/${type}/${id}`, { method: "DELETE" });
-    if (!delRes.ok) throw new Error("删除请求失败");
-    toast("已删除");
+    if (!await window.BAA.ui?.confirm?.({ title: "删除知识记录", message: "确认删除这条记录？", danger: true }) || !ticket.isCurrent()) return;
+    await kbJson(`/api/knowledge/${type}/${id}`, { method: "DELETE" });
+    if (!ticket.isCurrent()) return;
+    vk.removeItem(type, id);
+    toast(requestMessage("deleted"));
     await kbPersistBrowserSnapshot();
-  } catch (e) {
-    toast(`删除失败: ${e.message}`);
-    loadByTab(type);  // 回滚：重新 load
+  } catch (error) {
+    if (ticket.isCurrent() && !isSilentRequestError(error)) toast(requestErrorMessage(error));
+  } finally {
+    if (ticket.isCurrent()) vk.updateItem(type, id, { pending: false });
+    ticket.finish();
   }
 }
 
@@ -425,15 +458,19 @@ async function kbDelete(type, id) {
 async function kbLoadFiles() {
   const list = document.getElementById("kb-files-list");
   if (!list) return;
-  list.innerHTML = '<div class="kb-empty" style="padding:8px 0;font-size:12px">加载中…</div>';
+  const ticket = requests.beginRead("files");
+  list.setAttribute("aria-busy", "true");
+  list.innerHTML = `<div class="kb-empty kb-loading-text" role="status">${esc(requestMessage("loading"))}</div>`;
   try {
-    const files = await kbFetch("/api/knowledge/files").then(r => r.json());
+    const files = await kbJson("/api/knowledge/files", { signal: ticket.signal });
+    if (!ticket.isCurrent()) return;
+    if (!Array.isArray(files)) throw new Error(requestMessage("invalid"));
     if (!files.length) {
-      list.innerHTML = '<div class="kb-empty" style="padding:8px 0;font-size:12px">暂无上传记录</div>';
+      list.innerHTML = `<div class="kb-empty kb-loading-text" role="status">${esc(requestMessage("empty"))}</div>`;
       return;
     }
     list.innerHTML = files.map(f => {
-      const date = new Date(f.mtime * 1000).toLocaleDateString("zh-CN",
+      const date = new Date(f.mtime * 1000).toLocaleDateString(globalThis.getLang?.() === "en" ? "en" : "zh-CN",
         { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
       const kb  = f.size > 1024 * 1024
         ? (f.size / 1024 / 1024).toFixed(1) + " MB"
@@ -448,29 +485,48 @@ async function kbLoadFiles() {
                 data-action="kbDeleteFile" data-filename="${esc(f.filename)}">×</button>
       </div>`;
     }).join("");
-  } catch (e) {
-    list.innerHTML = `<div class="kb-empty" style="color:#ef4444;font-size:12px">加载失败: ${e.message}</div>`;
+  } catch (error) {
+    if (!ticket.isCurrent() || isSilentRequestError(error)) return;
+    list.innerHTML = `<div class="kb-request-error" role="alert">${esc(requestErrorMessage(error))}
+      <button type="button" class="kb-act-btn" data-action="kbLoadFiles">${esc(requestMessage("retry"))}</button></div>`;
+  } finally {
+    if (ticket.isCurrent()) list.removeAttribute("aria-busy");
+    ticket.finish();
   }
 }
 
 async function kbDeleteFile(filename) {
-  if (!await window.BAA.ui?.confirm?.({
-    title: "删除知识文件", message: `确认删除文件“${filename}”？`, danger: true,
-  })) return;
+  const ticket = beginKnowledgeWrite(`file:${filename}`);
+  if (!ticket) return;
   try {
-    const response = await kbFetch(`/api/knowledge/files/${encodeURIComponent(filename)}`, { method: "DELETE" });
-    if (!response.ok) throw new Error("删除知识文件失败");
+    if (!await window.BAA.ui?.confirm?.({ title: "删除知识文件", message: `确认删除文件“${filename}”？`, danger: true }) || !ticket.isCurrent()) return;
+    await kbJson(`/api/knowledge/files/${encodeURIComponent(filename)}`, { method: "DELETE" });
+    if (!ticket.isCurrent()) return;
     await deleteLocalKnowledgeFileByServerFilename(filename);
-    toast("文件已删除");
-    kbLoadFiles();
-  } catch (e) {
-    toast(`删除失败: ${e.message}`);
-  }
+    if (!ticket.isCurrent()) return;
+    await kbPersistBrowserSnapshot();
+    if (!ticket.isCurrent()) return;
+    await ontologyPanel.load();
+    if (!ticket.isCurrent()) return;
+    toast(requestMessage("deleted"));
+    await kbLoadFiles();
+  } catch (error) {
+    if (ticket.isCurrent() && !isSilentRequestError(error)) toast(requestErrorMessage(error));
+  } finally { ticket.finish(); }
 }
 
 // ── Import: file selection & drag-drop ────────────────────────────────────────
 
 function kbResetImport() {
+  _kb.importGeneration += 1;
+  _kb.confirmResult = null;
+  _kb.localFileSaved = false;
+  _kb.confirming = false;
+  const confirm = document.querySelector('[data-action="kbConfirmImport"]');
+  if (confirm) confirm.disabled = false;
+  document.getElementById("kb-preview-list").innerHTML = "";
+  ontologyPanel.reset();
+  document.getElementById("kb-confirm-label").textContent = "全部入库";
   document.getElementById("kb-parsing").classList.add('hidden');
   document.getElementById("kb-preview-area").classList.add('hidden');
   document.getElementById("kb-import-err").textContent     = "";
@@ -486,12 +542,12 @@ function kbOnDrop(e) {
   e.preventDefault();
   document.getElementById("kb-drop-zone").classList.remove("drag-over");
   const file = e.dataTransfer.files[0];
-  if (file) kbParseFile(file);
+  if (file) return kbParseFile(file);
 }
 
 function kbOnFileSelect(e) {
   const file = e.target.files[0];
-  if (file) kbParseFile(file);
+  if (file) return kbParseFile(file);
 }
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -503,12 +559,20 @@ document.addEventListener("DOMContentLoaded", () => {
 
 async function kbParseFile(file) {
   const ext = file.name.split(".").pop().toLowerCase();
-  if (!["xlsx","xls","docx"].includes(ext)) {
-    document.getElementById("kb-import-err").textContent =
-      "不支持的格式，请上传 .xlsx / .xls / .docx";
+  if (!["xlsx", "xls", "docx", "yaml", "yml"].includes(ext)) {
+    document.getElementById("kb-import-err").textContent = requestMessage("invalidFile");
+    return;
+  }
+  if (["yaml", "yml"].includes(ext) && file.size > 256 * 1024) {
+    document.getElementById("kb-import-err").textContent = requestMessage("fileTooLarge");
     return;
   }
 
+  const ticket = beginKnowledgeWrite("import:parse");
+  if (!ticket) return;
+  kbResetImport();
+  const importTicket = _kb.importGeneration;
+  const current = () => ticket.isCurrent() && importTicket === _kb.importGeneration;
   document.getElementById("kb-drop-zone").classList.add('hidden');
   document.getElementById("kb-parsing").classList.remove('hidden');
   document.getElementById("kb-import-err").textContent   = "";
@@ -523,20 +587,29 @@ async function kbParseFile(file) {
   if (provider) formData.append("provider", provider);
 
   try {
-    const res  = await kbFetch("/api/knowledge/parse", { method: "POST", body: formData });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "解析失败");
+    const data = await kbJson("/api/knowledge/parse", { method: "POST", body: formData, timeoutMs: 120000 });
+    if (!current()) return;
 
     _kb.previewRecs = data.preview || [];
     _kb.sourceFile = data.filename || "";
     _kb.pendingSourceFile = file;
-    kbRenderPreview(data);
-    kbLoadFiles();   // refresh file list after upload
+    if (data.format === "ontology") {
+      document.getElementById("kb-confirm-label").textContent = "保存本体";
+      await ontologyPanel.showPreview(data);
+    } else {
+      kbRenderPreview(data);
+    }
+    if (current()) kbLoadFiles();
   } catch (e) {
+    if (!current() || isSilentRequestError(e)) return;
+    ontologyPanel.reset();
+    _kb.sourceFile = "";
+    _kb.pendingSourceFile = null;
+    document.getElementById("kb-preview-area").classList.add("hidden");
     document.getElementById("kb-parsing").classList.add('hidden');
     document.getElementById("kb-drop-zone").classList.remove('hidden');
-    document.getElementById("kb-import-err").textContent  = `解析失败：${e.message}`;
-  }
+    document.getElementById("kb-import-err").textContent = requestErrorMessage(e);
+  } finally { ticket.finish(); }
 }
 
 // ── Import: preview rendering ─────────────────────────────────────────────────
@@ -633,47 +706,71 @@ function kbPreviewRemove(idx) {
     `解析结果 · 剩余 ${remaining} 条`;
 }
 
-function kbCancelImport() { kbResetImport(); }
+function kbCancelImport() {
+  if (_kb.confirming) return;
+  kbResetImport();
+  document.getElementById("kb-import-err").textContent = requestMessage("cancelledImport")
+    + (requests.hasWrite("import:parse") ? ` ${requestMessage("unknown")}` : "");
+}
 
 // ── Import: confirm ───────────────────────────────────────────────────────────
 
 async function kbConfirmImport() {
   const records = _kb.previewRecs.filter(r => r !== null);
   if (!records.length && !_kb.sourceFile) {
-    document.getElementById("kb-import-err").textContent = "没有可入库的记录或源文件";
+    document.getElementById("kb-import-err").textContent = requestMessage("noImport");
     return;
   }
-  const okEl  = document.getElementById("kb-import-ok");
+  const ticket = beginKnowledgeWrite("import:confirm");
+  if (!ticket) return;
+  const version = _kb.importGeneration;
+  const current = () => ticket.isCurrent() && version === _kb.importGeneration;
+  const okEl = document.getElementById("kb-import-ok");
   const errEl = document.getElementById("kb-import-err");
-  okEl.textContent  = "";
+  const confirmButton = document.querySelector('[data-action="kbConfirmImport"]');
+  const file = _kb.pendingSourceFile;
+  const filename = _kb.sourceFile;
+  const category = activeCategoryId();
+  const categoryName = _kb.categories.find((item) => Number(item.id) === category)?.name || "";
+  _kb.confirming = true;
+  confirmButton.disabled = true;
+  okEl.textContent = "";
   errEl.textContent = "";
-
   try {
-    const res  = await kbFetch("/api/knowledge/confirm", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ records, filename: _kb.sourceFile, category_id: activeCategoryId() }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "入库失败");
-
-    const { inserted } = data;
-    const ragChunks = data.rag?.chunks || 0;
-    okEl.textContent =
-      `✓ 入库成功：指标 ${inserted.metrics} 条，规则 ${inserted.rules} 条，背景知识 ${inserted.notes} 条，RAG 分块 ${ragChunks} 条`;
-    const categoryName = _kb.categories.find((item) => Number(item.id) === activeCategoryId())?.name || "";
-    if (_kb.pendingSourceFile && _kb.sourceFile) {
-      await saveLocalKnowledgeFile({
-        file: _kb.pendingSourceFile,
-        serverFilename: _kb.sourceFile,
-        categoryName,
-      });
+    if (ontologyPanel.isPreview()) {
+      const result = await ontologyPanel.confirm(filename);
+      if (!result || !current()) return;
+      kbResetImport();
+      okEl.textContent = requestMessage("saved");
+      kbLoadFiles();
+      return;
     }
-    await kbPersistBrowserSnapshot();
-    _kb.previewRecs = [];
-    setTimeout(() => kbResetImport(), 1800);
-  } catch (e) {
-    errEl.textContent = `入库失败：${e.message}`;
+    // A retry after local storage failure only saves the local copy.
+    const data = _kb.confirmResult || await kbJson("/api/knowledge/confirm", {
+      method: "POST", body: { records, filename, category_id: category },
+    });
+    if (!current()) return;
+    _kb.confirmResult = data;
+    document.getElementById("kb-preview-list").querySelectorAll("input, textarea, select, button").forEach(element => { element.disabled = true; });
+    if (file && filename && !_kb.localFileSaved) {
+      await saveLocalKnowledgeFile({ file, serverFilename: filename, categoryName });
+      if (!current()) return;
+      _kb.localFileSaved = true;
+    }
+    await kbPersistBrowserSnapshot({ strict: true });
+    if (!current()) return;
+    const inserted = data.inserted || {};
+    kbResetImport();
+    okEl.textContent = requestMessage("importSaved", { metrics: inserted.metrics || 0, rules: inserted.rules || 0,
+      notes: inserted.notes || 0, chunks: data.rag?.chunks || 0 });
+    kbLoadFiles();
+  } catch (error) {
+    if (!current() || isSilentRequestError(error)) return;
+    errEl.textContent = _kb.confirmResult ? requestMessage("localSave", { message: error.message }) : requestErrorMessage(error);
+    if (_kb.confirmResult || ontologyPanel.hasSavedPreview()) document.getElementById("kb-confirm-label").textContent = requestMessage("retryLocal");
+  } finally {
+    if (current()) { _kb.confirming = false; confirmButton.disabled = false; }
+    ticket.finish();
   }
 }
 
@@ -686,9 +783,10 @@ function syncKnowledgeIsland(vk) {
   vk.sync({
     onSwitchTab:  (tab)       => kbSwitchTab(tab),
     onToggle:     (type, id)  => kbToggle(type, id),
-    onOpenForm:   (type, id)  => { kbOpenForm(type, id); if (window.BAA?.sidebar?.openKbInlineForm) window.BAA.sidebar.openKbInlineForm(); },
+    onOpenForm:   (type, id)  => kbOpenForm(type, id),
     onSubmitForm: ()          => kbSubmitForm(),
-    onCancelForm: ()          => { vk.closeForm(); if (window.BAA?.sidebar?.closeKbInlineForm) window.BAA.sidebar.closeKbInlineForm(); },
+    onCancelForm: ()          => kbCancelForm(),
+    onCancelList: (type)      => kbCancelList(type),
     onDelete:     (type, id)  => kbDelete(type, id),
     onSelectCategory: (id)     => kbSelectCategory(id),
     onAddCategory: (name)      => kbAddCategory(name),
@@ -696,7 +794,6 @@ function syncKnowledgeIsland(vk) {
     onDeleteCategory: (id)     => kbDeleteCategory(id),
     onOpenImport: ()           => kbOpenImport(),
   });
-  kbLoadCategories();
   return true;
 }
 
@@ -706,6 +803,11 @@ export function installKnowledgePanel() {
   // island is already ensured by the legacy-core wrapper at that point).
   if (!__kbOverlayListenerInstalled) {
     __kbOverlayListenerInstalled = true;
+    eventBus.on("state:SID", () => {
+      resetKnowledgeScope();
+      const panel = document.getElementById("sb-panel-knowledge");
+      if (panel && !panel.classList.contains("collapsed")) loadByTab(_kb.tab);
+    });
     eventBus.on("overlay:open", ({ id }) => {
       // Legacy path: still handle ov-knowledge if it ever gets opened programmatically.
       if (id !== "ov-knowledge") return;
@@ -748,7 +850,27 @@ export function installKnowledgePanel() {
  * not on workspace state changes. Workspace switch changes the knowledge
  * scope (workspace_id), so the API returns data for the new workspace.
  */
+function resetKnowledgeScope() {
+  requests.reset();
+  formGeneration += 1;
+  browserKnowledgeRestorePromise = null;
+  _kb.categories = [];
+  _kb.categoriesLoaded = false;
+  _kb.activeCategoryId = 1;
+  const vk = getUiIsland("knowledge");
+  vk?.closeForm?.();
+  vk?.setCategories?.([], 1);
+  vk?.setCategoryBusy?.(false);
+  for (const type of ["metrics", "rules", "notes"]) vk?.setItems?.(type, []);
+  if (document.getElementById("kb-preview-area")) kbResetImport();
+  const files = document.getElementById("kb-files-list");
+  if (files) { files.innerHTML = ""; files.removeAttribute("aria-busy"); }
+}
+
 export function kbOnWorkspaceChanged() {
+  workspaceGeneration += 1;
+  resetKnowledgeScope();
+  eventBus.emit("knowledge:scope-changed");
   const panelEl = document.getElementById("sb-panel-knowledge");
   if (!panelEl || panelEl.classList.contains("collapsed")) return;
   const vk = getUiIsland("knowledge");
@@ -761,8 +883,10 @@ export function kbOnWorkspaceChanged() {
 }
 
 export function kbCancelForm() {
-  const vk = getUiIsland("knowledge");
-  if (vk) vk.closeForm();
+  formGeneration += 1;
+  requests.cancelRead("form");
+  getUiIsland("knowledge")?.closeForm?.();
+  window.BAA?.sidebar?.closeKbInlineForm?.();
 }
 
 export const knowledge = Object.freeze({

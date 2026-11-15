@@ -1,135 +1,85 @@
-"""SQLite-coordinated global slots for memory-intensive local imports."""
+"""Legacy import-slot facade over the durable resource coordinator (no TTL)."""
 from __future__ import annotations
 
 import os
-import sqlite3
 import threading
-import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
 
-from infrastructure.paths import content_data_path
+from infrastructure.resource_budget import BudgetSpec, BudgetExceeded, ResourceCoordinator, process_identity
 
-
-MAX_CONCURRENT_IMPORTS = max(1, int(os.environ.get("BAA_MAX_CONCURRENT_IMPORTS", "2")))
-SLOT_LEASE_SECONDS = max(30, int(os.environ.get("BAA_IMPORT_SLOT_LEASE_SECONDS", "600")))
-RETRY_SECONDS = max(0.1, float(os.environ.get("BAA_IMPORT_SLOT_RETRY_SECONDS", "1")))
+MAX_CONCURRENT_IMPORTS = max(1, int(os.environ.get('BAA_MAX_CONCURRENT_IMPORTS', '2')))
+RETRY_SECONDS = max(0.1, float(os.environ.get('BAA_IMPORT_SLOT_RETRY_SECONDS', '1')))
 
 
 class ImportSlot:
-    def __init__(self, store: "ImportSlotStore", slot: int, owner_id: str):
-        self._store, self.slot, self.owner_id = store, slot, owner_id
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
+    def __init__(self, store, slot, owner_id, lease):
+        self._store, self.slot, self.owner_id, self.lease = store, slot, owner_id, lease
 
-    def start(self) -> None:
-        def renew() -> None:
-            while not self._stop.wait(max(5, SLOT_LEASE_SECONDS / 3)):
-                if not self._store.renew(self.slot, self.owner_id):
-                    return
+    def start(self):
+        # Process birth identities replace lease heartbeats; elapsed time never
+        # proves a worker has exited.
+        return self
 
-        self._thread = threading.Thread(target=renew, name="large-import-slot", daemon=True)
-        self._thread.start()
+    def bind_process(self, process):
+        return self.lease.bind_process(process)
 
-    def release(self) -> None:
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=1)
-        self._store.release(self.slot, self.owner_id)
+    def release(self):
+        self.lease.release()
+        self._store._leases.pop((self.slot, self.owner_id), None)
 
 
 class ImportSlotStore:
-    def __init__(self, path: Path | None = None, max_slots: int = MAX_CONCURRENT_IMPORTS):
-        self.path = path or content_data_path("outputs", "jobs", "large_import_slots.db")
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.max_slots = max(1, max_slots)
-        with self._connection() as conn:
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS large_import_slots ("
-                "slot INTEGER PRIMARY KEY, owner_id TEXT NOT NULL, expires_at REAL NOT NULL)"
-            )
-            conn.commit()
+    def __init__(self, path=None, max_slots=MAX_CONCURRENT_IMPORTS):
+        self.path = Path(path) if path is not None else None
+        self.max_slots = max_slots
+        root = self.path.with_name(self.path.name + '.resources') if self.path else None
+        self.coordinator = ResourceCoordinator(root, max_slots=max_slots)
+        self._leases = {}
 
-    def _connection(self):
-        conn = sqlite3.connect(str(self.path), timeout=5.0)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        return _ClosingConnection(conn)
+    def acquire(self, owner_id):
+        try:
+            lease = self.coordinator.reserve('legacy-import', str(owner_id), BudgetSpec())
+        except BudgetExceeded:
+            return None
+        if lease.snapshot()['controller'] != process_identity():
+            return None
+        slot = self.coordinator.snapshot()['executions'].index(str(owner_id)) + 1
+        result = ImportSlot(self, slot, str(owner_id), lease)
+        self._leases[(slot, str(owner_id))] = result
+        return result
 
-    def acquire(self, owner_id: str) -> ImportSlot | None:
-        now = time.time()
-        with self._connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            for slot in range(1, self.max_slots + 1):
-                row = conn.execute(
-                    "SELECT owner_id, expires_at FROM large_import_slots WHERE slot = ?", (slot,)
-                ).fetchone()
-                if row and row[1] > now and row[0] != owner_id:
-                    continue
-                conn.execute(
-                    "INSERT INTO large_import_slots(slot, owner_id, expires_at) VALUES (?, ?, ?) "
-                    "ON CONFLICT(slot) DO UPDATE SET owner_id=excluded.owner_id, expires_at=excluded.expires_at",
-                    (slot, owner_id, now + SLOT_LEASE_SECONDS),
-                )
-                conn.commit()
-                result = ImportSlot(self, slot, owner_id)
-                result.start()
-                return result
-            conn.rollback()
-        return None
+    def renew(self, slot, owner_id):
+        result = self._leases.get((slot, owner_id))
+        return bool(result and result.lease.snapshot())
 
-    def renew(self, slot: int, owner_id: str) -> bool:
-        with self._connection() as conn:
-            updated = conn.execute(
-                "UPDATE large_import_slots SET expires_at = ? WHERE slot = ? AND owner_id = ?",
-                (time.time() + SLOT_LEASE_SECONDS, slot, owner_id),
-            ).rowcount
-            conn.commit()
-        return bool(updated)
-
-    def release(self, slot: int, owner_id: str) -> bool:
-        with self._connection() as conn:
-            deleted = conn.execute(
-                "DELETE FROM large_import_slots WHERE slot = ? AND owner_id = ?",
-                (slot, owner_id),
-            ).rowcount
-            conn.commit()
-        return bool(deleted)
-
-
-class _ClosingConnection:
-    def __init__(self, conn: sqlite3.Connection):
-        self._conn = conn
-
-    def __enter__(self):
-        return self._conn
-
-    def __exit__(self, *args):
-        self._conn.close()
+    def release(self, slot, owner_id):
+        result = self._leases.get((slot, owner_id))
+        if result is None:
+            return False
+        result.release()
+        return True
 
 
 @contextmanager
-def acquire_large_import_slot(ctx) -> Iterator[ImportSlot]:
+def acquire_large_import_slot(ctx):
     store = ImportSlotStore()
-    owner_id = str(getattr(ctx, "job_id", f"inline-{threading.get_ident()}"))
+    owner_id = str(getattr(ctx, 'job_id', f'inline-{os.getpid()}-{threading.get_ident()}'))
     waiting = False
     while True:
         ctx.check_canceled()
         slot = store.acquire(owner_id)
         if slot is not None:
-            if hasattr(ctx, "record_event"):
-                ctx.record_event("large_import_slot_acquired", slot=slot.slot)
             break
         if not waiting:
-            ctx.set_progress(1, "等待大型文件导入槽位")
-            if hasattr(ctx, "record_event"):
-                ctx.record_event("large_import_slot_waiting")
+            ctx.set_progress(1, '等待大型文件导入槽位')
             waiting = True
-        time.sleep(RETRY_SECONDS)
+        threading.Event().wait(RETRY_SECONDS)
+    if hasattr(ctx, 'record_event'):
+        ctx.record_event('large_import_slot_acquired', slot=slot.slot)
     try:
         yield slot
     finally:
         slot.release()
-        if hasattr(ctx, "record_event"):
-            ctx.record_event("large_import_slot_released", slot=slot.slot)
+        if hasattr(ctx, 'record_event'):
+            ctx.record_event('large_import_slot_released', slot=slot.slot)

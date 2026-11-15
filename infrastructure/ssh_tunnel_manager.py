@@ -26,6 +26,7 @@ from infrastructure.paths import runtime_config_path
 log = logging.getLogger(__name__)
 KNOWN_HOSTS_FILE = runtime_config_path("ssh_known_hosts", "config/ssh_known_hosts")
 _REMOTE_PREFLIGHT_COMMAND = "python3 -m baa_remote_runner --preflight --json"
+REMOTE_RUNNER_RPC_COMMAND = "baa_remote_runner --rpc-v1"
 
 
 class TunnelError(RuntimeError):
@@ -81,6 +82,58 @@ def trust_host_key(host: str, port: int, key_type: str, key_base64: str) -> None
         hosts.load(str(KNOWN_HOSTS_FILE))
     hosts.add(_host_key_name(host, port), key_type, key)
     hosts.save(str(KNOWN_HOSTS_FILE))
+
+
+def open_trusted_ssh_client(connection: dict[str, Any], *, timeout: float = 15.0):
+    """Authenticate a training-only connection without creating an LLM tunnel."""
+    from infrastructure import credential_store
+    if connection.get("connection_type") != "ssh":
+        raise TunnelError("远程训练必须使用已配置的 SSH 连接")
+    paramiko = _paramiko()
+    client = paramiko.SSHClient()
+    client.load_system_host_keys()
+    if KNOWN_HOSTS_FILE.exists():
+        client.load_host_keys(str(KNOWN_HOSTS_FILE))
+    client.set_missing_host_key_policy(paramiko.RejectPolicy())
+    method = connection.get("auth_method", "agent")
+    if method not in {"agent", "password", "key_file"}:
+        client.close()
+        raise TunnelError("Unsupported SSH authentication method")
+    if method == "password" and not connection.get("credential_ref"):
+        client.close()
+        raise TunnelError("Password authentication requires an OS credential reference")
+    password = None
+    try:
+        if method == "password":
+            password = credential_store.load_secret(connection["credential_ref"])
+        client.connect(
+            hostname=connection["host"], port=connection.get("port", 22),
+            username=connection["username"], password=password,
+            key_filename=connection.get("key_file") if method == "key_file" else None,
+            timeout=timeout, banner_timeout=timeout, auth_timeout=timeout,
+            look_for_keys=method == "agent", allow_agent=method == "agent",
+        )
+        transport = client.get_transport()
+        if transport is None or not transport.is_active():
+            raise TunnelError("SSH transport is inactive")
+        expected = connection.get("host_fingerprint")
+        if expected and fingerprint(transport.get_remote_server_key()) != expected:
+            raise TunnelError("SSH training host fingerprint changed")
+        return client
+    except Exception as exc:
+        client.close()
+        if isinstance(exc, TunnelError):
+            raise
+        if "not found in known_hosts" in str(exc).lower():
+            raise UnknownHostKeyError("SSH 主机尚未确认；请先核对并信任主机指纹") from exc
+        raise TunnelError("SSH authentication or transport failed") from exc
+    finally:
+        password = None
+
+
+def open_training_client(connection: dict[str, Any], *, timeout: float = 15.0):
+    """Compatibility alias for the training-only strict-host-key authenticator."""
+    return open_trusted_ssh_client(connection, timeout=timeout)
 
 
 class _ForwardServer(socketserver.ThreadingTCPServer):
@@ -213,37 +266,29 @@ class SshTunnelManager:
         return {"connected": tunnel.healthy(), "local_url": tunnel.local_url}
 
     def remote_training_preflight(self, connection_id: str) -> dict[str, Any]:
-        """Run the single, fixed M3 runner health command over an active tunnel.
-
-        There are no user-controlled command fragments here. A host must first
-        be fingerprint-trusted and connected through this manager.
-        """
-        tunnel = self.get(connection_id)
-        if not tunnel or not tunnel.healthy():
-            raise TunnelError("SSH 连接尚未建立")
+        """Fresh RPC handshake through SSH, independent of an inference tunnel."""
+        from infrastructure.gpu_connections import get_connection
+        from infrastructure.remote_training_client import SshTrainingTransport
+        from remote_runner.protocol import KERNEL_VERSION
+        import time
+        connection = get_connection(connection_id)
+        if not connection or connection.get("purpose", "inference") not in {"training", "both"}:
+            raise TunnelError("Select an SSH connection with training purpose")
+        transport = None
         try:
-            stdin, stdout, stderr = tunnel.client.exec_command(_REMOTE_PREFLIGHT_COMMAND, timeout=15)
-            del stdin
-            output = stdout.read(65536).decode("utf-8", "replace")
-            error = stderr.read(4096).decode("utf-8", "replace")
-            exit_code = stdout.channel.recv_exit_status()
+            transport = SshTrainingTransport(connection)
+            result = transport.rpc("handshake", {})
+            if (not result.get("ready") or result.get("protocol_version") != 1
+                    or result.get("kernel_version") != KERNEL_VERSION or result.get("expires_at", 0) <= time.time()):
+                raise TunnelError("Runner service or configured compute device is unavailable")
+            return {**result, "runner_ready": True, "host_fingerprint": transport.host_fingerprint}
         except Exception as exc:
-            raise TunnelError(f"远程训练器预检失败: {exc.__class__.__name__}") from exc
-        if exit_code != 0:
-            raise TunnelError("远程训练器不可用；请在服务器部署 baa_remote_runner")
-        try:
-            payload = json.loads(output)
-        except json.JSONDecodeError as exc:
-            raise TunnelError("远程训练器返回格式无效") from exc
-        if not isinstance(payload, dict) or payload.get("status") != "ready":
-            raise TunnelError(str(payload.get("message") or error or "远程训练器未就绪"))
-        return {
-            "runner_ready": True,
-            "runner_version": str(payload.get("version") or "unknown"),
-            "python": str(payload.get("python") or "unknown"),
-            "cuda": bool(payload.get("cuda")),
-            "gpu_name": str(payload.get("gpu_name") or ""),
-        }
+            if isinstance(exc, TunnelError):
+                raise
+            raise TunnelError(f"Remote training handshake failed: {type(exc).__name__}") from exc
+        finally:
+            if transport:
+                transport.close()
 
     def close(self, connection_id: str) -> None:
         with self._lock:

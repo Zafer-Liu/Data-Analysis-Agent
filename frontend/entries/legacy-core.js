@@ -34,6 +34,7 @@ globalThis.esc = esc;
 const overlayIslands = Object.freeze({
   "ov-settings": "settings",
   "ov-workspace": "workspace",
+  "ov-compute-data": "computeData",
   // ov-knowledge and ov-mcp no longer use overlay; islands are loaded via openPanel.
 });
 

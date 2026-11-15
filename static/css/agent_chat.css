@@ -5,6 +5,7 @@
 @import "parts/modals.css?v=v1.4.1-motion-1";
 @import "parts/forecast.css?v=model-setup-2";
 @import "parts/local-services.css?v=service-center-1";
+@import "parts/compute-data.css?v=m3-bda-2";
 @import "parts/kb.css?v=v1.4.0-motion-1";
 @import "parts/business-canvas.css";
 @import "parts/diagram.css";

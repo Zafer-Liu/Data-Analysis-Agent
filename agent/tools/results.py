@@ -202,6 +202,27 @@ def _sha256_text(value: Any) -> str:
     return hashlib.sha256(_json_text(value).encode("utf-8")).hexdigest()
 
 
+def _atomic_json(path: Path, value: dict) -> None:
+    """Write a whole record or leave the previous record intact."""
+    temp = path.with_name(f".{path.stem}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temp.open("x", encoding="utf-8", newline="\n") as stream:
+            json.dump(value, stream, ensure_ascii=False, allow_nan=False, default=str)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def _snapshot(value: Any) -> Any:
+    if value is None:
+        return None
+    if hasattr(value, "to_dict"):
+        value = value.to_dict()
+    return json.loads(json.dumps(value, ensure_ascii=False, allow_nan=False, default=str))
+
+
 def persist_evidence_claim(
     session_id: str,
     tool: str,
@@ -211,44 +232,149 @@ def persist_evidence_claim(
     args: dict | None = None,
     sources: list[dict] | None = None,
     artifacts: list[dict] | None = None,
+    semantic_context: dict | None = None,
+    execution_context: Any = None,
+    parent_claim_ids: list[str] | None = None,
 ) -> dict | None:
-    """Persist a compact, auditable evidence record for data-derived outputs."""
-    if not session_id or tool not in {
+    """Persist full v2 lineage, with bounded replay through the existing artifacts."""
+    if not session_id or (tool not in {
         "query_data", "create_analysis_table", "run_analysis", "generate_chart",
-    }:
+    } and not parent_claim_ids):
         return None
-    args = dict(args or {})
+    args = _snapshot(dict(args or {}))
     sql = str(args.get("sql") or "")
+    workspace_id = str(getattr(runtime, "workspace_id", "") or "")
+    parents = list(dict.fromkeys(str(value) for value in (parent_claim_ids or [])))
+    if any(not re.fullmatch(r"ec_[a-f0-9]{32}", value) for value in parents):
+        raise ValueError("Invalid parent evidence claim ID")
+    # Parent references are verified in this same storage and access scope.
+    for parent_id in parents:
+        parent = _load_evidence_claim(parent_id, runtime=runtime)
+        if parent is None or str(parent.get("session_id") or "") != str(session_id) or str(parent.get("workspace_id") or "") != workspace_id:
+            raise ToolResultAccessError("parent evidence claim is unavailable in this session/workspace")
+    digest = _sha256_text(raw)
+    linked = []
+    result_artifact = None
+    for item in _snapshot(list(artifacts or [])):
+        if item.get("type") == "tool_result":
+            stored = load_tool_result_artifact(str(item.get("artifact_id") or ""), runtime=runtime)
+            if not (stored and str(stored.get("session_id") or "") == str(session_id)
+                    and str(stored.get("workspace_id") or "") == workspace_id
+                    and str(item.get("session_id") or "") == str(session_id)
+                    and str(item.get("workspace_id") or "") == workspace_id
+                    and stored.get("sha256") == item.get("sha256")):
+                continue
+            if item.get("sha256") == digest and stored.get("tool") == tool:
+                result_artifact = item
+        linked.append(item)
+    if result_artifact is None:
+        _, result_artifact, _ = persist_large_tool_result(session_id, tool, raw, runtime=runtime,
+                                                         force=True, deduplicate=True)
+        linked.append(result_artifact)
     claim_id = f"ec_{uuid.uuid4().hex}"
     root = _evidence_root(runtime)
     root.mkdir(parents=True, exist_ok=True)
     record = {
-        "version": 1,
-        "claim_id": claim_id,
-        "session_id": session_id,
-        "workspace_id": str(getattr(runtime, "workspace_id", "") or ""),
-        "tool": tool,
+        "version": 2, "claim_id": claim_id, "session_id": str(session_id),
+        "workspace_id": workspace_id, "tool": tool,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "sql_hash": hashlib.sha256(sql.encode("utf-8")).hexdigest() if sql else "",
-        "sql": sql[:20_000],
-        "args": {k: v for k, v in args.items() if k != "sql"},
-        "result_sha256": _sha256_text(raw),
-        "result_preview": _json_text(raw)[:2_000],
-        "sources": list(sources or []),
-        "artifacts": list(artifacts or []),
+        "sql": sql, "args": {k: v for k, v in args.items() if k != "sql"},
+        "result_sha256": digest, "result_preview": _json_text(raw)[:2_000],
+        "result_artifact": result_artifact, "sources": _snapshot(list(sources or [])),
+        "artifacts": linked, "semantic_context": _snapshot(semantic_context),
+        "execution_context": _snapshot(execution_context), "parent_claim_ids": parents,
+        "replay_scope": "stored_result_only",
     }
-    path = root / f"{claim_id}.json"
-    path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    execution = record["execution_context"] or {}
+    invocation_id = (execution.get("tool_call_id") or execution.get("invocation_id")) if isinstance(execution, dict) else ""
+    if invocation_id:
+        # The same invocation may be rendered through SSE and model transports.
+        # Different invocations retain distinct observations even for identical SQL/results.
+        identity = {key: value for key, value in record.items() if key not in {"claim_id", "created_at"}}
+        claim_id = "ec_" + _claim_hash(identity)[:32]
+        record["claim_id"] = claim_id
+        existing = _load_evidence_claim(claim_id, runtime=runtime)
+        if existing is not None:
+            record = existing
+    record["sha256"] = _claim_hash(record)
+    _atomic_json(root / f"{claim_id}.json", record)
     return {
-        "type": "evidence_claim",
-        "claim_id": claim_id,
-        "name": f"{tool} evidence claim",
-        "uri": f"artifact://evidence-claim/{claim_id}",
-        "sql_hash": record["sql_hash"],
-        "result_sha256": record["result_sha256"],
-        "workspace_id": record["workspace_id"],
-        "session_id": session_id,
+        "type": "evidence_claim", "claim_id": claim_id,
+        "name": f"{tool} evidence claim", "uri": f"artifact://evidence-claim/{claim_id}",
+        "sql_hash": record["sql_hash"], "result_sha256": digest, "sha256": record["sha256"],
+        "workspace_id": workspace_id, "session_id": str(session_id),
+        "parent_claim_ids": parents, "version": 2,
     }
+
+
+def _claim_hash(record: dict) -> str:
+    payload = {key: value for key, value in record.items() if key != "sha256"}
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, allow_nan=False,
+                                     separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _load_evidence_claim(claim_id: str, *, runtime: Any = None, workspace_root: Path | None = None) -> dict | None:
+    if not re.fullmatch(r"ec_[a-f0-9]{32}", str(claim_id or "")):
+        return None
+    if runtime is not None and getattr(runtime, "cache_dir", None):
+        root = _evidence_root(runtime)
+    elif workspace_root is not None:
+        root = Path(workspace_root) / ".baa_cache" / "evidence_claims"
+    else:
+        root = _evidence_root()
+    try:
+        record = json.loads((root / f"{claim_id}.json").read_text(encoding="utf-8"))
+        if (record.get("claim_id") == claim_id and record.get("version") == 2
+                and _claim_hash(record) == record.get("sha256")):
+            return record
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    return None
+
+
+def read_evidence_claim(
+    claim_id: str, *, allowed_artifacts: list[dict], session_id: str,
+    workspace_id: str = "", runtime: Any = None, workspace_root: Path | None = None,
+    section: str = "lineage", offset: int = 0, limit: int = TOOL_RESULT_READ_MAX_CHARS,
+) -> dict:
+    """Read only an explicitly granted claim; SQL, result and lineage are paged."""
+    grant = next((item for item in allowed_artifacts if item.get("type") == "evidence_claim"
+                  and item.get("claim_id") == claim_id), None)
+    if not session_id or grant is None:
+        raise ToolResultAccessError("evidence claim is not available in this session")
+    if (runtime is not None and hasattr(runtime, "workspace_id")
+            and str(runtime.workspace_id or "") != str(workspace_id or "")):
+        raise ToolResultAccessError("evidence claim does not belong to the active runtime workspace")
+    if (str(grant.get("session_id") or "") != str(session_id)
+            or str(grant.get("workspace_id") or "") != str(workspace_id or "")):
+        raise ToolResultAccessError("evidence claim belongs to a different session/workspace")
+    record = _load_evidence_claim(claim_id, runtime=runtime, workspace_root=workspace_root)
+    if (record is None or str(record.get("session_id") or "") != str(session_id)
+            or str(record.get("workspace_id") or "") != str(workspace_id or "")
+            or grant.get("sha256") != record["sha256"]):
+        raise ToolResultAccessError("evidence claim is missing, corrupt or outside the active scope")
+    if section == "result":
+        artifact = record["result_artifact"]
+        if artifact.get("sha256") != record.get("result_sha256"):
+            raise ToolResultAccessError("evidence result digest mismatch")
+        page = read_tool_result_artifact(artifact["artifact_id"], allowed_artifacts=[artifact],
+                                         session_id=session_id, workspace_id=workspace_id, runtime=runtime,
+                                         workspace_root=workspace_root, offset=offset, limit=limit)
+        return {**page, "claim_id": claim_id, "section": section, "claim_sha256": record["sha256"]}
+    if section == "sql":
+        text = record["sql"]
+    elif section == "lineage":
+        text = json.dumps(record, ensure_ascii=False, indent=2)
+    else:
+        raise ValueError("section must be lineage, sql or result")
+    start = max(0, min(len(text), int(offset)))
+    cap = max(1, min(TOOL_RESULT_READ_MAX_CHARS, int(limit)))
+    content = text[start:start + cap]
+    end = start + len(content)
+    return {"claim_id": claim_id, "section": section, "sha256": record["sha256"],
+            "offset": start, "total_chars": len(text), "returned_chars": len(content),
+            "next_offset": end if end < len(text) else None, "content": content}
 
 
 def persist_large_tool_result(
@@ -261,6 +387,7 @@ def persist_large_tool_result(
     deduplicate: bool = False,
     preview_chars: int = TOOL_RESULT_PREVIEW_CHARS,
     preview_lines: int = TOOL_RESULT_PREVIEW_LINES,
+    force: bool = False,
 ) -> tuple[Any, dict | None, dict]:
     """Persist oversized tool data and return a bounded model preview.
 
@@ -270,15 +397,15 @@ def persist_large_tool_result(
     """
     text = _json_text(raw)
     encoded = text.encode("utf-8")
-    if len(text) <= max(1, int(threshold)):
+    if not force and len(text) <= max(1, int(threshold)):
         return raw, None, {"persisted": False, "chars": len(text)}
 
     digest = hashlib.sha256(encoded).hexdigest()
-    artifact_id = f"tr_{digest[:32]}" if deduplicate else f"tr_{uuid.uuid4().hex}"
+    scope_digest = _sha256_text([str(session_id), str(getattr(runtime, "workspace_id", "") or ""), tool, digest])
+    artifact_id = f"tr_{scope_digest[:32]}" if deduplicate else f"tr_{uuid.uuid4().hex}"
     root = _result_root(runtime)
     root.mkdir(parents=True, exist_ok=True)
     target = root / f"{artifact_id}.json"
-    temp = root / f".{artifact_id}.{os.getpid()}.tmp"
     record = {
         "version": 1,
         "artifact_id": artifact_id,
@@ -291,9 +418,10 @@ def persist_large_tool_result(
         "content_type": "text/plain; charset=utf-8",
         "data": text,
     }
-    if not target.exists():
-        temp.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
-        temp.replace(target)
+    existing = load_tool_result_artifact(artifact_id, runtime=runtime) if target.exists() else None
+    if not (existing and all(existing.get(key) == record[key]
+                             for key in ("artifact_id", "session_id", "workspace_id", "tool", "sha256", "data"))):
+        _atomic_json(target, record)
     artifact = {
         "type": "tool_result",
         "artifact_id": artifact_id,
@@ -322,14 +450,14 @@ def load_tool_result_artifact(
     artifact_id: str, *, runtime: Any = None, workspace_root: Path | None = None,
 ) -> dict | None:
     """Load and verify an artifact from the active workspace or global store."""
-    if not artifact_id.startswith("tr_") or not artifact_id[3:].isalnum():
+    if not re.fullmatch(r"tr_[a-f0-9]{32}", str(artifact_id or "")):
         return None
-    roots = []
     if runtime is not None and getattr(runtime, "cache_dir", None):
-        roots.append(Path(runtime.cache_dir) / "tool_results")
+        roots = [Path(runtime.cache_dir) / "tool_results"]
     elif workspace_root is not None:
-        roots.append(Path(workspace_root) / ".baa_cache" / "tool_results")
-    roots.append(_GLOBAL_RESULT_ROOT)
+        roots = [Path(workspace_root) / ".baa_cache" / "tool_results"]
+    else:
+        roots = [_GLOBAL_RESULT_ROOT]
     for root in roots:
         path = root / f"{artifact_id}.json"
         try:
@@ -338,7 +466,7 @@ def load_tool_result_artifact(
             digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
             if record.get("artifact_id") == artifact_id and digest == record.get("sha256"):
                 return record
-        except (OSError, json.JSONDecodeError, TypeError):
+        except (OSError, ValueError, TypeError, AttributeError):
             continue
     return None
 
@@ -362,10 +490,14 @@ def read_tool_result_artifact(
     """Read a verified, session-authorized artifact without exposing local paths."""
     if not str(session_id or ""):
         raise ToolResultAccessError("active session is required")
+    if (runtime is not None and hasattr(runtime, "workspace_id")
+            and str(runtime.workspace_id or "") != str(workspace_id or "")):
+        raise ToolResultAccessError("artifact does not belong to the active runtime workspace")
     artifact = next(
         (
             item for item in allowed_artifacts
-            if str(item.get("artifact_id") or "") == str(artifact_id or "")
+            if item.get("type") == "tool_result"
+            and str(item.get("artifact_id") or "") == str(artifact_id or "")
         ),
         None,
     )
@@ -373,8 +505,10 @@ def read_tool_result_artifact(
         raise ToolResultAccessError("artifact is not available in this session")
     expected_workspace = str(artifact.get("workspace_id") or "")
     active_workspace = str(workspace_id or "")
-    if expected_workspace and expected_workspace != active_workspace:
+    if expected_workspace != active_workspace:
         raise ToolResultAccessError("artifact belongs to a different workspace")
+    if str(artifact.get("session_id") or "") != str(session_id):
+        raise ToolResultAccessError("artifact belongs to a different session")
     record = load_tool_result_artifact(
         artifact_id,
         runtime=runtime,
@@ -388,7 +522,7 @@ def read_tool_result_artifact(
     if expected_session and expected_session != str(record.get("session_id") or ""):
         raise ToolResultAccessError("artifact session metadata mismatch")
     expected_sha = str(artifact.get("sha256") or "")
-    if expected_sha and expected_sha != str(record.get("sha256") or ""):
+    if not expected_sha or expected_sha != str(record.get("sha256") or ""):
         raise ToolResultAccessError("artifact SHA-256 metadata mismatch")
 
     text = str(record.get("data") or "")
@@ -446,7 +580,7 @@ def read_tool_result_artifact(
 
 def extract_tool_result_references(text: str) -> list[str]:
     """Extract stable artifact URIs from a model-facing tool envelope."""
-    refs = re.findall(r"artifact://tool-result/tr_[a-fA-F0-9]+", text or "")
+    refs = re.findall(r"artifact://(?:tool-result/tr_|evidence-claim/ec_)[a-fA-F0-9]+", text or "")
     return list(dict.fromkeys(refs))
 
 
@@ -568,6 +702,9 @@ def make_tool_result(
     runtime: Any = None,
     result_char_budget: int | None = None,
     args: dict | None = None,
+    semantic_context: dict | None = None,
+    execution_context: Any = None,
+    parent_claim_ids: list[str] | None = None,
 ) -> ToolResultEnvelope:
     error = error or classify_tool_error(raw, tool=tool)
     if ok is None:
@@ -590,7 +727,8 @@ def make_tool_result(
             )
             model_data, result_artifact, budget_debug = persist_large_tool_result(
                 session_id, tool, raw, runtime=runtime, threshold=threshold,
-                deduplicate=tool == "get_schema",
+                deduplicate=tool in {"get_schema", "query_data", "create_analysis_table", "run_analysis", "generate_chart"}
+                            or bool(parent_claim_ids),
                 preview_chars=preview_chars,
                 preview_lines=policy.preview_lines,
             )
@@ -613,6 +751,9 @@ def make_tool_result(
             args=args,
             sources=sources,
             artifacts=result_artifacts,
+            semantic_context=semantic_context,
+            execution_context=execution_context,
+            parent_claim_ids=parent_claim_ids,
         )
         if evidence_artifact is not None:
             result_artifacts.append(evidence_artifact)

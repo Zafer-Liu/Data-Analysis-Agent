@@ -1,5 +1,6 @@
 // Team-domain render functions for the teams panel (lifted from renderPanel).
 import { state } from "../../core/runtime.js";
+import { isSilentRequestError, requestErrorMessage, requestMessage } from "../../core/api-client.js";
 import {
   formatTime,
   statusLabel,
@@ -27,22 +28,26 @@ export function createTeamViews(ctx) {
     hasRunningMembers,
     fetchJson,
     fetchTeamPlans,
+    api,
+    cancelReads,
   } = ctx;
-  const { h } = Vue;
+  const { h } = Vue || {};
 
   function renderHeader() {
+    const loading = local.activeView === "workflow" ? local.workflowsLoading || local.runDetailLoading || !!local.workflowArtifactLoading : local.loading || local.detailLoading;
+    const error = local.activeView === "workflow" ? local.workflowsError : local.error;
     return h("div", { class: "teams-head" }, [
       h("div", { class: "teams-title-block" }, [
-        h("div", { class: "modal-title" }, "团队"),
-        h("div", { class: "teams-sub" }, "查看成员协作、Workflow 运行状态和材料交接。"),
-        h("div", { class: "team-tabs", role: "tablist", "aria-label": "团队协作视图" }, [
+        h("div", { class: "modal-title" }, requestMessage("teamsTitle")),
+        h("div", { class: "teams-sub" }, requestMessage("teamsSubtitle")),
+        h("div", { class: "team-tabs", role: "tablist", "aria-label": requestMessage("teamsViews") }, [
           h("button", {
             class: local.activeView === "teams" ? "team-tab active" : "team-tab",
             type: "button",
             role: "tab",
             "aria-selected": local.activeView === "teams" ? "true" : "false",
             onClick: () => switchView("teams"),
-          }, "团队成员"),
+          }, requestMessage("teamMembers")),
           h("button", {
             class: local.activeView === "workflow" ? "team-tab active" : "team-tab",
             type: "button",
@@ -56,15 +61,13 @@ export function createTeamViews(ctx) {
         h("button", {
           class: "btn-sm btn-sm-ghost",
           type: "button",
-          disabled: local.loading || local.workflowsLoading,
-          onClick: () => local.activeView === "workflow"
-            ? refreshWorkflows({ keepSelection: true })
-            : refresh(),
-        }, "刷新"),
+          onClick: () => loading ? cancelReads() : local.activeView === "workflow"
+            ? refreshWorkflows({ keepSelection: true }) : refresh(),
+        }, requestMessage(loading ? "cancel" : error ? "retry" : "refresh")),
         h("button", {
           class: "teams-close",
           type: "button",
-          title: "关闭",
+          title: requestMessage("close"), "aria-label": requestMessage("close"),
           onClick: () => {
             closePanelState();
             window.BAA.overlay.closeOverlay("ov-teams");
@@ -76,7 +79,8 @@ export function createTeamViews(ctx) {
 
   function renderTeamList() {
     if (!local.teams.length) {
-      return h("div", { class: "teams-empty" }, local.error || "还没有团队。可以让 Agent 创建一个 team 来拆分分析任务。");
+      return h("div", { class: "teams-empty", role: local.error ? "alert" : "status" },
+        local.error || requestMessage(local.loading ? "loading" : "teamsEmpty"));
     }
     return h("div", { class: "teams-list" }, local.teams.map(team => h("div", {
       key: team.name,
@@ -184,6 +188,13 @@ export function createTeamViews(ctx) {
             innerHTML: renderMarkdown(member.instructions),
           })
         : null,
+      member.execution?.cancel_requested && member.execution?.exit_acknowledged === false
+        ? h("div", { class: "team-member-intro", role: "status" }, requestMessage("cancelPending")) : null,
+      member.quality_review && ["rework", "escalate"].includes(member.quality_review.decision)
+        ? h("div", { class: "team-plan-review-blocked", role: "status" }, [
+          requestMessage("reviewBlocked"),
+          h("ul", null, [...(member.quality_review.issues || []), ...(member.quality_review.missing_evidence || [])].map(item => h("li", null, String(item)))),
+        ]) : null,
       member.unread_messages
         ? h("div", { class: "team-member-unread" }, `未读 ${member.unread_messages}`)
         : null,
@@ -226,26 +237,33 @@ export function createTeamViews(ctx) {
 
   async function controlTeamPlan(plan, action) {
     if (!plan?.id || local.teamPlanActing) return;
+    const ticket = api.beginAction(`plan:${plan.id}`);
+    if (!ticket) return;
+    const selected = local.selected;
+    const selection = local.teamSelection;
     local.teamPlanActing = `${plan.id}:${action}`;
     renderPanel();
     try {
       const suffix = action === "workflow-draft" ? "workflow-draft" : `actions/${action}`;
-      const data = await fetchJson(
-        `/api/session/${state.SID}/team-plans/${encodeURIComponent(plan.id)}/${suffix}`,
-        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ created_by: "teams_panel" }) },
-      );
-      const plans = await fetchTeamPlans(local.selected);
-      local.teamPlans = plans.plans || [];
+      const data = await fetchJson(`/api/session/${encodeURIComponent(state.SID)}/team-plans/${encodeURIComponent(plan.id)}/${suffix}`, {
+        method: "POST", body: { created_by: "teams_panel" },
+      });
+      if (!ticket.isCurrent()) return;
+      const plans = await fetchTeamPlans(selected);
+      if (!ticket.isCurrent()) return;
+      if (local.selected === selected && local.teamSelection === selection) local.teamPlans = plans.plans || [];
       if (action === "workflow-draft") {
         await refreshWorkflows({ silent: true, keepSelection: true });
-        window.BAA.ui?.toast?.(`已创建 Workflow 草稿：${data.workflow?.name || plan.id}`, "ok");
+        if (ticket.isCurrent()) window.BAA.ui?.toast?.(`已创建 Workflow 草稿：${data.workflow?.name || plan.id}`, "ok");
       }
     } catch (error) {
-      local.error = String(error.message || error);
-      window.BAA.ui?.toast?.(local.error, "err");
+      if (ticket.isCurrent() && !isSilentRequestError(error)) {
+        local.error = requestErrorMessage(error);
+        window.BAA.ui?.toast?.(local.error, "err");
+      }
     } finally {
-      local.teamPlanActing = "";
-      renderPanel();
+      if (ticket.isCurrent()) { local.teamPlanActing = ""; renderPanel(); }
+      ticket.finish();
     }
   }
 
@@ -302,7 +320,10 @@ export function createTeamViews(ctx) {
         h("span", { class: `team-plan-status ${plan.status}` }, plan.status),
       ]),
       h("div", { class: "team-plan-budget" }, dynamicPlanBudgetText(plan)),
-      plan.review_status === "blocked" ? h("div", { class: "team-plan-review-blocked" }, `质量复核待修正${plan.review_summary ? `：${plan.review_summary}` : ""}`) : null,
+      plan.review_status === "blocked" || plan.status === "needs_review" ? h("div", { class: "team-plan-review-blocked", role: "status" }, [
+        requestMessage("reviewBlocked"), plan.review_summary ? `：${plan.review_summary}` : "",
+        ...(plan.quality_review?.missing_evidence || []).map(item => h("p", null, String(item))),
+      ]) : null,
       h("div", { class: "team-plan-tasks" }, (plan.tasks || []).map(task => h("div", { class: "team-plan-task", key: task.id }, [
         h("span", { class: `team-plan-task-dot ${task.status}` }),
         h("div", null, [
@@ -336,9 +357,9 @@ export function createTeamViews(ctx) {
   }
 
   function renderDetail() {
-    if (local.loading && !local.team) return h("div", { class: "teams-empty" }, "正在读取团队状态...");
-    if (local.error && !local.teams.length) return h("div", { class: "teams-error" }, local.error);
-    if (!local.team) return h("div", { class: "teams-empty" }, "选择一个团队查看状态。");
+    if ((local.loading || local.detailLoading) && !local.team) return h("div", { class: "teams-empty", role: "status" }, requestMessage("loading"));
+    if (local.error && !local.teams.length) return h("div", { class: "teams-error", role: "alert" }, local.error);
+    if (!local.team) return h("div", { class: "teams-empty", role: "status" }, requestMessage("chooseTeam"));
     return h("div", { class: "team-detail" }, [
       h("div", { class: "team-detail-head" }, [
         h("div", null, [

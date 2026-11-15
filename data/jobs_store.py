@@ -50,7 +50,15 @@ CREATE TABLE IF NOT EXISTS jobs (
     created_at TEXT NOT NULL,
     updated_at TEXT,
     started_at TEXT,
-    finished_at TEXT
+    finished_at TEXT,
+    execution_backend TEXT NOT NULL DEFAULT 'local',
+    external_id TEXT NOT NULL DEFAULT '',
+    recovery_phase TEXT NOT NULL DEFAULT '',
+    recovery_metadata TEXT NOT NULL DEFAULT '{}'
+);
+CREATE TABLE IF NOT EXISTS remote_job_event_cursors (
+    job_id TEXT NOT NULL, native_id TEXT NOT NULL, last_seq INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(job_id,native_id)
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_session ON jobs(session_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
@@ -100,6 +108,11 @@ def _row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
             data["result"] = json.loads(data["result"])
         except (json.JSONDecodeError, TypeError):
             pass
+    if data.get("recovery_metadata"):
+        try:
+            data["recovery_metadata"] = json.loads(data["recovery_metadata"])
+        except (json.JSONDecodeError, TypeError):
+            data["recovery_metadata"] = {}
     return data
 
 
@@ -149,6 +162,10 @@ class JobsStore:
             "message": "TEXT DEFAULT ''",
             "updated_at": "TEXT",
             "workspace_id": "TEXT DEFAULT ''",
+            "execution_backend": "TEXT NOT NULL DEFAULT 'local'",
+            "external_id": "TEXT NOT NULL DEFAULT ''",
+            "recovery_phase": "TEXT NOT NULL DEFAULT ''",
+            "recovery_metadata": "TEXT NOT NULL DEFAULT '{}'",
         }.items():
             if name not in columns:
                 self._conn.execute(f"ALTER TABLE jobs ADD COLUMN {name} {ddl}")
@@ -179,6 +196,17 @@ class JobsStore:
         ).fetchall()
         for row in rows:
             now = _now_iso()
+            if row["execution_backend"] != "local":
+                self._conn.execute(
+                    "UPDATE jobs SET recovery_phase='recovery_pending', updated_at=? WHERE id=?",
+                    (now, row["id"]),
+                )
+                self._append_event_locked(row["session_id"], row["id"], {
+                    "type": "job_recovery_pending", "job_id": row["id"],
+                    "status": row["status"], "external_id": row["external_id"],
+                    "recovery_phase": "recovery_pending",
+                }, now)
+                continue
             if row["status"] == STATUS_CANCELING:
                 status = STATUS_CANCELED
                 error = None
@@ -211,6 +239,11 @@ class JobsStore:
         label: str = "",
         parent_id: str = "",
         workspace_id: str = "",
+        *,
+        execution_backend: str = "local",
+        external_id: str = "",
+        recovery_phase: str = "",
+        recovery_metadata: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         jid = str(uuid.uuid4())[:12]
         now = _now_iso()
@@ -226,10 +259,12 @@ class JobsStore:
             self._conn.execute(
                 "INSERT INTO jobs "
                 "(id, session_id, workspace_id, type, label, parent_id, status, progress, "
-                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+                "created_at, updated_at, execution_backend, external_id, recovery_phase, recovery_metadata) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)",
                 (
                     jid, session_id, workspace_id, job_type, label, parent_id,
-                    STATUS_CREATED, now, now,
+                    STATUS_CREATED, now, now, execution_backend, external_id, recovery_phase,
+                    json.dumps(dict(recovery_metadata or {}), ensure_ascii=False),
                 ),
             )
             self._append_event_locked(session_id, jid, payload, now)
@@ -273,7 +308,7 @@ class JobsStore:
             )
         return True
 
-    def mark_succeeded(self, jid: str, result: Any) -> bool:
+    def mark_succeeded(self, jid: str, result: Any, *, remote_commit: bool = False) -> bool:
         result_json = json.dumps(result, ensure_ascii=False, default=str)
         return self._transition(
             jid,
@@ -282,6 +317,8 @@ class JobsStore:
                 "type": "job_done", "job_id": jid,
                 "status": STATUS_SUCCEEDED, "result": result,
             },
+            remote_commit=remote_commit,
+            local_commit=isinstance(result, dict) and result.get("result_committed") is True,
             progress=100,
             result=result_json,
             finished_at=_now_iso(),
@@ -323,6 +360,8 @@ class JobsStore:
         new_status: str,
         *,
         event: Optional[Mapping[str, Any]] = None,
+        remote_commit: bool = False,
+        local_commit: bool = False,
         **extra: Any,
     ) -> bool:
         with self._transaction():
@@ -331,9 +370,19 @@ class JobsStore:
                 log.warning("[jobs] transition on missing job %s", jid)
                 return False
             current = row["status"]
-            if new_status not in _ALLOWED_TRANSITIONS.get(current, set()):
+            committed_remote = (remote_commit and row["execution_backend"] == "remote"
+                                and current == STATUS_CANCELING and new_status == STATUS_SUCCEEDED)
+            committed_local = (local_commit is True and row["execution_backend"] == "local"
+                               and current == STATUS_CANCELING and new_status == STATUS_SUCCEEDED)
+            if not (committed_remote or committed_local) and new_status not in _ALLOWED_TRANSITIONS.get(current, set()):
                 log.warning("[jobs] reject transition %s: %s -> %s", jid, current, new_status)
                 return False
+            if committed_local and event is not None:
+                # Capture a Stop racing the runner's post-return check in the
+                # same transaction as the durable result and replay event.
+                result = {**event["result"], "cancel_requested": True}
+                event = {**event, "result": result}
+                extra["result"] = json.dumps(result, ensure_ascii=False, default=str)
             now = _now_iso()
             sets = ["status = ?", "updated_at = ?"]
             values: List[Any] = [new_status, now]
@@ -347,6 +396,65 @@ class JobsStore:
             if event is not None:
                 self._append_event_locked(row["session_id"], jid, event, now)
         return True
+
+    def update_recovery(self, jid: str, *, external_id=None, phase=None, metadata=None) -> bool:
+        """Checkpoint remote identity without manufacturing a local terminal state."""
+        with self._transaction():
+            row = self._get_row_locked(jid)
+            if row is None or row["execution_backend"] == "local":
+                return False
+            values = json.loads(row["recovery_metadata"] or "{}")
+            values.update(metadata or {})
+            self._conn.execute(
+                "UPDATE jobs SET external_id=?, recovery_phase=?, recovery_metadata=?, updated_at=? WHERE id=?",
+                (row["external_id"] if external_id is None else external_id,
+                 row["recovery_phase"] if phase is None else phase,
+                 json.dumps(values, ensure_ascii=False), _now_iso(), jid),
+            )
+        return True
+
+    def append_remote_event(self, jid: str, native_id: str, native_seq: int,
+                            event: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+        """Advance native cursor and durable SSE event in the same transaction."""
+        if not isinstance(native_id, str) or not 1 <= len(native_id) <= 512 or type(native_seq) is not int or not 1 <= native_seq < 2**63:
+            raise ValueError("Invalid remote event identity")
+        with self._transaction():
+            row = self._get_row_locked(jid)
+            if row is None or row["execution_backend"] == "local":
+                return None
+            cursor = self._conn.execute(
+                "SELECT last_seq FROM remote_job_event_cursors WHERE job_id=? AND native_id=?",
+                (jid, native_id),
+            ).fetchone()
+            if cursor and int(native_seq) <= cursor["last_seq"]:
+                return None
+            self._conn.execute(
+                "INSERT INTO remote_job_event_cursors VALUES (?,?,?) "
+                "ON CONFLICT(job_id,native_id) DO UPDATE SET last_seq=excluded.last_seq",
+                (jid, native_id, int(native_seq)),
+            )
+            safe_event = {**event, "native_id": native_id, "native_seq": int(native_seq)}
+            if event.get("native_type") == "progress" and row["status"] == STATUS_RUNNING:
+                training_progress = max(0, min(100, int(event.get("progress", 0))))
+                progress = 20 + int(training_progress * .65)
+                message = str(event.get("message", ""))[:512]
+                self._conn.execute("UPDATE jobs SET progress=?, message=?, updated_at=? WHERE id=?",
+                                   (progress, message, _now_iso(), jid))
+                safe_event.update(type="job_progress", progress=progress, training_progress=training_progress,
+                                  message=message, status=STATUS_RUNNING, job_type=row["type"])
+            return self._append_event_locked(row["session_id"], jid, safe_event, _now_iso())
+
+    def find_remote(self, session_id: str, run_id: str) -> Optional[Dict[str, Any]]:
+        """Repair a crash between Job creation and the execution-store checkpoint."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM jobs WHERE session_id=? AND execution_backend='remote'", (session_id,),
+            ).fetchall()
+        for row in rows:
+            value = _row_to_dict(row)
+            if value["recovery_metadata"].get("run_id") == run_id:
+                return value
+        return None
 
     # ── Durable events ────────────────────────────────────────────────────
 
@@ -611,6 +719,7 @@ class JobsStore:
                 f"AND job_id IN ({placeholders})",
                 (session_id, *existing_ids),
             )
+            self._conn.execute(f"DELETE FROM remote_job_event_cursors WHERE job_id IN ({placeholders})", existing_ids)
             self._conn.execute(
                 f"DELETE FROM jobs WHERE session_id = ? AND id IN ({placeholders})",
                 (session_id, *existing_ids),
@@ -639,6 +748,7 @@ class JobsStore:
                 f"AND job_id IN ({id_placeholders})",
                 (session_id, *job_ids),
             )
+            self._conn.execute(f"DELETE FROM remote_job_event_cursors WHERE job_id IN ({id_placeholders})", job_ids)
             self._conn.execute(
                 f"DELETE FROM jobs WHERE session_id = ? "
                 f"AND id IN ({id_placeholders})",

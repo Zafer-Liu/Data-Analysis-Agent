@@ -74,6 +74,7 @@ class ChatSession:
     last_prompt_tokens: int = 0      # most recent call's prompt size (for context bar)
     total_cached_input_tokens: int = 0
     total_cache_write_tokens: int = 0
+    unavailable_usage_calls: int = 0
     usage_breakdowns: List[Dict[str, Any]] = field(default_factory=list)
     # Bounded, content-free Slash Command execution telemetry.
     command_metrics: List[Dict[str, Any]] = field(default_factory=list)
@@ -283,6 +284,8 @@ class ChatSession:
                 "name": getattr(e["source"], "name", "未命名"),
                 "type": type(e["source"]).__name__.replace("DataSource", "").lower(),
                 "active": e["id"] in active_set,
+                "capabilities": e["source"].get_capabilities() if callable(getattr(e["source"], "get_capabilities", None)) else {},
+                "snapshot_id": str(getattr(getattr(e["source"], "handle", None), "snapshot_id", "") or ""),
             }
             for e in self._sources
         ]
@@ -664,6 +667,7 @@ class ChatSession:
         self.last_prompt_tokens = 0
         self.total_cached_input_tokens = 0
         self.total_cache_write_tokens = 0
+        self.unavailable_usage_calls = 0
         self.usage_breakdowns.clear()
         self.command_metrics.clear()
         self.compaction_state = {
@@ -694,6 +698,7 @@ class ChatSession:
             "last_prompt_tokens": self.last_prompt_tokens,
             "total_cached_input_tokens": self.total_cached_input_tokens,
             "total_cache_write_tokens": self.total_cache_write_tokens,
+            "unavailable_usage_calls": getattr(self, "unavailable_usage_calls", 0),
             "usage_breakdowns": self.usage_breakdowns,
             "command_metrics": self.command_metrics,
             "compaction_state": self.compaction_state,
@@ -722,6 +727,7 @@ class ChatSession:
         self.total_cache_write_tokens = int(
             state.get("total_cache_write_tokens") or 0
         )
+        self.unavailable_usage_calls = max(0, int(state.get("unavailable_usage_calls") or 0))
         self.usage_breakdowns = copy.deepcopy(
             list(state.get("usage_breakdowns") or [])
         )[-100:]
@@ -772,27 +778,37 @@ class ChatSession:
 
     def record_usage(
         self,
-        prompt_tokens: int,
-        completion_tokens: int,
+        prompt_tokens: int | None,
+        completion_tokens: int | None,
         *,
         breakdown: Optional[Dict[str, Any]] = None,
-        cached_input_tokens: int = 0,
-        cache_write_tokens: int = 0,
+        cached_input_tokens: int | None = 0,
+        cache_write_tokens: int | None = 0,
         update_last_prompt: bool = True,
     ):
-        prompt_tokens = int(prompt_tokens or 0)
-        completion_tokens = int(completion_tokens or 0)
-        cached_input_tokens = int(cached_input_tokens or 0)
-        cache_write_tokens = int(cache_write_tokens or 0)
+        available = prompt_tokens is not None and completion_tokens is not None
+        if isinstance(breakdown, dict):
+            available = available and breakdown.get("usage_available", True) is not False
+        # The live counters are sums of known usage. Missing usage does not
+        # reset the context anchor or become a provider-reported zero call.
+        prompt_count = max(0, int(prompt_tokens or 0)) if available else 0
+        completion_count = max(0, int(completion_tokens or 0)) if available else 0
         with self._usage_lock:
-            self.total_input_tokens += prompt_tokens
-            self.total_output_tokens += completion_tokens
-            if update_last_prompt:
-                self.last_prompt_tokens = prompt_tokens
-            self.total_cached_input_tokens += cached_input_tokens
-            self.total_cache_write_tokens += cache_write_tokens
+            self.total_input_tokens += prompt_count
+            self.total_output_tokens += completion_count
+            if update_last_prompt and available:
+                self.last_prompt_tokens = prompt_count
+            self.total_cached_input_tokens += max(0, int(cached_input_tokens or 0)) if available else 0
+            self.total_cache_write_tokens += max(0, int(cache_write_tokens or 0)) if available else 0
+            if not available:
+                self.unavailable_usage_calls = int(getattr(self, "unavailable_usage_calls", 0)) + 1
             if isinstance(breakdown, dict):
-                self.usage_breakdowns.append(dict(breakdown))
+                recorded = dict(breakdown)
+                recorded["usage_available"] = available
+                if not available:
+                    recorded.update(actual_prompt_tokens=None, actual_completion_tokens=None,
+                                    cached_input_tokens=None, cache_write_tokens=None, usage_source="unavailable")
+                self.usage_breakdowns.append(recorded)
                 self.usage_breakdowns = self.usage_breakdowns[-100:]
 
     def record_command_metric(

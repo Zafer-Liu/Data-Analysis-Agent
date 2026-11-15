@@ -1,5 +1,6 @@
 // Workflow-domain business actions for the teams panel.
 import { state } from "../../core/runtime.js";
+import { isSilentRequestError, requestErrorMessage, requestMessage } from "../../core/api-client.js";
 
 export const WORKFLOW_TEMPLATES = Object.freeze({
   analysis: {
@@ -434,6 +435,11 @@ export function createWorkflowActions(ctx) {
   async function createWorkflowFromTemplate() {
     if (local.workflowCreating) return;
     const form = normalizedWorkflowCreate();
+    const ticket = ctx.api.beginAction(`workflow:create`);
+    if (!ticket) return;
+    const selectedAtStart = local.selectedRun;
+    const selectionAtStart = local.runSelection;
+    const sameRun = () => local.selectedRun === selectedAtStart && local.runSelection === selectionAtStart;
     local.workflowCreating = true;
     local.workflowsError = "";
     renderPanel();
@@ -472,6 +478,7 @@ export function createWorkflowActions(ctx) {
           model_policy: "inherit",
           created_by: "teams_panel",
         });
+      if (!ticket.isCurrent()) return;
         profileIds[id] = result.profile?.id;
       }
       const template = form.creationMode === "custom"
@@ -504,26 +511,38 @@ export function createWorkflowActions(ctx) {
         },
         created_by: "teams_panel",
       });
+      if (!ticket.isCurrent()) return;
       const workflowId = workflow.workflow?.id;
       await validateWorkflow(workflowId);
+      if (!ticket.isCurrent()) return;
       const published = await publishWorkflow(workflowId);
+      if (!ticket.isCurrent()) return;
       saveWorkflowInputRaw(workflowId, JSON.stringify({ [form.sourceKey]: "当前工作区数据" }, null, 2));
-      local.selectedRun = "";
-      local.runDetail = null;
+      if (sameRun()) { local.selectedRun = ""; local.runDetail = null; }
       await refreshWorkflows({ silent: true, keepSelection: true });
+      if (!ticket.isCurrent()) return;
       local.workflowCreateOpen = false;
       window.BAA.ui?.toast?.(`Workflow 已创建并发布 v${String(published.version?.id || "").slice(-6)}`, "ok");
     } catch (error) {
-      local.workflowsError = String(error.message || error);
+      if (!ticket.isCurrent() || isSilentRequestError(error)) return;
+      local.workflowsError = requestErrorMessage(error);
       window.BAA.ui?.toast?.(local.workflowsError, "err");
     } finally {
-      local.workflowCreating = false;
-      renderPanel();
+      if (ticket.isCurrent()) {
+        local.workflowCreating = false;
+        renderPanel();
+      }
+      ticket.finish();
     }
   }
 
   async function cancelWorkflowRun(runId) {
     if (!runId || local.workflowCanceling) return;
+    const ticket = ctx.api.beginAction(`run:${runId}`);
+    if (!ticket) return;
+    const selectedAtStart = local.selectedRun;
+    const selectionAtStart = local.runSelection;
+    const sameRun = () => local.selectedRun === selectedAtStart && local.runSelection === selectionAtStart;
     local.workflowCanceling = runId;
     local.workflowsError = "";
     renderPanel();
@@ -532,20 +551,31 @@ export function createWorkflowActions(ctx) {
         `/api/session/${state.SID}/workflow-runs/${encodeURIComponent(runId)}/cancel`,
         { method: "POST" },
       );
-      local.runDetail = detail;
+      if (!ticket.isCurrent()) return;
+      if (sameRun()) local.runDetail = detail;
       await refreshWorkflows({ silent: true, keepSelection: true });
-      window.BAA.ui?.toast?.("Workflow Run 已取消", "ok");
+      if (!ticket.isCurrent()) return;
+      window.BAA.ui?.toast?.(requestMessage(detail.run?.status === "canceled" ? "runCancelled" : "cancelPending"), "ok");
     } catch (error) {
-      local.workflowsError = String(error.message || error);
+      if (!ticket.isCurrent() || isSilentRequestError(error)) return;
+      local.workflowsError = requestErrorMessage(error);
       window.BAA.ui?.toast?.(local.workflowsError, "err");
     } finally {
-      local.workflowCanceling = "";
-      renderPanel();
+      if (ticket.isCurrent()) {
+        local.workflowCanceling = "";
+        renderPanel();
+      }
+      ticket.finish();
     }
   }
 
   async function resumeWorkflowRun(runId) {
     if (!runId || local.workflowResuming) return;
+    const ticket = ctx.api.beginAction(`run:${runId}`);
+    if (!ticket) return;
+    const selectedAtStart = local.selectedRun;
+    const selectionAtStart = local.runSelection;
+    const sameRun = () => local.selectedRun === selectedAtStart && local.runSelection === selectionAtStart;
     local.workflowResuming = runId;
     local.workflowsError = "";
     renderPanel();
@@ -554,15 +584,21 @@ export function createWorkflowActions(ctx) {
         `/api/session/${state.SID}/workflow-runs/${encodeURIComponent(runId)}/resume`,
         { method: "POST" },
       );
-      local.runDetail = detail;
+      if (!ticket.isCurrent()) return;
+      if (sameRun()) local.runDetail = detail;
       await refreshWorkflows({ silent: true, keepSelection: true });
+      if (!ticket.isCurrent()) return;
       window.BAA.ui?.toast?.("Workflow Run 已恢复", "ok");
     } catch (error) {
-      local.workflowsError = String(error.message || error);
+      if (!ticket.isCurrent() || isSilentRequestError(error)) return;
+      local.workflowsError = requestErrorMessage(error);
       window.BAA.ui?.toast?.(local.workflowsError, "err");
     } finally {
-      local.workflowResuming = "";
-      renderPanel();
+      if (ticket.isCurrent()) {
+        local.workflowResuming = "";
+        renderPanel();
+      }
+      ticket.finish();
     }
   }
 
@@ -662,6 +698,11 @@ export function createWorkflowActions(ctx) {
   async function retryWorkflowNode(node) {
     const runId = local.runDetail?.run?.id || "";
     if (!runId || !node?.id || local.workflowRetrying) return;
+    const ticket = ctx.api.beginAction(`run:${runId}`);
+    if (!ticket) return;
+    const selectedAtStart = local.selectedRun;
+    const selectionAtStart = local.runSelection;
+    const sameRun = () => local.selectedRun === selectedAtStart && local.runSelection === selectionAtStart;
     local.workflowRetrying = node.id;
     local.workflowsError = "";
     renderPanel();
@@ -670,21 +711,32 @@ export function createWorkflowActions(ctx) {
         `/api/session/${state.SID}/workflow-runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(node.id)}/retry`,
         { method: "POST" },
       );
-      local.runDetail = detail;
+      if (!ticket.isCurrent()) return;
+      if (sameRun()) local.runDetail = detail;
       await refreshWorkflows({ silent: true, keepSelection: true });
+      if (!ticket.isCurrent()) return;
       window.BAA.ui?.toast?.(`${node.node_id || "节点"}已重新派发`, "ok");
     } catch (error) {
-      local.workflowsError = String(error.message || error);
+      if (!ticket.isCurrent() || isSilentRequestError(error)) return;
+      local.workflowsError = requestErrorMessage(error);
       window.BAA.ui?.toast?.(local.workflowsError, "err");
     } finally {
-      local.workflowRetrying = "";
-      renderPanel();
+      if (ticket.isCurrent()) {
+        local.workflowRetrying = "";
+        renderPanel();
+      }
+      ticket.finish();
     }
   }
 
   async function forkWorkflowRunFromCheckpoint(node) {
     const runId = local.runDetail?.run?.id || "";
     if (!runId || !node?.id || local.workflowForking) return;
+    const ticket = ctx.api.beginAction(`run:${runId}`);
+    if (!ticket) return;
+    const selectedAtStart = local.selectedRun;
+    const selectionAtStart = local.runSelection;
+    const sameRun = () => local.selectedRun === selectedAtStart && local.runSelection === selectionAtStart;
     local.workflowForking = node.id;
     local.workflowsError = "";
     renderPanel();
@@ -700,21 +752,34 @@ export function createWorkflowActions(ctx) {
           }),
         },
       );
-      local.selectedRun = detail.run?.id || "";
-      local.runDetail = detail;
+      if (!ticket.isCurrent()) return;
+      if (sameRun()) {
+        local.selectedRun = detail.run?.id || "";
+        local.runDetail = detail;
+      }
       await refreshWorkflows({ silent: true, keepSelection: true });
+      if (!ticket.isCurrent()) return;
       window.BAA.ui?.toast?.(`已从 ${node.node_id || "检查点"} 创建分叉 Run`, "ok");
     } catch (error) {
-      local.workflowsError = String(error.message || error);
+      if (!ticket.isCurrent() || isSilentRequestError(error)) return;
+      local.workflowsError = requestErrorMessage(error);
       window.BAA.ui?.toast?.(local.workflowsError, "err");
     } finally {
-      local.workflowForking = "";
-      renderPanel();
+      if (ticket.isCurrent()) {
+        local.workflowForking = "";
+        renderPanel();
+      }
+      ticket.finish();
     }
   }
 
   async function saveWorkflowTemplate(run) {
     if (!run?.id || local.workflowSavingTemplate) return;
+    const ticket = ctx.api.beginAction(`run:${run.id}`);
+    if (!ticket) return;
+    const selectedAtStart = local.selectedRun;
+    const selectionAtStart = local.runSelection;
+    const sameRun = () => local.selectedRun === selectedAtStart && local.runSelection === selectionAtStart;
     local.workflowSavingTemplate = run.id;
     local.workflowsError = "";
     renderPanel();
@@ -730,14 +795,21 @@ export function createWorkflowActions(ctx) {
           }),
         },
       );
-      local.runDetail = await fetchWorkflowRun(run.id);
+      if (!ticket.isCurrent()) return;
+      const refreshedDetail = await fetchWorkflowRun(run.id);
+      if (!ticket.isCurrent()) return;
+      if (sameRun()) local.runDetail = refreshedDetail;
       window.BAA.ui?.toast?.("成功 Run 已保存为模板", "ok");
     } catch (error) {
-      local.workflowsError = String(error.message || error);
+      if (!ticket.isCurrent() || isSilentRequestError(error)) return;
+      local.workflowsError = requestErrorMessage(error);
       window.BAA.ui?.toast?.(local.workflowsError, "err");
     } finally {
-      local.workflowSavingTemplate = "";
-      renderPanel();
+      if (ticket.isCurrent()) {
+        local.workflowSavingTemplate = "";
+        renderPanel();
+      }
+      ticket.finish();
     }
   }
 
@@ -752,6 +824,11 @@ export function createWorkflowActions(ctx) {
 
   async function generateWorkflowKnowledgeCandidates(run) {
     if (!run?.id || local.workflowGeneratingCandidates) return;
+    const ticket = ctx.api.beginAction(`run:${run.id}`);
+    if (!ticket) return;
+    const selectedAtStart = local.selectedRun;
+    const selectionAtStart = local.runSelection;
+    const sameRun = () => local.selectedRun === selectedAtStart && local.runSelection === selectionAtStart;
     local.workflowGeneratingCandidates = run.id;
     local.workflowsError = "";
     renderPanel();
@@ -760,20 +837,32 @@ export function createWorkflowActions(ctx) {
         `/api/session/${state.SID}/workflow-runs/${encodeURIComponent(run.id)}/knowledge-candidates`,
         { method: "POST" },
       );
-      local.runDetail = await fetchWorkflowRun(run.id);
-      focusWorkflowKnowledgeCandidates();
+      if (!ticket.isCurrent()) return;
+      const refreshedDetail = await fetchWorkflowRun(run.id);
+      if (!ticket.isCurrent()) return;
+      if (sameRun()) local.runDetail = refreshedDetail;
+      if (sameRun()) focusWorkflowKnowledgeCandidates();
       window.BAA.ui?.toast?.("入库候选已生成，请在详情顶部接受或拒绝", "ok");
     } catch (error) {
-      local.workflowsError = String(error.message || error);
+      if (!ticket.isCurrent() || isSilentRequestError(error)) return;
+      local.workflowsError = requestErrorMessage(error);
       window.BAA.ui?.toast?.(local.workflowsError, "err");
     } finally {
-      local.workflowGeneratingCandidates = "";
-      renderPanel();
+      if (ticket.isCurrent()) {
+        local.workflowGeneratingCandidates = "";
+        renderPanel();
+      }
+      ticket.finish();
     }
   }
 
   async function decideWorkflowKnowledgeCandidate(candidate, decision) {
     if (!candidate?.id || local.workflowCandidateDeciding) return;
+    const ticket = ctx.api.beginAction(`candidate:${candidate.id}`);
+    if (!ticket) return;
+    const selectedAtStart = local.selectedRun;
+    const selectionAtStart = local.runSelection;
+    const sameRun = () => local.selectedRun === selectedAtStart && local.runSelection === selectionAtStart;
     local.workflowCandidateDeciding = candidate.id;
     local.workflowsError = "";
     renderPanel();
@@ -786,41 +875,61 @@ export function createWorkflowActions(ctx) {
           body: JSON.stringify({ decision, decided_by: "teams_panel" }),
         },
       );
-      local.runDetail = await fetchWorkflowRun(candidate.run_id);
+      if (!ticket.isCurrent()) return;
+      const refreshedDetail = await fetchWorkflowRun(candidate.run_id);
+      if (!ticket.isCurrent()) return;
+      if (sameRun()) local.runDetail = refreshedDetail;
       window.BAA.ui?.toast?.(
         decision === "accept" ? "候选已写入业务知识库" : "候选已拒绝",
         "ok",
       );
     } catch (error) {
-      local.workflowsError = String(error.message || error);
+      if (!ticket.isCurrent() || isSilentRequestError(error)) return;
+      local.workflowsError = requestErrorMessage(error);
       window.BAA.ui?.toast?.(local.workflowsError, "err");
     } finally {
-      local.workflowCandidateDeciding = "";
-      renderPanel();
+      if (ticket.isCurrent()) {
+        local.workflowCandidateDeciding = "";
+        renderPanel();
+      }
+      ticket.finish();
     }
   }
 
   async function publishSavedWorkflowDraft(workflow) {
     if (!workflow?.id || local.workflowCreating) return;
+    const ticket = ctx.api.beginAction(`workflow:${workflow.id}`);
+    if (!ticket) return;
     local.workflowCreating = true;
+    local.workflowsError = "";
     renderPanel();
     try {
       await validateWorkflow(workflow.id);
+      if (!ticket.isCurrent()) return;
       await publishWorkflow(workflow.id);
+      if (!ticket.isCurrent()) return;
       await refreshWorkflows({ silent: true, keepSelection: true });
+      if (!ticket.isCurrent()) return;
       await window.BAA.skills?.loadSkills?.();
+      if (!ticket.isCurrent()) return;
       window.BAA.ui?.toast?.("Workflow 草稿已发布", "ok");
     } catch (error) {
-      local.workflowsError = String(error.message || error);
+      if (!ticket.isCurrent() || isSilentRequestError(error)) return;
+      local.workflowsError = requestErrorMessage(error);
       window.BAA.ui?.toast?.(local.workflowsError, "err");
     } finally {
-      local.workflowCreating = false;
-      renderPanel();
+      if (ticket.isCurrent()) {
+        local.workflowCreating = false;
+        renderPanel();
+      }
+      ticket.finish();
     }
   }
 
   async function createWorkflowOptimizationDraft(suggestion) {
     if (!suggestion?.id || local.workflowCreatingDraft) return;
+    const ticket = ctx.api.beginAction(`suggestion:${suggestion.id}`);
+    if (!ticket) return;
     local.workflowCreatingDraft = suggestion.id;
     local.workflowsError = "";
     renderPanel();
@@ -833,17 +942,23 @@ export function createWorkflowActions(ctx) {
           body: JSON.stringify({ created_by: "teams_panel" }),
         },
       );
+      if (!ticket.isCurrent()) return;
       await refreshWorkflows({ silent: true, keepSelection: true });
+      if (!ticket.isCurrent()) return;
       window.BAA.ui?.toast?.(
         `已创建「${result.workflow?.name || "优化草稿"}」，发布前请人工检查`,
         "ok",
       );
     } catch (error) {
-      local.workflowsError = String(error.message || error);
+      if (!ticket.isCurrent() || isSilentRequestError(error)) return;
+      local.workflowsError = requestErrorMessage(error);
       window.BAA.ui?.toast?.(local.workflowsError, "err");
     } finally {
-      local.workflowCreatingDraft = "";
-      renderPanel();
+      if (ticket.isCurrent()) {
+        local.workflowCreatingDraft = "";
+        renderPanel();
+      }
+      ticket.finish();
     }
   }
 
@@ -924,6 +1039,11 @@ export function createWorkflowActions(ctx) {
       return;
     }
 
+    const ticket = ctx.api.beginAction(`workflow:${workflow.id}`);
+    if (!ticket) return;
+    const selectedAtStart = local.selectedRun;
+    const selectionAtStart = local.runSelection;
+    const sameRun = () => local.selectedRun === selectedAtStart && local.runSelection === selectionAtStart;
     local.workflowStarting = workflow.id;
     local.workflowsError = "";
     renderPanel();
@@ -937,43 +1057,58 @@ export function createWorkflowActions(ctx) {
           started_by: "teams_panel",
         }),
       });
-      local.selectedRun = detail.run?.id || "";
-      local.runDetail = detail;
+      if (!ticket.isCurrent()) return;
+      if (sameRun()) {
+        local.selectedRun = detail.run?.id || "";
+        local.runDetail = detail;
+      }
       await refreshWorkflows({ silent: true, keepSelection: true });
+      if (!ticket.isCurrent()) return;
       window.BAA.ui?.toast?.("Workflow 已启动", "ok");
     } catch (error) {
-      local.workflowsError = String(error.message || error);
+      if (!ticket.isCurrent() || isSilentRequestError(error)) return;
+      local.workflowsError = requestErrorMessage(error);
     } finally {
-      local.workflowStarting = "";
-      renderPanel();
+      if (ticket.isCurrent()) {
+        local.workflowStarting = "";
+        renderPanel();
+      }
+      ticket.finish();
     }
   }
 
   async function deleteWorkflow(workflow) {
     if (!workflow?.id || local.workflowDeleting) return;
-    const accepted = await window.BAA.ui?.confirm?.({
-      danger: true,
-      title: "永久删除 Workflow？",
-      message: `将彻底删除「${workflow.name || workflow.id}」的全部版本、运行记录、节点、审批、事件、材料、关联 Job，以及未被其他流程复用的专属角色。原始数据源不会删除。此操作不可恢复。`,
-      confirmText: "永久删除",
-      cancelText: "取消",
-    });
-    if (!accepted) return;
+    const ticket = ctx.api.beginAction(`workflow:${workflow.id}`);
+    if (!ticket) return;
+    const selectedAtStart = local.selectedRun;
+    const selectionAtStart = local.runSelection;
+    const sameRun = () => local.selectedRun === selectedAtStart && local.runSelection === selectionAtStart;
     local.workflowDeleting = workflow.id;
     local.workflowsError = "";
     renderPanel();
     try {
+      const accepted = await window.BAA.ui?.confirm?.({
+        danger: true,
+        title: "永久删除 Workflow？",
+        message: `将彻底删除「${workflow.name || workflow.id}」的全部版本、运行记录、节点、审批、事件、材料、关联 Job，以及未被其他流程复用的专属角色。原始数据源不会删除。此操作不可恢复。`,
+        confirmText: "永久删除",
+        cancelText: "取消",
+      });
+      if (!ticket.isCurrent()) return;
+      if (!accepted) return;
       const result = await fetchJson(
         `/api/session/${state.SID}/workflows/${encodeURIComponent(workflow.id)}`,
         { method: "DELETE" },
       );
+      if (!ticket.isCurrent()) return;
       delete local.workflowInputs[workflow.id];
       delete local.workflowInputSavedAt[workflow.id];
       try { localStorage.removeItem(workflowInputStorageKey(workflow.id)); } catch { /* browser storage unavailable */ }
       delete local.workflowExpanded[workflow.id];
-      local.selectedRun = "";
-      local.runDetail = null;
-      await refreshWorkflows({ silent: true, keepSelection: false });
+      if (sameRun()) { local.selectedRun = ""; local.runDetail = null; }
+      await refreshWorkflows({ silent: true, keepSelection: true });
+      if (!ticket.isCurrent()) return;
       const deletedRuns = result.deleted?.runs || 0;
       const deletedJobs = result.deleted?.jobs || 0;
       window.BAA.ui?.toast?.(
@@ -981,11 +1116,15 @@ export function createWorkflowActions(ctx) {
         "ok",
       );
     } catch (error) {
-      local.workflowsError = String(error.message || error);
+      if (!ticket.isCurrent() || isSilentRequestError(error)) return;
+      local.workflowsError = requestErrorMessage(error);
       window.BAA.ui?.toast?.(local.workflowsError, "err");
     } finally {
-      local.workflowDeleting = "";
-      renderPanel();
+      if (ticket.isCurrent()) {
+        local.workflowDeleting = "";
+        renderPanel();
+      }
+      ticket.finish();
     }
   }
 
@@ -998,37 +1137,46 @@ export function createWorkflowActions(ctx) {
   async function deleteWorkflowRun(run) {
     if (!run?.id || local.workflowRunDeleting) return;
     const workflow = workflowForRun(run);
-    const accepted = await window.BAA.ui?.confirm?.({
-      danger: true,
-      title: "永久删除运行记录？",
-      message: `将彻底删除「${workflow?.name || run.id}」本次运行的节点输出、审批、事件、材料、Manifest 和关联 Job。Workflow 定义与原始数据源会保留。此操作不可恢复。`,
-      confirmText: "永久删除",
-      cancelText: "取消",
-    });
-    if (!accepted) return;
+    const ticket = ctx.api.beginAction(`run:${run.id}`);
+    if (!ticket) return;
     local.workflowRunDeleting = run.id;
     local.workflowsError = "";
     renderPanel();
     try {
+      const accepted = await window.BAA.ui?.confirm?.({
+        danger: true,
+        title: "永久删除运行记录？",
+        message: `将彻底删除「${workflow?.name || run.id}」本次运行的节点输出、审批、事件、材料、Manifest 和关联 Job。Workflow 定义与原始数据源会保留。此操作不可恢复。`,
+        confirmText: "永久删除",
+        cancelText: "取消",
+      });
+      if (!ticket.isCurrent()) return;
+      if (!accepted) return;
       const result = await fetchJson(
         `/api/session/${state.SID}/workflow-runs/${encodeURIComponent(run.id)}`,
         { method: "DELETE" },
       );
+      if (!ticket.isCurrent()) return;
       if (local.selectedRun === run.id) {
         local.selectedRun = "";
         local.runDetail = null;
       }
-      await refreshWorkflows({ silent: true, keepSelection: false });
+      await refreshWorkflows({ silent: true, keepSelection: true });
+      if (!ticket.isCurrent()) return;
       window.BAA.ui?.toast?.(
         `运行记录已永久删除，同时清理 ${result.deleted?.jobs || 0} 个 Job`,
         "ok",
       );
     } catch (error) {
-      local.workflowsError = String(error.message || error);
+      if (!ticket.isCurrent() || isSilentRequestError(error)) return;
+      local.workflowsError = requestErrorMessage(error);
       window.BAA.ui?.toast?.(local.workflowsError, "err");
     } finally {
-      local.workflowRunDeleting = "";
-      renderPanel();
+      if (ticket.isCurrent()) {
+        local.workflowRunDeleting = "";
+        renderPanel();
+      }
+      ticket.finish();
     }
   }
 
@@ -1042,6 +1190,11 @@ export function createWorkflowActions(ctx) {
       renderPanel();
       return;
     }
+    const ticket = ctx.api.beginAction(`run:${approval.run_id}`);
+    if (!ticket) return;
+    const selectedAtStart = local.selectedRun;
+    const selectionAtStart = local.runSelection;
+    const sameRun = () => local.selectedRun === selectedAtStart && local.runSelection === selectionAtStart;
     local.workflowApproving = approval.id;
     local.workflowsError = "";
     renderPanel();
@@ -1054,10 +1207,14 @@ export function createWorkflowActions(ctx) {
           body: JSON.stringify(payload),
         },
       );
-      local.selectedRun = detail.run?.id || approval.run_id;
-      local.runDetail = detail;
+      if (!ticket.isCurrent()) return;
+      if (sameRun()) {
+        local.selectedRun = detail.run?.id || approval.run_id;
+        local.runDetail = detail;
+      }
       delete local.workflowApprovalForms[approval.id];
       await refreshWorkflows({ silent: true, keepSelection: true });
+      if (!ticket.isCurrent()) return;
       const label = {
         approve: "已批准",
         approve_with_changes: "已带修改批准",
@@ -1066,11 +1223,15 @@ export function createWorkflowActions(ctx) {
       }[decision] || "已处理";
       window.BAA.ui?.toast?.(`审批${label}`, "ok");
     } catch (error) {
-      local.workflowsError = String(error.message || error);
+      if (!ticket.isCurrent() || isSilentRequestError(error)) return;
+      local.workflowsError = requestErrorMessage(error);
       window.BAA.ui?.toast?.(local.workflowsError, "err");
     } finally {
-      local.workflowApproving = "";
-      renderPanel();
+      if (ticket.isCurrent()) {
+        local.workflowApproving = "";
+        renderPanel();
+      }
+      ticket.finish();
     }
   }
 

@@ -10,6 +10,7 @@
 前端通过 SSE 或轮询 /jobs 接口获取进度；任务创建只由真实业务入口触发。
 """
 import logging
+import json
 from flask import Blueprint, request, jsonify
 
 from .state import session_manager, require_session_ownership
@@ -31,7 +32,20 @@ def _job_to_dict(job) -> dict:
             "name": root.name if root else workspace_id[:8],
             "path": str(root) if root else "",
         }
+    metadata = job.get("recovery_metadata") or {}
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except ValueError:
+            metadata = {}
+    metadata = metadata if isinstance(metadata, dict) else {}
+    recovery_keys = {"run_id", "remote_task_id", "connection_id", "exit_acknowledged",
+                     "cancel_requested", "phase", "next_reconcile_at", "runner_instance_id"}
     return {
+        "execution_backend": str(job.get("execution_backend") or "local"),
+        "external_id": str(job.get("external_id") or ""),
+        "recovery_phase": str(job.get("recovery_phase") or ""),
+        "recovery_metadata": {key: value for key, value in metadata.items() if key in recovery_keys},
         "id": job["id"],
         "session_id": job["session_id"],
         "workspace_id": workspace_id,

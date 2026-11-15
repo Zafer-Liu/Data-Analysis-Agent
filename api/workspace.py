@@ -33,7 +33,7 @@ log = logging.getLogger(__name__)
 bp = Blueprint("workspace", __name__)
 
 # 可注册为 DataSource 的文件后缀
-_REGISTERABLE_SUFFIXES = {".csv", ".xlsx", ".xls"}
+_REGISTERABLE_SUFFIXES = {".csv", ".parquet", ".xlsx", ".xls"}
 
 
 def _active_workspace_jobs(sess, workspace_id: str) -> list[dict]:
@@ -68,6 +68,9 @@ def _remove_workspace_sources(sid: str, runtime) -> int:
     to_remove = []
     for entry in list(sess._sources):
         src = entry.get("source")
+        if getattr(src, "_dataset_workspace_id", None) == runtime.workspace_id:
+            to_remove.append(entry["id"])
+            continue
         db_p = getattr(src, "_db_path", None)
         if db_p is not None:
             try:
@@ -165,12 +168,12 @@ def _register_workdir_files(sid: str, runtime) -> dict:
                     "status": "queued",
                 })
                 continue
-            if suffix == ".csv":
+            if suffix in {".csv", ".parquet"}:
                 from data.sources.workspace_persistent import (
                     csv_requires_job,
                     parse_workspace_csv_job,
                 )
-                if csv_requires_job(file_path):
+                if suffix == ".parquet" or csv_requires_job(file_path):
                     job_id = sess.job_runner.create(
                         lambda ctx, fp=file_path, table=base_table, key=file_key,
                                digest=current_hash, previous=(old_entry or {}).get("tables", []):
@@ -354,6 +357,9 @@ def mount_workspace(sid: str):
 
     log.info("[api] workspace mounted  sid=%s  path=%s", sid, runtime.workdir)
 
+    from .state import check_session_ownership
+    _allowed, owner_id = check_session_ownership(sid)
+    runtime.owner_user_id = owner_id or "local-default"
     # 自动注册目录内数据文件为持久化 DataSource
     reg = _register_workdir_files(sid, runtime)
 

@@ -1,0 +1,9 @@
+# Optional runner environment; administrator installs explicitly.
+# Select the CUDA/CPU Torch wheel index before installing this file.
+torch==2.9.1
+numpy==2.5.2
+pandas==3.0.5
+pyarrow==24.0.0
+duckdb==1.5.6
+safetensors==0.8.0
+psutil==7.2.2

@@ -1,0 +1,1343 @@
+version: 1.0.0
+domain:
+  name: K12 学生成绩单 Chat2BI
+  description: 面向学生、教师和教务管理员的自然语言成绩分析语义层
+  database:
+    dialect: sqlite
+    default_path: data/school_score.db
+    source_views:
+    - v_published_transcript
+    - v_effective_score
+  timezone: Asia/Shanghai
+  default_limit: 50
+  policies:
+    score_visibility: 只统计 score.status IN ('PUBLISHED','LOCKED') 的成绩
+    enrollment_visibility: 排除 enrollment.status = 'WITHDRAWN' 的退课记录
+    effective_score_rule: 同一学生同一课程取最高总评；同分取较晚学期
+    missing_score_policy: total_score 为 NULL 时默认排除，不按 0 分计算
+    class_attribution: 班级维度默认使用 student.class_id 当前行政班
+    combined_class_warning: teaching_class_class 只表示教学班覆盖的行政班，不能直接用于学生班级归属
+query_surface:
+  authorized_score:
+    description: 按当前用户权限过滤后的成绩事实表，学生只能看到本人，教师只能看到自己任教教学班
+    source_view: v_published_transcript
+    columns:
+    - student_id
+    - student_no
+    - student_name
+    - gender
+    - class_id
+    - class_name
+    - grade_year
+    - semester_id
+    - academic_year
+    - term
+    - semester_name
+    - course_id
+    - course_code
+    - course_name
+    - course_type
+    - credit
+    - teacher_id
+    - teacher_no
+    - teacher_name
+    - teaching_class_id
+    - class_code
+    - enrollment_id
+    - attempt_type
+    - attempt_no
+    - regular_score
+    - midterm_score
+    - final_exam_score
+    - total_score
+    - grade_level
+    - gpa_point
+    - score_status
+  authorized_effective_score:
+    description: 按当前用户权限过滤后的有效成绩表，每名学生每门课程一行
+    source_view: v_effective_score
+    columns:
+    - enrollment_id
+    - student_id
+    - student_no
+    - student_name
+    - gender
+    - class_id
+    - class_name
+    - grade_year
+    - semester_id
+    - academic_year
+    - term
+    - semester_name
+    - course_id
+    - course_code
+    - course_name
+    - course_type
+    - credit
+    - teacher_id
+    - teacher_no
+    - teacher_name
+    - teaching_class_id
+    - class_code
+    - total_score
+    - gpa_point
+    - grade_level
+    - score_status
+    - attempt_type
+    - attempt_no
+  authorized_transcript:
+    description: 按当前用户权限过滤后的正式成绩单快照，仅学生本人和管理员可见
+    columns:
+    - transcript_no
+    - student_id
+    - student_no
+    - student_name
+    - semester_id
+    - semester_name
+    - total_credits
+    - gpa
+    - status
+    - issued_at
+    - snapshot_json
+entities:
+  Student:
+    label: 学生
+    synonyms:
+    - 学生
+    - 同学
+    - 学员
+    description: 在校学生，学号是业务唯一键
+    source:
+      table: student
+      primary_key: id
+      business_key: student_no
+    properties:
+      student_no:
+        label: 学号
+        type: string
+        role: identifier
+      name:
+        label: 姓名
+        type: string
+        role: dimension
+      gender:
+        label: 性别
+        type: enum
+        role: dimension
+        value_map:
+          M: 男
+          F: 女
+          U: 未知
+      class_id:
+        label: 行政班
+        type: reference
+        role: dimension
+        reference: Class
+      status:
+        label: 学籍状态
+        type: enum
+        role: dimension
+        value_map:
+          ACTIVE: 在读
+          SUSPENDED: 休学
+          GRADUATED: 毕业
+          LEFT: 离校
+  Class:
+    label: 行政班
+    synonyms:
+    - 行政班
+    - 班级
+    - 班
+    description: 学生管理归属班级，包含年级和班主任
+    source:
+      table: school_class
+      primary_key: id
+      business_key: grade_year+name
+    properties:
+      grade_year:
+        label: 入学年份
+        type: integer
+        role: dimension
+      name:
+        label: 班级名称
+        type: string
+        role: dimension
+      head_teacher_id:
+        label: 班主任
+        type: reference
+        role: dimension
+        reference: Teacher
+      status:
+        label: 班级状态
+        type: enum
+        role: dimension
+  Teacher:
+    label: 教师
+    synonyms:
+    - 教师
+    - 老师
+    - 任课老师
+    - 班主任
+    description: 任课教师，工号是业务唯一键
+    source:
+      table: teacher
+      primary_key: id
+      business_key: teacher_no
+    properties:
+      teacher_no:
+        label: 工号
+        type: string
+        role: identifier
+      name:
+        label: 姓名
+        type: string
+        role: dimension
+      gender:
+        label: 性别
+        type: enum
+        role: dimension
+      title:
+        label: 职称
+        type: string
+        role: dimension
+      status:
+        label: 在职状态
+        type: enum
+        role: dimension
+  Course:
+    label: 课程
+    synonyms:
+    - 课程
+    - 科目
+    - 学科
+    description: 学校课程，课程代码是业务唯一键
+    source:
+      table: course
+      primary_key: id
+      business_key: course_code
+    properties:
+      course_code:
+        label: 课程代码
+        type: string
+        role: identifier
+      name:
+        label: 课程名称
+        type: string
+        role: dimension
+      credit:
+        label: 学分
+        type: decimal
+        role: measure
+        default_aggregation: sum
+      total_hours:
+        label: 总学时
+        type: integer
+        role: measure
+        default_aggregation: sum
+      course_type:
+        label: 课程类型
+        type: enum
+        role: dimension
+        value_map:
+          REQUIRED: 必修
+          ELECTIVE: 选修
+          PUBLIC: 公共
+          PRACTICE: 实践
+  Semester:
+    label: 学期
+    synonyms:
+    - 学期
+    - 学年
+    - 上学期
+    - 下学期
+    - 这学期
+    description: 学年和学期组成时间维度
+    source:
+      table: semester
+      primary_key: id
+      business_key: academic_year+term
+    properties:
+      academic_year:
+        label: 学年
+        type: string
+        role: dimension
+      term:
+        label: 学期序号
+        type: integer
+        role: dimension
+        value_map:
+          '1': 第一学期
+          '2': 第二学期
+          '3': 小学期
+      name:
+        label: 学期名称
+        type: string
+        role: dimension
+      start_date:
+        label: 开始日期
+        type: date
+        role: time
+      end_date:
+        label: 结束日期
+        type: date
+        role: time
+      is_current:
+        label: 是否当前学期
+        type: boolean
+        role: dimension
+  TeachingClass:
+    label: 教学班
+    synonyms:
+    - 教学班
+    - 开课班
+    - 授课班
+    description: 某学期某课程的实际授课班级，可能合班
+    source:
+      table: teaching_class
+      primary_key: id
+      business_key: semester_id+class_code
+    properties:
+      class_code:
+        label: 教学班编号
+        type: string
+        role: identifier
+      semester_id:
+        label: 学期
+        type: reference
+        role: dimension
+        reference: Semester
+      course_id:
+        label: 课程
+        type: reference
+        role: dimension
+        reference: Course
+      teacher_id:
+        label: 任课教师
+        type: reference
+        role: dimension
+        reference: Teacher
+      capacity:
+        label: 容量
+        type: integer
+        role: measure
+      status:
+        label: 教学班状态
+        type: enum
+        role: dimension
+  Enrollment:
+    label: 修读记录
+    synonyms:
+    - 选课
+    - 修读
+    - 正考
+    - 补考
+    - 重修
+    description: 学生选择教学班的记录，补考和重修会产生多条记录
+    source:
+      table: enrollment
+      primary_key: id
+      business_key: student_id+teaching_class_id+attempt_no
+    properties:
+      student_id:
+        label: 学生
+        type: reference
+        role: dimension
+        reference: Student
+      teaching_class_id:
+        label: 教学班
+        type: reference
+        role: dimension
+        reference: TeachingClass
+      attempt_no:
+        label: 修读次数
+        type: integer
+        role: dimension
+      attempt_type:
+        label: 修读类型
+        type: enum
+        role: dimension
+        value_map:
+          NORMAL: 正考
+          MAKEUP: 补考
+          RETAKE: 重修
+      status:
+        label: 修读状态
+        type: enum
+        role: dimension
+        value_map:
+          ENROLLED: 在修
+          WITHDRAWN: 退课
+          COMPLETED: 已完成
+  Score:
+    label: 成绩
+    synonyms:
+    - 成绩
+    - 分数
+    - 得分
+    - 总评
+    - 期末成绩
+    - 平时成绩
+    description: 一次修读对应的成绩记录
+    source:
+      table: score
+      primary_key: id
+      business_key: enrollment_id
+    properties:
+      total_score:
+        label: 总评成绩
+        type: decimal
+        role: measure
+        range:
+        - 0
+        - 100
+        default_aggregation: avg
+        allowed_aggregations:
+        - avg
+        - min
+        - max
+        - count
+        - distribution
+      regular_score:
+        label: 平时成绩
+        type: decimal
+        role: measure
+        range:
+        - 0
+        - 100
+        default_aggregation: avg
+      midterm_score:
+        label: 期中成绩
+        type: decimal
+        role: measure
+        range:
+        - 0
+        - 100
+        default_aggregation: avg
+      final_exam_score:
+        label: 期末成绩
+        type: decimal
+        role: measure
+        range:
+        - 0
+        - 100
+        default_aggregation: avg
+      gpa_point:
+        label: 绩点
+        type: decimal
+        role: measure
+        range:
+        - 0
+        - 5
+        default_aggregation: weighted_avg
+      grade_level:
+        label: 成绩等级
+        type: enum
+        role: dimension
+        value_map:
+          优秀: 优秀
+          良好: 良好
+          中等: 中等
+          及格: 及格
+          不及格: 不及格
+      status:
+        label: 成绩状态
+        type: enum
+        role: dimension
+        value_map:
+          DRAFT: 草稿
+          PUBLISHED: 已发布
+          LOCKED: 已锁定
+  EffectiveScore:
+    label: 有效成绩
+    synonyms:
+    - 有效成绩
+    - 最终成绩
+    - GPA口径成绩
+    description: 按学生和课程去重后的有效成绩，用于 GPA、及格率和排名
+    source:
+      view: v_effective_score
+      primary_key: enrollment_id
+    properties:
+      total_score:
+        label: 有效总评
+        type: decimal
+        role: measure
+        default_aggregation: avg
+      gpa_point:
+        label: 有效绩点
+        type: decimal
+        role: measure
+        default_aggregation: weighted_avg
+      credit:
+        label: 学分
+        type: decimal
+        role: measure
+        default_aggregation: sum
+      score_status:
+        label: 成绩状态
+        type: enum
+        role: dimension
+  Transcript:
+    label: 正式成绩单
+    synonyms:
+    - 成绩单
+    - 成绩证明
+    - 已签发成绩单
+    description: 签发后的成绩单快照，避免后续改分影响历史文档
+    source:
+      table: transcript
+      primary_key: id
+      business_key: transcript_no
+    properties:
+      transcript_no:
+        label: 成绩单编号
+        type: string
+        role: identifier
+      total_credits:
+        label: 总学分
+        type: decimal
+        role: measure
+        default_aggregation: sum
+      gpa:
+        label: 平均绩点
+        type: decimal
+        role: measure
+        default_aggregation: avg
+      status:
+        label: 成绩单状态
+        type: enum
+        role: dimension
+        value_map:
+          DRAFT: 草稿
+          ISSUED: 已签发
+          REVOKED: 已作废
+      issued_at:
+        label: 签发时间
+        type: datetime
+        role: time
+  文科:
+    label: 文科
+    description: 语文，英语，道法算文科
+    synonyms:
+    - 语文
+    - 英语
+    - 道法
+    source:
+      table: ''
+      primary_key: id
+    properties: {}
+  理科:
+    label: 理科
+    description: 数学，物理，化学，生物算理科
+    synonyms:
+    - 数学
+    - 物理
+    - 化学
+    - 生物
+    source:
+      table: ''
+      primary_key: id
+    properties: {}
+relations:
+- name: StudentBelongsToClass
+  from: Student
+  to: Class
+  description: 学生当前行政班
+  join:
+    from_table: student
+    from_column: class_id
+    to_table: school_class
+    to_column: id
+  cardinality: many_to_one
+  fanout: false
+- name: ClassHasHeadTeacher
+  from: Class
+  to: Teacher
+  description: 行政班班主任
+  join:
+    from_table: school_class
+    from_column: head_teacher_id
+    to_table: teacher
+    to_column: id
+  cardinality: many_to_one
+  fanout: false
+- name: StudentHasEnrollment
+  from: Student
+  to: Enrollment
+  description: 学生修读记录
+  join:
+    from_table: student
+    from_column: id
+    to_table: enrollment
+    to_column: student_id
+  cardinality: one_to_many
+  fanout: true
+- name: EnrollmentBelongsToTeachingClass
+  from: Enrollment
+  to: TeachingClass
+  description: 修读记录所属教学班
+  join:
+    from_table: enrollment
+    from_column: teaching_class_id
+    to_table: teaching_class
+    to_column: id
+  cardinality: many_to_one
+  fanout: false
+- name: EnrollmentHasScore
+  from: Enrollment
+  to: Score
+  description: 一次修读对应一条成绩
+  join:
+    from_table: enrollment
+    from_column: id
+    to_table: score
+    to_column: enrollment_id
+  cardinality: one_to_one
+  fanout: false
+- name: TeachingClassOffersCourse
+  from: TeachingClass
+  to: Course
+  description: 教学班开设课程
+  join:
+    from_table: teaching_class
+    from_column: course_id
+    to_table: course
+    to_column: id
+  cardinality: many_to_one
+  fanout: false
+- name: TeachingClassTaughtByTeacher
+  from: TeachingClass
+  to: Teacher
+  description: 教学班任课教师
+  join:
+    from_table: teaching_class
+    from_column: teacher_id
+    to_table: teacher
+    to_column: id
+  cardinality: many_to_one
+  fanout: false
+- name: TeachingClassBelongsToSemester
+  from: TeachingClass
+  to: Semester
+  description: 教学班所属学期
+  join:
+    from_table: teaching_class
+    from_column: semester_id
+    to_table: semester
+    to_column: id
+  cardinality: many_to_one
+  fanout: false
+- name: TeachingClassCoversClass
+  from: TeachingClass
+  to: Class
+  description: 教学班覆盖的行政班，合班时一对多
+  join:
+    from_table: teaching_class
+    from_column: id
+    to_table: school_class
+    to_column: id
+    via_table: teaching_class_class
+    via_from_column: teaching_class_id
+    via_to_column: class_id
+  cardinality: many_to_many
+  fanout: true
+- name: EffectiveScoreBelongsToStudent
+  from: EffectiveScore
+  to: Student
+  description: 有效成绩所属学生
+  join:
+    from_table: v_effective_score
+    from_column: student_id
+    to_table: student
+    to_column: id
+  cardinality: many_to_one
+  fanout: false
+- name: EffectiveScoreForCourse
+  from: EffectiveScore
+  to: Course
+  description: 有效成绩对应课程
+  join:
+    from_table: v_effective_score
+    from_column: course_id
+    to_table: course
+    to_column: id
+  cardinality: many_to_one
+  fanout: false
+- name: EffectiveScoreInSemester
+  from: EffectiveScore
+  to: Semester
+  description: 有效成绩对应学期
+  join:
+    from_table: v_effective_score
+    from_column: semester_id
+    to_table: semester
+    to_column: id
+  cardinality: many_to_one
+  fanout: false
+- name: EffectiveScoreTaughtByTeacher
+  from: EffectiveScore
+  to: Teacher
+  description: 有效成绩对应任课教师
+  join:
+    from_table: v_effective_score
+    from_column: teacher_id
+    to_table: teacher
+    to_column: id
+  cardinality: many_to_one
+  fanout: false
+- name: TranscriptBelongsToStudent
+  from: Transcript
+  to: Student
+  description: 成绩单所属学生
+  join:
+    from_table: transcript
+    from_column: student_id
+    to_table: student
+    to_column: id
+  cardinality: many_to_one
+  fanout: false
+- name: TranscriptCoversSemester
+  from: Transcript
+  to: Semester
+  description: 成绩单所属学期，空表示全学段
+  join:
+    from_table: transcript
+    from_column: semester_id
+    to_table: semester
+    to_column: id
+  cardinality: many_to_one
+  fanout: false
+dimensions:
+  academic_year:
+    label: 学年
+    entity: Semester
+    property: academic_year
+    type: time
+    synonyms:
+    - 学年
+  term:
+    label: 学期序号
+    entity: Semester
+    property: term
+    type: time
+    synonyms:
+    - 第几学期
+    - 学期
+  semester:
+    label: 学期名称
+    entity: Semester
+    property: name
+    type: time
+    synonyms:
+    - 学期
+    - 上学期
+    - 下学期
+  grade:
+    label: 年级
+    entity: Class
+    property: grade_year
+    type: dimension
+    synonyms:
+    - 年级
+    - 入学年份
+  class:
+    label: 行政班
+    entity: Class
+    property: name
+    type: dimension
+    synonyms:
+    - 班级
+    - 行政班
+    - 班
+  teaching_class:
+    label: 教学班
+    entity: TeachingClass
+    property: class_code
+    type: dimension
+    synonyms:
+    - 教学班
+    - 授课班
+  course:
+    label: 课程
+    entity: Course
+    property: name
+    type: dimension
+    synonyms:
+    - 课程
+    - 科目
+    - 学科
+  teacher:
+    label: 教师
+    entity: Teacher
+    property: name
+    type: dimension
+    synonyms:
+    - 老师
+    - 教师
+    - 任课老师
+  student:
+    label: 学生
+    entity: Student
+    property: name
+    type: dimension
+    synonyms:
+    - 学生
+    - 同学
+  gender:
+    label: 性别
+    entity: Student
+    property: gender
+    type: dimension
+    synonyms:
+    - 性别
+  attempt_type:
+    label: 修读类型
+    entity: Enrollment
+    property: attempt_type
+    type: dimension
+    synonyms:
+    - 正考
+    - 补考
+    - 重修
+    - 修读类型
+  grade_level:
+    label: 成绩等级
+    entity: Score
+    property: grade_level
+    type: dimension
+    synonyms:
+    - 等级
+    - 优秀
+    - 良好
+    - 不及格
+  score_status:
+    label: 成绩状态
+    entity: Score
+    property: status
+    type: dimension
+    synonyms:
+    - 成绩状态
+    - 已发布
+    - 已锁定
+    - 草稿
+  score_band:
+    label: 分数段
+    entity: Score
+    property: total_score
+    type: bucket
+    buckets:
+    - label: 90-100
+      min: 90
+      max: 100
+    - label: 80-89
+      min: 80
+      max: 89.999
+    - label: 70-79
+      min: 70
+      max: 79.999
+    - label: 60-69
+      min: 60
+      max: 69.999
+    - label: 0-59
+      min: 0
+      max: 59.999
+metrics:
+  avg_total_score:
+    label: 平均总评成绩
+    synonyms:
+    - 平均分
+    - 均分
+    - 平均成绩
+    entity: Score
+    expression: AVG(total_score)
+    filters:
+    - score_status IN ('PUBLISHED','LOCKED')
+    - attempt_type = 'NORMAL'
+    dimensions:
+    - academic_year
+    - term
+    - semester
+    - grade
+    - class
+    - course
+    - teacher
+    - gender
+    unit: score
+    notes: 正考口径；补考和重修请使用 avg_total_score_effective
+  avg_final_exam_score:
+    label: 平均期末成绩
+    synonyms:
+    - 期末平均分
+    - 期末成绩平均分
+    entity: Score
+    expression: AVG(final_exam_score)
+    filters:
+    - score_status IN ('PUBLISHED','LOCKED')
+    - attempt_type = 'NORMAL'
+    dimensions:
+    - academic_year
+    - term
+    - semester
+    - grade
+    - class
+    - course
+    - teacher
+    unit: score
+  pass_rate:
+    label: 及格率
+    synonyms:
+    - 及格率
+    - 通过率
+    entity: Score
+    expression: SUM(CASE WHEN total_score >= 60 THEN 1 ELSE 0 END) * 1.0 / NULLIF(COUNT(total_score), 0)
+    filters:
+    - score_status IN ('PUBLISHED','LOCKED')
+    - attempt_type = 'NORMAL'
+    dimensions:
+    - academic_year
+    - term
+    - semester
+    - grade
+    - class
+    - course
+    - teacher
+    unit: ratio
+    notes: 分母不包含未录入成绩；缺考按0分需另建指标
+  excellent_rate:
+    label: 优秀率
+    synonyms:
+    - 优秀率
+    - 优良率
+    entity: Score
+    expression: SUM(CASE WHEN total_score >= 90 THEN 1 ELSE 0 END) * 1.0 / NULLIF(COUNT(total_score), 0)
+    filters:
+    - score_status IN ('PUBLISHED','LOCKED')
+    - attempt_type = 'NORMAL'
+    dimensions:
+    - academic_year
+    - term
+    - semester
+    - grade
+    - class
+    - course
+    - teacher
+    unit: ratio
+  score_stddev:
+    label: 成绩标准差
+    synonyms:
+    - 标准差
+    - 成绩离散度
+    entity: Score
+    expression: SQRT(AVG(total_score * total_score) - AVG(total_score) * AVG(total_score))
+    filters:
+    - score_status IN ('PUBLISHED','LOCKED')
+    - attempt_type = 'NORMAL'
+    dimensions:
+    - academic_year
+    - term
+    - semester
+    - grade
+    - class
+    - course
+    - teacher
+    unit: score
+    notes: 总体标准差（SQLite 兼容）；样本标准差需在应用层计算
+  avg_total_score_effective:
+    label: 有效平均分
+    synonyms:
+    - 有效平均分
+    - 最终平均分
+    - 去重平均分
+    entity: EffectiveScore
+    expression: AVG(total_score)
+    filters:
+    - score_status IN ('PUBLISHED','LOCKED')
+    dimensions:
+    - academic_year
+    - term
+    - semester
+    - grade
+    - class
+    - course
+    - teacher
+    - gender
+    unit: score
+  gpa:
+    label: 平均绩点
+    synonyms:
+    - GPA
+    - 绩点
+    - 平均绩点
+    entity: EffectiveScore
+    expression: SUM(gpa_point * credit) * 1.0 / NULLIF(SUM(credit), 0)
+    filters:
+    - score_status IN ('PUBLISHED','LOCKED')
+    - gpa_point IS NOT NULL
+    dimensions:
+    - academic_year
+    - term
+    - semester
+    - grade
+    - class
+    - course
+    - teacher
+    - gender
+    unit: gpa
+  student_count:
+    label: 学生人数
+    synonyms:
+    - 学生人数
+    - 人数
+    - 有多少学生
+    entity: Score
+    expression: COUNT(DISTINCT student_id)
+    filters:
+    - score_status IN ('PUBLISHED','LOCKED')
+    dimensions:
+    - academic_year
+    - term
+    - semester
+    - grade
+    - class
+    - course
+    - teacher
+    - gender
+    unit: count
+  class_rank:
+    label: 班级排名
+    synonyms:
+    - 班级排名
+    - 名次
+    - 排名
+    entity: Score
+    expression: RANK() OVER (PARTITION BY class_id, course_id ORDER BY total_score DESC)
+    filters:
+    - score_status IN ('PUBLISHED','LOCKED')
+    - attempt_type = 'NORMAL'
+    dimensions:
+    - academic_year
+    - term
+    - semester
+    - class
+    - course
+    unit: rank
+    notes: 排名是窗口函数，不是普通聚合；必须明确排名范围和课程
+  score_distribution:
+    label: 成绩分布
+    synonyms:
+    - 分数段
+    - 成绩分布
+    - 分布情况
+    entity: Score
+    expression: CASE WHEN total_score >= 90 THEN '90-100' WHEN total_score >= 80 THEN '80-89' WHEN total_score >= 70 THEN
+      '70-79' WHEN total_score >= 60 THEN '60-69' ELSE '0-59' END
+    filters:
+    - score_status IN ('PUBLISHED','LOCKED')
+    - attempt_type = 'NORMAL'
+    dimensions:
+    - academic_year
+    - term
+    - semester
+    - grade
+    - class
+    - course
+    - teacher
+    unit: count
+  makeup_rate:
+    label: 补考率
+    synonyms:
+    - 补考率
+    - 补考比例
+    entity: Enrollment
+    expression: COUNT(DISTINCT CASE WHEN attempt_type = 'MAKEUP' THEN student_id END) * 1.0 / NULLIF(COUNT(DISTINCT CASE WHEN
+      attempt_type = 'NORMAL' THEN student_id END), 0)
+    filters:
+    - score_status IN ('PUBLISHED','LOCKED')
+    dimensions:
+    - academic_year
+    - term
+    - semester
+    - grade
+    - class
+    - course
+    - teacher
+    unit: ratio
+  retake_rate:
+    label: 重修率
+    synonyms:
+    - 重修率
+    - 重修比例
+    entity: Enrollment
+    expression: COUNT(DISTINCT CASE WHEN attempt_type = 'RETAKE' THEN student_id END) * 1.0 / NULLIF(COUNT(DISTINCT CASE WHEN
+      attempt_type = 'NORMAL' THEN student_id END), 0)
+    filters:
+    - score_status IN ('PUBLISHED','LOCKED')
+    dimensions:
+    - academic_year
+    - term
+    - semester
+    - grade
+    - class
+    - course
+    - teacher
+    unit: ratio
+  transcript_count:
+    label: 成绩单数量
+    synonyms:
+    - 成绩单数量
+    - 已签发成绩单
+    entity: Transcript
+    expression: COUNT(*)
+    filters:
+    - status = 'ISSUED'
+    dimensions:
+    - semester
+    - student
+    unit: count
+synonyms:
+  成绩:
+    target: Score.total_score
+    default: true
+  分数:
+    target: Score.total_score
+  得分:
+    target: Score.total_score
+  总评:
+    target: Score.total_score
+  期末成绩:
+    target: Score.final_exam_score
+  平时成绩:
+    target: Score.regular_score
+  期中成绩:
+    target: Score.midterm_score
+  绩点:
+    target: Score.gpa_point
+  GPA:
+    target: Metric.gpa
+  等级:
+    target: Score.grade_level
+  班级:
+    target: Class
+    note: 默认行政班；教学班需明确说教学班
+  行政班:
+    target: Class
+  教学班:
+    target: TeachingClass
+  老师:
+    target: Teacher
+  教师:
+    target: Teacher
+  任课老师:
+    target: Teacher
+  科目:
+    target: Course
+  课程:
+    target: Course
+  平均分:
+    target: Metric.avg_total_score
+  均分:
+    target: Metric.avg_total_score
+  平均成绩:
+    target: Metric.avg_total_score
+  及格率:
+    target: Metric.pass_rate
+  通过率:
+    target: Metric.pass_rate
+  优秀率:
+    target: Metric.excellent_rate
+  排名:
+    target: Metric.class_rank
+  名次:
+    target: Metric.class_rank
+  补考率:
+    target: Metric.makeup_rate
+  重修率:
+    target: Metric.retake_rate
+  成绩单:
+    target: Transcript
+  我的成绩:
+    target: Score
+    scope: current_user
+  我教的班级:
+    target: TeachingClass
+    scope: current_teacher
+intents:
+  aggregate_metric:
+    examples:
+    - 高二(1)班2025-2026学年第一学期数学平均分是多少
+    - 各班级英语及格率
+    - 我的数学成绩是多少
+    required_slots:
+    - metric
+    optional_slots:
+    - class
+    - grade
+    - course
+    - teacher
+    - semester
+    - academic_year
+    - student
+    defaults:
+      score_status:
+      - PUBLISHED
+      - LOCKED
+      attempt_scope: NORMAL
+    clarification:
+    - when: metric == '平均分' and course is null
+      question: 请确认要统计哪门课程的平均分？
+  detail_query:
+    examples:
+    - 查陈晨这学期数学成绩
+    - 我的期末成绩
+    - 王浩的补考成绩
+    required_slots:
+    - student
+    optional_slots:
+    - course
+    - semester
+    - attempt_type
+    defaults:
+      score_status:
+      - PUBLISHED
+      - LOCKED
+  ranking:
+    examples:
+    - 高二(1)班数学成绩排名前10
+    - 我班数学谁第一名
+    required_slots:
+    - class
+    - course
+    - metric
+    optional_slots:
+    - semester
+    - limit
+    defaults:
+      score_status:
+      - PUBLISHED
+      - LOCKED
+      attempt_scope: NORMAL
+    clarification:
+    - when: ranking_scope is null
+      question: 请确认是班级排名、年级排名还是全校排名？
+  trend:
+    examples:
+    - 数学平均分按学期变化
+    - 我的成绩趋势
+    required_slots:
+    - metric
+    - time_dimension
+    optional_slots:
+    - class
+    - course
+    - teacher
+    - student
+    defaults:
+      score_status:
+      - PUBLISHED
+      - LOCKED
+  comparison:
+    examples:
+    - 两个班英语平均分对比
+    - 我的数学和语文成绩对比
+    required_slots:
+    - metric
+    - compare_dimension
+    optional_slots:
+    - semester
+    - course
+  distribution:
+    examples:
+    - 物理成绩分数段分布
+    - 高二(1)班数学成绩分布
+    required_slots:
+    - course
+    optional_slots:
+    - class
+    - semester
+    defaults:
+      score_status:
+      - PUBLISHED
+      - LOCKED
+      attempt_scope: NORMAL
+  transcript_report:
+    examples:
+    - 生成我的第一学期成绩单
+    - 查陈晨的成绩单
+    required_slots:
+    - student
+    optional_slots:
+    - semester
+    defaults:
+      transcript_status:
+      - ISSUED
+  anomaly_scan:
+    examples:
+    - 连续两次数学不及格的学生
+    - 哪些学生需要补考
+    required_slots:
+    - course
+    - condition
+    optional_slots:
+    - class
+    - semester
+    defaults:
+      score_status:
+      - PUBLISHED
+      - LOCKED
+security:
+  enforcement: application_layer_authorized_tables
+  fail_closed: true
+  default_role: student
+  roles:
+    student:
+      description: 学生只能查看本人成绩和本人成绩单
+      required_context:
+      - student_no
+      allowed_tables:
+      - authorized_score
+      - authorized_effective_score
+      - authorized_transcript
+      row_scope: student_no = :student_no
+    teacher:
+      description: 教师只能查看自己任教教学班的成绩，不能查看其他科目或其他教师教学班
+      required_context:
+      - teacher_no
+      allowed_tables:
+      - authorized_score
+      - authorized_effective_score
+      row_scope: teacher_no = :teacher_no
+    admin:
+      description: 教务管理员可以查看全部成绩和成绩单
+      required_context: []
+      allowed_tables:
+      - authorized_score
+      - authorized_effective_score
+      - authorized_transcript
+      row_scope: 1 = 1
+  notes:
+  - authorized_score 由 v_published_transcript 按当前用户过滤后生成
+  - authorized_effective_score 由 v_effective_score 按当前用户过滤后生成
+  - 教师不可访问 authorized_transcript，因为成绩单包含其他科目
+  - 学生查询其他学生时结果为空，不泄露其他学生是否存在
+quality_rules:
+- name: published_only
+  description: 只统计已发布或已锁定成绩
+  expression: score_status IN ('PUBLISHED','LOCKED')
+- name: exclude_withdrawn
+  description: 排除退课记录
+  expression: attempt_type IS NOT NULL
+- name: effective_score
+  description: GPA、及格率、排名默认使用有效成绩
+  expression: v_effective_score
+- name: missing_score
+  description: 未录入成绩默认排除，不按0分计算
+  expression: total_score IS NOT NULL
+- name: class_attribution
+  description: 班级维度默认使用当前行政班，转班历史需扩展 student_class_history
+  expression: student.class_id
+- name: combined_class
+  description: 教学班覆盖多个行政班时，不能用 teaching_class_class 直接计算学生班级平均分
+  expression: teaching_class_class
+- name: transcript_snapshot
+  description: 正式成绩单以 transcript.snapshot_json 为准，不随成绩修改变化
+  expression: transcript.snapshot_json

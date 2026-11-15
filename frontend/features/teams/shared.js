@@ -128,6 +128,6 @@ export function isWorkflowActive(status) {
 
 export function teamHasRunningMembers(team) {
   return (team?.members || []).some(
-    member => member.status === "running" || member.status === "queued"
+    member => ["running", "queued", "canceling"].includes(member.status) || member.execution?.exit_acknowledged === false
   );
 }

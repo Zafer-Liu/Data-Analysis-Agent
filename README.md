@@ -106,6 +106,7 @@ Thank you to Infistar.cc for sponsoring Data-Analysis-Agent! It provides stable 
 | **Visualize and export** | Choose from 41 chart types and export Excel, Word, or PowerPoint deliverables. |
 | **Choose your model** | Connect OpenAI-compatible APIs or discover compatible local services. |
 | **Extend the workflow** | Add business knowledge, analysis Skills, MCP tools, or Feishu Bitable integration. |
+| **Delegate to a team** | Let the main Agent construct and call bounded subagents, with A2A 1.0 send, get, and cancel endpoints. [Protocol and usage](./docs/team-tools-a2a.md) |
 
 ---
 

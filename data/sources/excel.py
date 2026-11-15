@@ -19,6 +19,20 @@ from .base import DataSource
 
 log = logging.getLogger(__name__)
 
+
+def _register_exact(conn, table_name, frame):
+    """Preserve cell-derived dates and numeric columns without value-range guesses."""
+    import pyarrow as pa
+    table = pa.Table.from_pandas(frame, preserve_index=False)
+    if table.nbytes > 64 << 20 or table.num_rows > 250000:
+        raise ValueError('Decoded workbook exceeds small Excel compatibility limit')
+    conn.register('_excel_exact', table)
+    try:
+        quoted = '"' + str(table_name).replace('"', '""') + '"'
+        conn.execute(f'CREATE OR REPLACE TABLE {quoted} AS SELECT * FROM _excel_exact')
+    finally:
+        conn.unregister('_excel_exact')
+
 # Files below this size keep the existing low-latency synchronous path.
 EXCEL_JOB_THRESHOLD_BYTES = int(os.environ.get("BAA_EXCEL_JOB_THRESHOLD", 5_000_000))
 
@@ -54,6 +68,31 @@ def parse_excel_job(ctx, file_path: str, db_path: str, filename: str) -> dict:
     and observes cancellation only at safe sheet boundaries.
     """
     target = Path(db_path)
+    if Path(file_path).suffix.lower() == '.xlsx':
+        from data.import_pipeline import import_file_source
+        from data.dataset_catalog import _sync_json
+        from data.sources.dataset import snapshot_scan_sql, quote_identifier
+        from data.workspace_db_owner import WorkspaceDBOwner
+        source = import_file_source(file_path, progress=ctx.set_progress, cancel=ctx.is_canceled)
+        temporary = target.with_name(target.name + '.staging.duckdb')
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with WorkspaceDBOwner(temporary) as owner:
+                def install(conn):
+                    for table in source.list_tables():
+                        conn.execute(f'CREATE VIEW {quote_identifier(table)} AS SELECT * FROM {snapshot_scan_sql(source.handle, table)}')
+                owner.transaction(install)
+            ctx.check_canceled()
+            os.replace(temporary, target)
+            _sync_json(Path(str(target) + '.dataset.json'), source.handle.to_dict())
+            return {'file_path': str(Path(file_path).absolute()), 'db_path': str(target.absolute()),
+                    'filename': filename, 'tables': source.list_tables(), 'sheet_count': len(source.list_tables()),
+                    'dataset_handle': source.handle.to_dict()}
+        finally:
+            source.close()
+            temporary.unlink(missing_ok=True)
+    if Path(file_path).stat().st_size > 5_000_000:
+        raise ValueError('Large XLS requires conversion to XLSX/CSV/Parquet')
     target.parent.mkdir(parents=True, exist_ok=True)
     complete = False
     conn = None
@@ -95,7 +134,7 @@ def parse_excel_job(ctx, file_path: str, db_path: str, filename: str) -> dict:
                 while table in tables:
                     table = f"{base}_{suffix}"
                     suffix += 1
-                _register(conn, table, df)
+                _register_exact(conn, table, df)
                 tables.append(table)
             ctx.set_progress(
                 83 + int(index * 14 / total),
@@ -325,7 +364,19 @@ def _parse_sheets_parallel(
 class ExcelDataSource(DataSource):
     """Load one or more sheets from an Excel file into a DuckDB in-memory DB."""
 
+    def __new__(cls, file_path=None, filename=''):
+        if file_path is not None and Path(file_path).stat().st_size > EXCEL_JOB_THRESHOLD_BYTES:
+            if Path(file_path).suffix.lower() != '.xlsx':
+                raise ValueError('Large XLS requires conversion to XLSX/CSV/Parquet')
+            from data.import_pipeline import import_file_source
+            return import_file_source(file_path)
+        return super().__new__(cls)
+
     def __init__(self, file_path: str, filename: str):
+        if Path(file_path).suffix.lower() == '.xlsx':
+            from data.import_pipeline import _xlsx_metadata, _limits
+            from infrastructure.resource_budget import BudgetSpec
+            _xlsx_metadata(Path(file_path), _limits({'max_xml_bytes': 64 << 20, 'max_cells': 250000}, BudgetSpec()))
         self.name = filename
         self.file_path = file_path
         self._conn = _new_conn()
@@ -338,7 +389,14 @@ class ExcelDataSource(DataSource):
     @classmethod
     def from_database(cls, file_path: str, filename: str, db_path: str):
         """Attach a completed job database using a fresh request-thread connection."""
-        obj = cls.__new__(cls)
+        sidecar = Path(str(db_path) + '.dataset.json')
+        if sidecar.exists():
+            import json
+            if sidecar.stat().st_size > 16 << 20:
+                raise ValueError('Dataset sidecar is too large')
+            from data.sources.dataset import DatasetDataSource
+            return DatasetDataSource(json.loads(sidecar.read_text(encoding='utf-8')), name=filename)
+        obj = object.__new__(cls)
         obj.name = filename
         obj.file_path = file_path
         obj._db_path = Path(db_path)
@@ -359,7 +417,31 @@ class ExcelDataSource(DataSource):
         if not self._file_backed():
             return self._conn  # already :memory:
         if self._shadow_conn is None:
-            self._shadow_conn = snapshot_tables_to_memory(self._conn)
+            import pyarrow as pa
+            shadow = _new_conn()
+            total_rows = total_bytes = 0
+            try:
+                for name in self._tables:
+                    quoted = '"' + name.replace('"', '""') + '"'
+                    reader = self._conn.execute(f'SELECT * FROM {quoted}').to_arrow_reader(batch_size=1024)
+                    batches = []
+                    try:
+                        schema = reader.schema
+                        for batch in reader:
+                            total_rows += batch.num_rows
+                            total_bytes += batch.nbytes
+                            if total_rows > 100000 or total_bytes > 32 << 20:
+                                raise ValueError('Large legacy Excel writes require a derived snapshot plan')
+                            batches.append(batch)
+                    finally:
+                        reader.close()
+                    shadow.register('_exact_copy', pa.Table.from_batches(batches, schema=schema))
+                    shadow.execute(f'CREATE TABLE {quoted} AS SELECT * FROM _exact_copy')
+                    shadow.unregister('_exact_copy')
+            except BaseException:
+                shadow.close()
+                raise
+            self._shadow_conn = shadow
             log.info("[ExcelDS] shadow snapshot built  tables=%d", len(self._tables))
         return self._shadow_conn
 
@@ -377,7 +459,7 @@ class ExcelDataSource(DataSource):
                 continue
             table = _clean_identifier(sheet) or f"sheet{len(self._tables) + 1}"
             log.info("[ExcelDS] register → table=%r  rows=%d", table, len(df))
-            _register(self._conn, table, df)
+            _register_exact(self._conn, table, df)
             self._tables.append(table)
 
         if not self._tables:
@@ -394,9 +476,10 @@ class ExcelDataSource(DataSource):
     def execute_query(self, sql: str) -> Tuple[pd.DataFrame, str]:
         # A6: writes on file-backed (from_database) instances go to the
         # in-memory shadow; :memory: instances write directly.
+        from .dataset import bounded_legacy_query
         if self._file_backed() and is_write_sql(sql):
-            return _query(self.writable_conn(), sql)
-        return _query(self._active_conn(), sql)
+            return bounded_legacy_query(self.writable_conn(), sql)
+        return bounded_legacy_query(self._active_conn(), sql)
 
     def create_analysis_table(self, sql: str, table_name: str = "analysis_data", _df=None) -> str:
         use_shadow = self._file_backed() and (
@@ -404,7 +487,7 @@ class ExcelDataSource(DataSource):
         )
         conn = self.writable_conn() if use_shadow else self._conn
         if _df is not None:
-            _register(conn, table_name, _df)
+            _register_exact(conn, table_name, _df)
             rows = len(_df)
         else:
             try:

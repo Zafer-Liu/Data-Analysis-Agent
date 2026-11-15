@@ -74,9 +74,11 @@ class JobContext:
 class JobRunner:
     """Per-session worker pool backed by the process-wide ``JobsStore``."""
 
-    def __init__(self, session_id: str, store: JobsStore, max_workers: int = 2):
+    def __init__(self, session_id: str, store: JobsStore, max_workers: int = 2,
+                 *, acquire_workspace_leases: bool = True):
         self._sid = session_id
         self._store = store
+        self._acquire_workspace_leases = acquire_workspace_leases
         self._pool = ThreadPoolExecutor(
             max_workers=max_workers,
             thread_name_prefix=f"job-{session_id[:8]}",
@@ -88,6 +90,7 @@ class JobRunner:
         self._scope = threading.local()
         self._job_leases: Dict[str, str] = {}
         self._terminal_listeners: Dict[str, List[Callable[[Dict[str, Any]], None]]] = {}
+        self._remote_cancel_handlers: Dict[str, Callable[[], Any]] = {}
 
     # ── Submission/execution ──────────────────────────────────────────────
 
@@ -128,6 +131,8 @@ class JobRunner:
         return jid
 
     def _acquire_workspace_lease(self) -> tuple[str, bool]:
+        if not self._acquire_workspace_leases:
+            return "", False
         from data.workspace import workspace_manager
         scoped_id = str(getattr(self._scope, "workspace_id", "") or "")
         if scoped_id:
@@ -181,6 +186,104 @@ class JobRunner:
         self._notify_event()
         return jid
 
+    def begin_remote(self, run_id: str, *, owner_id: str, workspace_id: str = "",
+                     store_root: str = "", label: str = "Remote training") -> str:
+        """Create one managed Job before any possibly accepted remote request."""
+        with self._lock:
+            return self._begin_remote_locked(run_id, owner_id=owner_id, workspace_id=workspace_id,
+                                             store_root=store_root, label=label)
+
+    def _begin_remote_locked(self, run_id: str, *, owner_id: str, workspace_id: str,
+                             store_root: str, label: str) -> str:
+        existing = self._store.find_remote(self._sid, run_id)
+        if existing is not None:
+            jid = existing["id"]
+            # A crash can leave the durable remote Job before its start event.
+            # Resume that same identity without clearing an accepted Stop.
+            if existing["status"] == STATUS_CREATED:
+                self._store.mark_queued(jid)
+            if existing["status"] in {STATUS_CREATED, STATUS_QUEUED}:
+                self._store.mark_started(jid)
+                self._notify_event()
+                existing = self._store.get(jid) or existing
+            if self._acquire_workspace_leases and existing["status"] not in _TERMINAL and workspace_id:
+                with self._lock:
+                    if jid not in self._job_leases:
+                        from data.workspace import workspace_manager
+                        if workspace_manager.acquire_job(workspace_id) is not None:
+                            self._job_leases[jid] = workspace_id
+            return jid
+        acquired = False
+        if self._acquire_workspace_leases and workspace_id:
+            from data.workspace import workspace_manager
+            acquired = workspace_manager.acquire_job(workspace_id) is not None
+        try:
+            job = self._store.create(
+                self._sid, "remote_training", label=label,
+                parent_id=getattr(self._scope, "parent_id", ""), workspace_id=workspace_id,
+                execution_backend="remote", recovery_phase="reserve_pending",
+                recovery_metadata={"run_id": run_id, "owner_id": owner_id,
+                                   "workspace_id": workspace_id, "store_root": store_root},
+            )
+        except Exception:
+            if acquired:
+                self._release_workspace_id(workspace_id)
+            raise
+        jid = job["id"]
+        if acquired:
+            with self._lock:
+                self._job_leases[jid] = workspace_id
+        self._store.mark_queued(jid)
+        self._store.mark_started(jid)
+        self._notify_event()
+        return jid
+
+    def bind_remote_cancel(self, jid: str, callback):
+        job = self._store.get_for_session(self._sid, jid)
+        if not job or job.get("execution_backend") != "remote":
+            raise ValueError("Managed remote Job is not in this session")
+        with self._lock:
+            self._remote_cancel_handlers[jid] = callback
+
+    def unbind_remote_cancel(self, jid: str, callback):
+        with self._lock:
+            if self._remote_cancel_handlers.get(jid) is callback:
+                self._remote_cancel_handlers.pop(jid, None)
+
+    def checkpoint_remote(self, jid: str, *, external_id: str, phase: str, metadata=None):
+        if self._store.get_for_session(self._sid, jid) is None:
+            raise ValueError("Remote job not found in session")
+        self._store.update_recovery(jid, external_id=external_id, phase=phase, metadata=metadata)
+        self._notify_event()
+
+    def append_remote_event(self, jid: str, native_id: str, native_seq: int, event: Dict[str, Any]):
+        if self._store.get_for_session(self._sid, jid) is None:
+            raise ValueError("Remote job not found in session")
+        value = self._store.append_remote_event(jid, native_id, native_seq, event)
+        if value:
+            self._notify_event()
+        return value
+
+    def finish_remote(self, jid: str, status: str, *, exit_acknowledged: bool, result=None, error="", result_committed=False):
+        job = self._store.get_for_session(self._sid, jid)
+        if not job or job.get("execution_backend") != "remote" or not exit_acknowledged or job["status"] in _TERMINAL:
+            return False
+        if status == "succeeded":
+            changed = self._store.mark_succeeded(jid, result, remote_commit=bool(result_committed))
+        elif status == "failed":
+            changed = self._store.mark_failed(jid, error or "Remote training failed")
+        elif status in {"canceled", "cancelled"}:
+            if job["status"] != STATUS_CANCELING:
+                self._store.mark_canceling(jid)
+            changed = self._store.mark_canceled(jid)
+        else:
+            return False
+        if changed:
+            self._release_job_lease(jid)
+            self._notify_event()
+            self._notify_terminal_listeners(jid)
+        return changed
+
     def append_tracked_event(self, jid: str, event: Dict[str, Any]) -> None:
         if self._store.append_event(jid, event) is not None:
             self._notify_event()
@@ -201,6 +304,9 @@ class JobRunner:
 
     def cancel_tracked(self, jid: str) -> None:
         job = self._store.get_for_session(self._sid, jid)
+        if job and job.get("execution_backend", "local") != "local":
+            self.cancel(jid)
+            return
         if job and job["status"] not in _TERMINAL:
             for child in self._store.list_children(self._sid, jid):
                 if child["status"] not in _TERMINAL:
@@ -236,10 +342,16 @@ class JobRunner:
             )
             try:
                 result = fn(ctx)
-                if self._is_canceled(jid):
+                # Only the trusted worker's top-level boolean receipt can prove
+                # that an immutable result was already published before Stop.
+                committed = isinstance(result, dict) and result.get("result_committed") is True
+                canceled = self._is_canceled(jid)
+                if canceled and not committed:
                     self._store.mark_canceled(jid)
                     log.info("[job %s] canceled after current step", jid)
                 else:
+                    if canceled:
+                        result = {**result, "cancel_requested": True}
                     self._store.mark_succeeded(jid, result)
                     log.info("[job %s] succeeded", jid)
             except JobCanceled:
@@ -308,6 +420,34 @@ class JobRunner:
         job = self._store.get_for_session(self._sid, jid)
         if job is None or job["status"] in _TERMINAL:
             return False
+        if job.get("execution_backend", "local") != "local":
+            # Persist intent before touching the network. Missing connections or
+            # an application shutdown cannot prove that the remote worker exited.
+            self._store.mark_canceling(jid)
+            metadata = job.get("recovery_metadata") or {}
+            self._store.update_recovery(jid, phase="cancel_pending", metadata={"cancel_intent": True})
+            self._notify_event()
+            with self._lock:
+                handler = self._remote_cancel_handlers.get(jid)
+            if handler:
+                try:
+                    handler()
+                except Exception:
+                    log.warning("[job %s] managed remote cancellation remains pending", jid)
+                return True
+            if metadata.get("run_id") and metadata.get("owner_id"):
+                try:
+                    from infrastructure.remote_training_client import RemoteTrainingService
+                    service = RemoteTrainingService(root=metadata.get("store_root") or None)
+                    try:
+                        service.attach_job_runner(metadata["run_id"], self)
+                        service.cancel(metadata["run_id"], owner_id=metadata["owner_id"],
+                                       session_id=self._sid, workspace_id=job.get("workspace_id", ""))
+                    finally:
+                        service.close()
+                except Exception:
+                    log.warning("[job %s] remote cancellation remains pending", jid)
+            return True
 
         with self._lock:
             self._canceled.add(jid)

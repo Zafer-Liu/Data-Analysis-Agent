@@ -131,11 +131,13 @@ def trust_connection_host_key(connection_id: str):
         return jsonify({"ok": False, "message": "公网直连不使用 SSH 主机指纹"}), 409
     payload = request.json or {}
     try:
-        ssh_tunnel_manager.trust_host_key(
-            connection["host"], connection["port"],
-            str(payload.get("key_type") or ""), str(payload.get("key_base64") or ""),
-        )
-        return jsonify({"ok": True})
+        key_type, key_base64 = str(payload.get("key_type") or ""), str(payload.get("key_base64") or "")
+        ssh_tunnel_manager.trust_host_key(connection["host"], connection["port"], key_type, key_base64)
+        import base64
+        import hashlib
+        fingerprint = "SHA256:" + base64.b64encode(hashlib.sha256(base64.b64decode(key_base64)).digest()).decode("ascii").rstrip("=")
+        gpu_connections.set_host_fingerprint(connection_id, fingerprint)
+        return jsonify({"ok": True, "host_fingerprint": fingerprint})
     except (ValueError, ssh_tunnel_manager.TunnelError) as exc:
         return jsonify({"ok": False, "message": str(exc)}), 400
 
@@ -149,6 +151,10 @@ def connect_connection(connection_id: str):
         if connection.get("connection_type") == "direct":
             _models_at(connection["base_url"])
             return jsonify({"ok": True, "connected": True, "local_url": connection["base_url"]})
+        if connection.get("purpose") == "training":
+            status = ssh_tunnel_manager.tunnel_manager.remote_training_preflight(connection_id)
+            gpu_connections.set_training_runner_status(connection_id, status)
+            return jsonify({"ok": True, "connected": True, "training_runner": status})
         password = None
         if connection["auth_method"] == "password":
             password = credential_store.load_secret(connection["credential_ref"])
@@ -185,6 +191,12 @@ def connection_status(connection_id: str):
             return jsonify({"ok": True, "connected": True, "local_url": connection["base_url"]})
         except Exception:
             return jsonify({"ok": True, "connected": False})
+    if connection.get("purpose") == "training":
+        import time
+        metadata = connection.get("training_runner") or {}
+        fresh = bool(metadata.get("runner_ready") and (metadata.get("expires_at") or 0) > time.time())
+        return jsonify({"ok": True, "connected": False, "inference_ready": False,
+                        "training_ready": fresh, "training_runner": metadata})
     return jsonify({"ok": True, **ssh_tunnel_manager.tunnel_manager.status(connection_id)})
 
 

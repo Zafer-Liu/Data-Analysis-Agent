@@ -18,6 +18,8 @@ import urllib.parse
 from infrastructure.paths import content_data_path
 import re
 import uuid
+from contextvars import ContextVar, copy_context
+from functools import wraps
 from typing import Iterator, List, Dict, Any, Optional, Tuple
 
 from .prompts      import (
@@ -41,13 +43,27 @@ from dataclasses import replace
 from .skills       import SkillDef, SkillExecutor, SkillLoader
 from .tools.schemas import AGENT_TOOLS, get_tools_with_mcp
 from .tools.business import DataToolsMixin, ExportToolsMixin
-from .tools.exposure import filter_tools_for_turn, limit_tools_for_turn
-from .tools.results import make_tool_result, read_tool_result_artifact, classify_tool_error
+from .tools.exposure import (
+    discover_tool_names_for_query, filter_tools_for_turn, limit_tools_for_turn,
+)
+from .tools.invocation import (
+    ToolInvocationPolicy, ToolAuthorizationError, authorize_tool_invocation,
+)
+from .execution import ExecutionContext, ExecutionStopped
+from .teams.review import (
+    QUALITY_REVIEW_INSTRUCTION, QualityReviewError, parse_quality_review,
+    quality_review_blocks, collect_evidence_references,
+)
+from .tools.results import (
+    make_tool_result, persist_large_tool_result, read_tool_result_artifact,
+    read_evidence_claim, classify_tool_error,
+)
 from .tools.parallel import should_parallelize_batch
 from .number_audit import (
     NUMBER_EVIDENCE_TOOLS,
     audit_report_numbers,
     collect_number_evidence,
+    number_evidence_gaps,
 )
 from .tools.workspace import (
     WorkspaceBashService,
@@ -121,6 +137,85 @@ from .stage_compaction import compact_completed_stage_results
 
 log = logging.getLogger(__name__)
 
+_CURRENT_EXECUTION = ContextVar("baa_current_execution", default=None)
+_CURRENT_INVOCATION_POLICY = ContextVar("baa_current_invocation_policy", default=None)
+_CURRENT_TURN_STATE = ContextVar("baa_current_turn_state", default=None)
+
+
+def _artifact_identity(item):
+    return str(item.get("claim_id") or item.get("artifact_id") or "")
+
+
+def _quality_review_decision(content, evidence=None):
+    """Fail closed on malformed, contradictory, or ungrounded review JSON."""
+    try:
+        review = parse_quality_review(content, require_missing_evidence=True)
+        if evidence is not None and review["decision"] == "pass":
+            references = collect_evidence_references(evidence)
+            granted = set(references["claim_ids"])
+            granted.update(_artifact_identity(ref) for ref in references["artifact_refs"])
+            granted.update(str(ref.get("uri") or "") for ref in references["artifact_refs"])
+            cited = review["evidence"]
+            if granted and (not cited or any(
+                not any(reference and reference in citation for reference in granted)
+                for citation in cited
+            )):
+                raise QualityReviewError("pass must cite the supplied evidence references")
+        return review, "" if not quality_review_blocks(review, require_missing_evidence=True) else (
+            "quality review " + review["decision"] + ": "
+            + "; ".join(review["issues"] + review["missing_evidence"])
+        )
+    except QualityReviewError as exc:
+        review = {"decision": "escalate", "issues": [], "evidence": [],
+                  "missing_evidence": [str(exc)]}
+        return review, str(exc)
+
+
+def _execution_bound_turn(method):
+    """Scope a streamed turn without changing its public call signature."""
+    @wraps(method)
+    def iterate(self, *args, **kwargs):
+        from agent.execution import ExecutionContext, ExecutionStopped
+
+        context = getattr(self, "_execution_context", None)
+        owns_context = context is None
+        if context is None:
+            context = ExecutionContext(request_id=uuid.uuid4().hex)
+        execution_token = _CURRENT_EXECUTION.set((id(self), context))
+        policy_token = _CURRENT_INVOCATION_POLICY.set((id(self), None))
+        state_token = _CURRENT_TURN_STATE.set((id(self), {
+            "grants": [], "number_evidence": [], "data_tools": set(),
+            "parent_claim_ids": [],
+        }))
+        previous_semantics = self._semantic_context
+        self._semantic_context = None
+        events = None
+        try:
+            context.checkpoint()
+            events = method(self, *args, **kwargs)
+            for event in events:
+                context.checkpoint()
+                yield event
+        except ExecutionStopped as exc:
+            yield {
+                "type": "agent_activity", "status": "canceled",
+                "message": self._tt("任务已停止。", "Task stopped."),
+                "reason": str(exc),
+            }
+            yield {"type": "done", "canceled": True}
+        finally:
+            try:
+                if events is not None:
+                    events.close()
+            finally:
+                self._semantic_context = previous_semantics
+                _CURRENT_TURN_STATE.reset(state_token)
+                _CURRENT_INVOCATION_POLICY.reset(policy_token)
+                _CURRENT_EXECUTION.reset(execution_token)
+                if owns_context:
+                    context.acknowledge_exit()
+    return iterate
+
 
 _PROPOSE_CMDS = (
     "ppt", "ppt_revise", "export", "excel_revise",
@@ -186,22 +281,7 @@ def _delegated_result_invalid_reason(
 
 
 def _quality_review_blocking_reason(content: str) -> str:
-    text = str(content or "")
-    blocking_markers = (
-        "严重缺失",
-        "本轮团队输出对外实质为空",
-        "无法验证",
-        "不能验证",
-        "必须重做",
-        "不建议采信",
-        "严重错误",
-        "核心口径错误",
-        "工具失败被包装成成功",
-    )
-    for marker in blocking_markers:
-        if marker in text:
-            return f"quality reviewer reported blocking issue: {marker}"
-    return ""
+    return _quality_review_decision(content)[1]
 
 
 def _normalize_chart_call_args(
@@ -283,22 +363,26 @@ def _remember_turn_tool_result_artifacts(
 ) -> None:
     """Authorize newly-created tool-result Artifacts for this turn only."""
     by_id = {
-        str(item.get("artifact_id") or ""): dict(item)
+        _artifact_identity(item): dict(item)
         for item in allowed
-        if isinstance(item, dict) and item.get("artifact_id")
+        if isinstance(item, dict) and _artifact_identity(item)
     }
     for item in artifacts or ():
         if not isinstance(item, dict):
             continue
-        artifact_id = str(item.get("artifact_id") or "")
-        if (
-            item.get("type") != "tool_result"
-            or not artifact_id.startswith("tr_")
-            or str(item.get("session_id") or "") != str(session_id or "")
-        ):
+        artifact_id = _artifact_identity(item)
+        valid_kind = (
+            item.get("type") == "tool_result" and artifact_id.startswith("tr_")
+            or item.get("type") == "evidence_claim" and artifact_id.startswith("ec_")
+        )
+        if not valid_kind or str(item.get("session_id") or "") != str(session_id or ""):
             continue
         by_id[artifact_id] = dict(item)
-    allowed[:] = list(by_id.values())[-max(1, int(limit)):]
+    # The historical 20-result recovery window remains intact. Claims have a
+    # separate window so adding lineage never evicts those recovery grants.
+    records = list(by_id.values())
+    allowed[:] = [item for item in records if item.get("type") == "tool_result"][-max(1, int(limit)):]
+    allowed.extend(item for item in records if item.get("type") == "evidence_claim")
 
 
 def _scope_tool_result_reader(
@@ -307,10 +391,10 @@ def _scope_tool_result_reader(
 ) -> list[dict]:
     """Hide the Artifact reader until IDs exist, then enum-scope its input."""
     artifact_ids = list(dict.fromkeys(
-        str(item.get("artifact_id") or "")
+        _artifact_identity(item)
         for item in allowed_artifacts
         if isinstance(item, dict)
-        and str(item.get("artifact_id") or "").startswith("tr_")
+        and _artifact_identity(item).startswith(("tr_", "ec_"))
     ))
     scoped: list[dict] = []
     for schema in tools:
@@ -326,7 +410,7 @@ def _scope_tool_result_reader(
             .setdefault("parameters", {})
             .setdefault("properties", {})
         )
-        properties.setdefault("artifact_id", {})["enum"] = artifact_ids[-20:]
+        properties.setdefault("artifact_id", {})["enum"] = artifact_ids
         scoped.append(clone)
     return scoped
 
@@ -382,6 +466,13 @@ def _parse_text_fallback_tool_calls(content: str) -> list[tuple[str, Dict[str, A
         args: Dict[str, Any] = {}
         for pm in _PARAM_TAG_RE.finditer(body):
             args[pm.group(1)] = pm.group(2)
+        if not args and body.lstrip().startswith("{"):
+            try:
+                parsed = json.loads(body)
+            except (TypeError, ValueError):
+                parsed = None
+            if isinstance(parsed, dict):
+                args = parsed
         if not args:
             continue
         calls.append((name, args))
@@ -504,7 +595,7 @@ def _infer_sql_purpose(sql: str, fallback_label: str = "查询", lang: str = "zh
     return op
 
 
-def _sql_validation_event(name: str, args: Dict[str, Any], allowed_roots, workspace_auth) -> dict | None:
+def _sql_validation_event(name: str, args: Dict[str, Any], allowed_roots, workspace_auth, dialect="duckdb") -> dict | None:
     """Build a validation badge payload for SQL_TOOLS, or None for non-SQL tools.
 
     Runs the structured SQL validator (without blocking) so tool_start can show
@@ -517,7 +608,7 @@ def _sql_validation_event(name: str, args: Dict[str, Any], allowed_roots, worksp
     if not sql:
         return None
     roots = list(workspace_auth.allowed_roots) if workspace_auth is not None else allowed_roots
-    result = _validate_sql_structured(sql, allowed_roots=roots)
+    result = _validate_sql_structured(sql, allowed_roots=roots, dialect=dialect, strict=dialect != "duckdb")
     return {
         "status": result.status,
         "message": result.message,
@@ -617,6 +708,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
     ):
         self.client = client
         self.model = model
+        self._semantic_context = None
         self.data_source = data_source
         # All active DataSource objects — used by _route_query for multi-source routing
         self._all_sources: List = all_sources if all_sources else ([data_source] if data_source else [])
@@ -678,16 +770,184 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
             ),
         )
 
-    def _new_model_audit(self, purpose: str, billing_scope: str = "platform"):
-        return audit_model_call(
+    def _turn_state(self) -> dict:
+        current = _CURRENT_TURN_STATE.get()
+        return current[1] if current is not None and current[0] == id(self) else {}
+
+    def _current_execution(self):
+        current = _CURRENT_EXECUTION.get()
+        return current[1] if current is not None and current[0] == id(self) else getattr(self, "_execution_context", None)
+
+    def _execution_checkpoint(self):
+        context = self._current_execution()
+        return context.checkpoint() if context is not None else None
+
+    def _invocation_policy(self) -> ToolInvocationPolicy:
+        current = _CURRENT_INVOCATION_POLICY.get()
+        if current is not None and current[0] == id(self) and current[1] is not None:
+            return current[1]
+        configured = getattr(self, "_tool_invocation_policy", None)
+        if configured is not None:
+            return configured
+        return self._build_invocation_policy()
+
+    def _build_invocation_policy(
+        self, *, activation=None, trusted_skill="", skill_allowed_tools=None,
+        user_message="", discovered_tools=(), teams_enabled=False, allowed_mcp_tools=(),
+    ) -> ToolInvocationPolicy:
+        # User-message discovery is server interpretation of this request. A
+        # previously discovered capability or a model argument cannot confirm it.
+        requested = discover_tool_names_for_query(user_message)
+        activation = activation or ActivationContext()
+        trusted_activation = ActivationContext(
+            command_name=activation.command_name, internal_action=activation.internal_action,
+        )
+        parent = getattr(self, "_tool_invocation_policy", None)
+        return ToolInvocationPolicy(
+            activation=trusted_activation, trusted_skill=trusted_skill,
+            skill_allowed_tools=(frozenset(skill_allowed_tools) if skill_allowed_tools is not None else None),
+            discovered_tools=frozenset(discovered_tools or ()) | frozenset(requested),
+            has_data_source=bool(getattr(self, "_all_sources", ()) or getattr(self, "data_source", None)),
+            has_workspace=self._workspace_runtime() is not None,
+            has_runtime=True, teams_enabled=teams_enabled,
+            allowed_mcp_tools=frozenset(allowed_mcp_tools or ()),
+            mcp_specs=getattr(self, "_mcp_tool_specs", None),
+            explicit_request_tools=frozenset(requested) | frozenset(getattr(self, "_explicit_request_tools", ())),
+            workflow_approved_tools=frozenset(getattr(self, "_workflow_approved_tools", ())),
+            parent=parent,
+        )
+
+    def _authorize_tool(self, name, args=None, *, policy=None):
+        self._execution_checkpoint()
+        return authorize_tool_invocation(name, args, policy=policy or self._invocation_policy())
+
+    def _checked_model_create(self, *args, **kwargs):
+        self._execution_checkpoint()
+        response = self.client.chat.completions.create(*args, **kwargs)
+        try:
+            self._execution_checkpoint()
+        except BaseException:
+            close = getattr(response, "close", None)
+            if callable(close):
+                close()
+            raise
+        return response
+
+    def _checkpoint_client(self):
+        # Compaction has its own retry loop; intercept every actual attempt.
+        from types import SimpleNamespace
+        return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=self._checked_model_create)))
+
+    def _read_controlled_result(self, args, *, allowed_artifacts=None):
+        grants = self._turn_state().get("grants", []) if allowed_artifacts is None else allowed_artifacts
+        common = dict(
+            allowed_artifacts=grants, session_id=self._session_id,
+            workspace_id=self._workspace_id, runtime=self._workspace_runtime(),
+            workspace_root=workspace_manager.root_for_workspace(self._workspace_id) if self._workspace_id else None,
+            offset=args.get("offset", 0), limit=min(4000, int(args.get("limit", 4000))),
+        )
+        identity = str(args.get("artifact_id") or "")
+        if identity.startswith("ec_"):
+            return read_evidence_claim(identity, section=args.get("section", "lineage"), **common)
+        return read_tool_result_artifact(identity, query=args.get("query", ""), **common)
+
+    def _make_execution_tool_result(self, name, raw, **kwargs):
+        self._execution_checkpoint()
+        parents = kwargs.pop("parent_claim_ids", None)
+        if parents is None:
+            parents = self._turn_state().get("parent_claim_ids", [])
+        if isinstance(raw, dict):
+            if raw.get("ok") is False or raw.get("status") in {"needs_review", "partial_failed", "failed", "canceled"}:
+                kwargs.setdefault("ok", False)
+                kwargs.setdefault("error", str(raw.get("error") or raw.get("status") or "tool_error"))
+            if name in {"agent_delegate", "team_delegate"}:
+                references = collect_evidence_references(raw)
+                grants = self._turn_state().get("grants", [])
+                child_ids = set(references["claim_ids"])
+                child_grants = [item for item in grants if _artifact_identity(item) in child_ids]
+                kwargs["artifacts"] = [*kwargs.get("artifacts", []), *child_grants]
+                parents = list(dict.fromkeys([*parents, *[item["claim_id"] for item in child_grants]]))
+        envelope = make_tool_result(
+            name, raw, semantic_context=self._semantic_context,
+            execution_context=self._current_execution(), parent_claim_ids=parents,
+            **kwargs,
+        )
+        self._execution_checkpoint()
+        state = self._turn_state()
+        if state:
+            _remember_turn_tool_result_artifacts(
+                state["grants"], envelope.artifacts, session_id=self._session_id,
+                limit=max(20, len(state["grants"]) + len(envelope.artifacts)),
+            )
+            if envelope.ok and name in NUMBER_EVIDENCE_TOOLS:
+                state["data_tools"].add(name)
+                state["number_evidence"].append(raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False, default=str))
+        return envelope
+
+    def _accept_delegated_evidence(self, result):
+        """Keep actual child tool data out of the displayed member summary."""
+        self._execution_checkpoint()
+        state = self._turn_state()
+        if state:
+            state["number_evidence"].extend(result.get("_number_evidence") or [])
+            state["data_tools"].update(result.get("_data_tools") or [])
+            child_artifacts = result.get("evidence", {}).get("artifacts", [])
+            _remember_turn_tool_result_artifacts(
+                state["grants"], child_artifacts, session_id=self._session_id,
+                limit=max(20, len(state["grants"]) + len(child_artifacts)),
+            )
+        return result.get("evidence") or {}
+
+    def _run_execution_worker(self, context, fn, *args):
+        execution_token = _CURRENT_EXECUTION.set((id(self), context))
+        inherited = self._turn_state()
+        state_token = _CURRENT_TURN_STATE.set((id(self), {
+            **inherited, "grants": list(inherited.get("grants", [])),
+            "number_evidence": [], "data_tools": set(),
+        }))
+        previous_semantics = self._semantic_context
+        self._semantic_context = copy.deepcopy(previous_semantics)
+        try:
+            context.checkpoint()
+            result = fn(*args)
+            if isinstance(result, dict) and result.get("result_committed") is True:
+                if context.cancellation_requested:
+                    result = {**result, "cancel_requested": True}
+            else:
+                context.checkpoint()
+            return result
+        finally:
+            self._semantic_context = previous_semantics
+            _CURRENT_TURN_STATE.reset(state_token)
+            _CURRENT_EXECUTION.reset(execution_token)
+            context.acknowledge_exit()
+
+    def _submit_execution_worker(self, executor, fn, *args, execution_context=None):
+        parent = execution_context or self._current_execution()
+        context = parent.child() if parent is not None else ExecutionContext()
+        copied = copy_context()
+        try:
+            future = executor.submit(copied.run, self._run_execution_worker, context, fn, *args)
+        except BaseException:
+            context.acknowledge_exit()
+            raise
+        # Also closes a queued/canceled future whose body never started. A
+        # running body acknowledges only from its actual finally block.
+        future.add_done_callback(lambda completed: context.acknowledge_exit())
+        return future
+
+    def _new_model_audit(self, purpose: str, billing_scope: str = "platform", *, model=None):
+        audit = audit_model_call(
             user_id=self._user_id,
             session_id=self._session_id,
             source="web",
             purpose=purpose,
             billing_scope=billing_scope,
             provider=self._provider,
-            model=self.model,
+            model=model or self.model,
         )
+        audit.application_call_id = audit.request_id or uuid.uuid4().hex
+        return audit
 
     def _apply_prompt_cache(
         self,
@@ -699,7 +959,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
         exposed_tools = list(tools or [])
         cache_key = stable_prompt_cache_key(
             provider=getattr(self, "_provider", ""),
-            model=self.model,
+            model=call_kwargs.get("model") or self.model,
             workflow_stage=workflow_stage,
             tools=exposed_tools,
         )
@@ -852,6 +1112,101 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
         return notifications, prompts
 
     def _run_delegated_llm(
+        self, *, member: dict, prompt: str, inbox_context: str = "",
+        timeout_seconds: int = 300, max_tokens: int = 1600,
+        max_tool_calls: int | None = None,
+        allowed_tools: frozenset[str] | set[str] | None = None,
+        allow_write_tools: bool = False, execution_context=None,
+        invocation_policy: ToolInvocationPolicy | None = None,
+        quality_review: bool = False, parent_claim_ids=None,
+    ) -> dict:
+        """Hold a child attempt until all blocking model/tool work really exits."""
+        from agent.teams.profiles import DELEGATED_READ_TOOLS
+        from agent.teams.model_policy import resolve_profile_model
+
+        profile = member.get("profile") or {}
+        capabilities = set(DELEGATED_READ_TOOLS) | {"read_tool_result"}
+        if allow_write_tools:
+            capabilities.add("clean_data")
+        if allowed_tools is not None:
+            capabilities.intersection_update(allowed_tools)
+        if profile.get("allowed_tools") is not None:
+            capabilities.intersection_update(profile["allowed_tools"])
+        quality_review = bool(quality_review or member.get("role") in {"quality_reviewer", "verifier"}
+                              or profile.get("key") == "quality-reviewer"
+                              or "You are an independent verifier." in prompt)
+        json_only = quality_review or bool(member.get("_structured_output_only")) or "raw valid JSON only" in prompt
+        if quality_review:
+            prompt = QUALITY_REVIEW_INSTRUCTION + "\n\n" + prompt
+        inherited_state = self._turn_state()
+        parent = execution_context or member.get("_execution_context") or self._current_execution()
+        timeout = max(0, min(self.DELEGATED_TIMEOUT_SECONDS, float(timeout_seconds)))
+        context = parent.child(timeout_seconds=timeout) if parent is not None else ExecutionContext(timeout_seconds=timeout)
+        current_policy = _CURRENT_INVOCATION_POLICY.get()
+        parent_policy = invocation_policy or (
+            self._invocation_policy() if current_policy and current_policy[0] == id(self) and current_policy[1] is not None else (
+                getattr(self, "_tool_invocation_policy", None) or self._build_invocation_policy(discovered_tools=capabilities)
+            )
+        )
+        policy = parent_policy.child(allowed_tools=frozenset(capabilities), read_only=not allow_write_tools)
+        execution_token = _CURRENT_EXECUTION.set((id(self), context))
+        policy_token = _CURRENT_INVOCATION_POLICY.set((id(self), policy))
+        state = {
+            **inherited_state, "grants": list(inherited_state.get("grants", [])),
+            "number_evidence": [], "data_tools": set(),
+            "parent_claim_ids": list(parent_claim_ids or []),
+        }
+        state_token = _CURRENT_TURN_STATE.set((id(self), state))
+        previous_semantics = self._semantic_context
+        self._semantic_context = copy.deepcopy(previous_semantics)
+        receipt_usage = {}
+        try:
+            context.checkpoint()
+            routing = resolve_profile_model(
+                profile, inherited_model=self.model, inherited_provider=getattr(self, "_provider", ""),
+                tier_mapping=getattr(self, "_approved_role_model_policy", None),
+                gate=getattr(self, "_model_routing_gate", None),
+            )
+            result = self._run_delegated_llm_body(
+                member=member, prompt=prompt, inbox_context=inbox_context, timeout_seconds=timeout_seconds,
+                max_tokens=max_tokens, max_tool_calls=max_tool_calls,
+                allowed_tools=frozenset(capabilities), allow_write_tools=allow_write_tools,
+                model=routing["model"], quality_review=quality_review, json_only=json_only,
+            )
+            receipt_usage = result.get("usage") or {}
+            result["model_routing"] = routing
+            result["_number_evidence"] = state["number_evidence"]
+            result["_data_tools"] = sorted(state["data_tools"])
+            result["evidence"] = {
+                **collect_evidence_references(result.get("tool_events", [])),
+                "artifacts": [dict(item) for item in state["grants"]
+                              if item not in inherited_state.get("grants", [])],
+            }
+            if quality_review:
+                decision, blocking = _quality_review_decision(result["content"], state["grants"])
+                result.update(quality_review=decision, status="needs_review" if blocking else "completed", error=blocking)
+                result["content"] = json.dumps(decision, ensure_ascii=False)
+            context.checkpoint()
+            return result
+        except BaseException as exc:
+            receipt_usage = getattr(exc, "delegated_usage", None) or receipt_usage
+            raise
+        finally:
+            try:
+                if receipt_usage.get("model_calls") and getattr(self, "_session_id", ""):
+                    from data.cost_recording import record_model_calls
+                    record_model_calls(receipt_usage["model_calls"], session_id=self._session_id,
+                                       workspace_id=getattr(self, "_workspace_id", ""),
+                                       scope_type="session", scope_id=self._session_id)
+            except Exception:
+                log.exception("[cost-events] delegated attempt recording failed")
+            self._semantic_context = previous_semantics
+            _CURRENT_TURN_STATE.reset(state_token)
+            _CURRENT_INVOCATION_POLICY.reset(policy_token)
+            _CURRENT_EXECUTION.reset(execution_token)
+            context.acknowledge_exit()
+
+    def _run_delegated_llm_body(
         self,
         *,
         member: dict,
@@ -862,6 +1217,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
         max_tool_calls: int | None = None,
         allowed_tools: frozenset[str] | set[str] | None = None,
         allow_write_tools: bool = False,
+        model: str = "", quality_review: bool = False, json_only: bool = False,
     ) -> dict:
         def _visible_text(text: str) -> str:
             visible, _reasoning = split_reasoning_tags(str(text or ""))
@@ -869,22 +1225,87 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
 
         def _with_tool_footer(text: str) -> str:
             content = _visible_text(text)
-            if used_tools:
+            if used_tools and not json_only:
                 content = f"{content}\n\n---\n工具使用：{', '.join(used_tools)}".strip()
             return content
 
-        # Workflow node limits may use the provider's full completion window.
-        # Keep the model-specific cap, but do not silently collapse every
-        # delegated node to the legacy 4K ceiling.
+        profile = member.get("profile") or {}
+        profile_tools = profile.get("allowed_tools")
+        if profile_tools is not None:
+            allowed_tools = set(profile_tools) if allowed_tools is None else set(allowed_tools).intersection(profile_tools)
+        if profile.get("max_tool_calls") is not None:
+            profile_limit = int(profile["max_tool_calls"])
+            max_tool_calls = profile_limit if max_tool_calls is None else min(max_tool_calls, profile_limit)
+        if profile.get("max_output_tokens") is not None:
+            max_tokens = min(max_tokens, int(profile["max_output_tokens"]))
+        # Workflow nodes retain their configured completion window. Team
+        # profiles can only narrow tools and budgets inherited from the caller.
         output_tokens = max(1, min(int(max_tokens or 1600), self._max_output_tokens))
-        delegated_allowed_tools = (
-            frozenset(str(name) for name in allowed_tools)
-            if allowed_tools is not None else None
-        )
         delegated_tools = self._delegated_tool_schemas(
-            allowed_tools=delegated_allowed_tools,
-            allow_write_tools=allow_write_tools,
-        )
+            allowed_tools=allowed_tools, allow_write_tools=allow_write_tools,
+        ) if max_tool_calls != 0 else []
+        delegated_allowed_tools = frozenset(allowed_tools)
+        delegated_tools = _scope_tool_result_reader(delegated_tools, self._turn_state()["grants"])
+        deadline = time.monotonic() + max(10, min(
+            self.DELEGATED_TIMEOUT_SECONDS, int(timeout_seconds or self.DELEGATED_TIMEOUT_SECONDS),
+        ))
+        task_id = str(member.get("_a2a_task_id") or "")
+        task_store = WorkspaceTeamStore(self._session_id, workspace_id=self._workspace_id) if task_id else None
+
+        def _checkpoint() -> float:
+            context_remaining = self._execution_checkpoint()
+            if task_store is not None:
+                if member.get("_a2a_plan_id"):
+                    from agent.teams.dynamic_plans import DynamicTeamPlanStore
+                    plan = DynamicTeamPlanStore(self._session_id, workspace_id=self._workspace_id).get(member["_a2a_plan_id"])
+                    if plan["status"] == "canceled":
+                        task_store.cancel_task(str(member["_a2a_team_name"]), task_id)
+                task = task_store.get_task(str(member["_a2a_team_name"]), task_id)
+                from agent.teams.a2a import task_state
+                if task_state(task) != "working":
+                    self._current_execution().cancel("Delegated task stopped: " + task_state(task))
+                    self._execution_checkpoint()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self._current_execution().cancel("Delegated task deadline exceeded")
+                self._execution_checkpoint()
+            return min(remaining, context_remaining) if context_remaining is not None else remaining
+
+        def _model_call(call_kwargs: dict, audit):
+            attempt = 0
+            def request():
+                nonlocal attempt
+                remaining = _checkpoint()
+                attempt += 1
+                record = {
+                    "model_call_id": getattr(audit, "application_call_id", "") or audit.request_id, "attempt": attempt,
+                    "model": model, "provider": str(getattr(self, "_provider", "") or ""),
+                    "input_tokens": None, "output_tokens": None, "cached_input_tokens": None,
+                    "usage_available": False, "usage_source": "unavailable", "status": "failed",
+                }
+                usage_summary["model_calls"].append(record)
+                try:
+                    try:
+                        response = self._checked_model_create(**call_kwargs, timeout=remaining)
+                    except TypeError as exc:
+                        if "timeout" not in str(exc):
+                            raise
+                        _checkpoint()
+                        response = self._checked_model_create(**call_kwargs)
+                    _checkpoint()
+                    record["status"] = "succeeded"
+                    return response
+                except ExecutionStopped:
+                    record["status"] = "canceled"
+                    raise
+            try:
+                response = _call_with_retry(request, on_attempt=audit.attempt)
+                _checkpoint()
+                return response
+            except BaseException as exc:
+                exc.delegated_usage = copy.deepcopy(usage_summary)
+                raise
+
         messages = [
             {
                 "role": "system",
@@ -902,8 +1323,8 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                     + "Do not create teams or ask the user questions. "
                     f"Role: {member.get('role', 'analyst')}. "
                     f"Instructions: {member.get('instructions', '')}\n"
-                    "Return concise Markdown. Focus on the requested subtask only. "
-                    "Do not restate all input data; provide concrete findings, risks, "
+                    + (QUALITY_REVIEW_INSTRUCTION if quality_review else "Return raw valid JSON only. " if json_only else "Return concise Markdown. Focus on the requested subtask only. ")
+                    + "Do not restate all input data; provide concrete findings, risks, "
                     "and recommendations that the Leader can synthesize."
                 ),
             },
@@ -914,42 +1335,39 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
         last_content = ""
         empty_response_retry_used = False
         usage_summary = {
-            "model": self.model,
-            "provider": str(getattr(self, "_provider", "") or ""),
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "cached_input_tokens": 0,
-            "tool_calls": 0,
+            "model": model, "provider": str(getattr(self, "_provider", "") or ""),
+            "input_tokens": None, "output_tokens": None, "cached_input_tokens": None,
+            "usage_available": False, "usage_source": "unavailable", "tool_calls": 0,
+            "model_calls": [],
         }
+        usage_complete, usage_calls = True, 0
 
         def _capture_usage(response_obj) -> None:
-            usage = getattr(response_obj, "usage", None)
-            if usage is None:
-                return
-            usage_summary["model"] = str(
-                getattr(response_obj, "model", "") or usage_summary["model"]
-            )
-            usage_summary["input_tokens"] += int(
-                getattr(usage, "prompt_tokens", None)
-                or getattr(usage, "input_tokens", 0)
-                or 0
-            )
-            usage_summary["output_tokens"] += int(
-                getattr(usage, "completion_tokens", None)
-                or getattr(usage, "output_tokens", 0)
-                or 0
-            )
-            details = (
-                getattr(usage, "prompt_tokens_details", None)
-                or getattr(usage, "input_tokens_details", None)
-            )
-            usage_summary["cached_input_tokens"] += int(
-                getattr(details, "cached_tokens", 0) or 0
-            )
+            nonlocal usage_complete, usage_calls
+            metrics = finalize_prompt_breakdown({}, getattr(response_obj, "usage", None))
+            if usage_summary["model_calls"]:
+                usage_summary["model_calls"][-1].update(
+                    input_tokens=metrics["actual_prompt_tokens"], output_tokens=metrics["actual_completion_tokens"],
+                    cached_input_tokens=metrics["cached_input_tokens"], usage_available=metrics["usage_available"],
+                    usage_source=metrics["usage_source"], measurement_mode=metrics["measurement_mode"],
+                )
+            usage_complete = usage_complete and metrics["usage_available"]
+            usage_calls += 1
+            usage_summary["model"] = str(getattr(response_obj, "model", "") or model)
+            usage_summary["usage_available"] = usage_complete
+            usage_summary["usage_source"] = metrics["usage_source"] if usage_complete else "unavailable"
+            for target, source in (("input_tokens", "actual_prompt_tokens"),
+                                   ("output_tokens", "actual_completion_tokens"),
+                                   ("cached_input_tokens", "cached_input_tokens")):
+                value = metrics.get(source)
+                if not usage_complete or value is None or (usage_calls > 1 and usage_summary[target] is None):
+                    usage_summary[target] = None
+                else:
+                    usage_summary[target] = (usage_summary[target] or 0) + int(value)
 
         for _delegated_iteration in range(self.DELEGATED_MAX_TOOL_ROUNDS):
             kwargs = {
-                "model": self.model,
+                "model": model,
                 "messages": messages,
                 "stream": False,
                 "temperature": 0.1,
@@ -967,7 +1385,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                 messages,
                 delegated_tools,
                 current_user_message=prompt + inbox_context,
-                model=self.model,
+                model=model,
                 provider=getattr(self, "_provider", ""),
                 iteration=_delegated_iteration + 1,
                 activation_kind="team_delegate",
@@ -980,35 +1398,17 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                 "prompt_cache_retention": cache_metadata["retention"],
                 "prompt_cache_scope_isolated": cache_metadata["scope_isolated"],
             })
-            delegated_audit = self._new_model_audit("team_delegate")
+            delegated_audit = self._new_model_audit("team_delegate", model=model)
             try:
-                response = _call_with_retry(
-                    self.client.chat.completions.create,
-                    on_attempt=delegated_audit.attempt,
-                    **kwargs,
-                    timeout=max(10, min(self.DELEGATED_TIMEOUT_SECONDS, int(
-                        timeout_seconds or self.DELEGATED_TIMEOUT_SECONDS
-                    ))),
-                )
-            except TypeError:
-                kwargs.pop("timeout", None)
-                try:
-                    response = _call_with_retry(
-                        self.client.chat.completions.create,
-                        on_attempt=delegated_audit.attempt,
-                        **kwargs,
-                    )
-                except Exception as exc:
-                    delegated_audit.fail(exc)
-                    raise
+                response = _model_call(kwargs, delegated_audit)
             except Exception as exc:
                 delegated_audit.fail(exc)
                 raise
             delegated_usage = getattr(response, "usage", None)
-            delegated_audit.succeed(delegated_usage)
+            delegated_audit.succeed(delegated_usage) if delegated_usage is not None else delegated_audit.missing_usage()
             _capture_usage(response)
             usage_recorder = getattr(self, "_usage_recorder", None)
-            if delegated_usage is not None and usage_recorder is not None:
+            if usage_recorder is not None:
                 finalized = finalize_prompt_breakdown(
                     delegated_breakdown, delegated_usage,
                 )
@@ -1020,6 +1420,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                     cache_write_tokens=finalized["cache_write_tokens"],
                     update_last_prompt=False,
                 )
+            _checkpoint()
             msg = response.choices[0].message
             last_content = getattr(msg, "content", None) or ""
             tool_calls = list(getattr(msg, "tool_calls", None) or [])
@@ -1035,7 +1436,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                         ),
                     })
                     continue
-                if used_tools and _delegated_result_invalid_reason(candidate, tool_events):
+                if used_tools and not json_only and _delegated_result_invalid_reason(candidate, tool_events):
                     break
                 usage_summary["tool_calls"] = len(used_tools)
                 return {"content": candidate, "tool_events": tool_events, "usage": usage_summary}
@@ -1051,7 +1452,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                 fn = getattr(call, "function", None)
                 tool_name = str(getattr(fn, "name", "") or "")
                 raw_args = getattr(fn, "arguments", "{}") or "{}"
-                tool_args = _parse_delegated_tool_args(raw_args)
+                tool_args, decode_error = _decode_tool_call_args(tool_name, raw_args)
                 safe_args = json.dumps(tool_args, ensure_ascii=False)
                 call_id = str(getattr(call, "id", "") or f"delegate_call_{index}")
                 assistant_msg["tool_calls"].append({
@@ -1059,37 +1460,78 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                     "type": "function",
                     "function": {"name": tool_name, "arguments": safe_args},
                 })
-                parsed_calls.append((call_id, tool_name, tool_args))
+                parsed_calls.append((call_id, tool_name, tool_args, decode_error))
             messages.append(assistant_msg)
-            for call_id, tool_name, tool_args in parsed_calls:
+            for call_id, tool_name, tool_args, decode_error in parsed_calls:
+                _checkpoint()
                 started = time.perf_counter()
                 created_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+                error, hook_events, hook_prompts = "", [], []
                 try:
+                    self._authorize_tool(tool_name, tool_args)
+                    if decode_error:
+                        raise ValueError(decode_error)
+                    authorization = self._workspace_path_authorization()
+                    validation = _validate_tool_args(
+                        tool_name, tool_args,
+                        allowed_roots=[] if self._workspace_id and authorization is None else None,
+                        workspace_authorization=authorization,
+                    )
+                    if validation:
+                        raise ValueError(validation)
+                    hook_events, hook_prompts = self._run_hook_event(
+                        "tool_call", tool_name=tool_name, tool_args=dict(tool_args),
+                    )
+                    if self._hook_engine:
+                        rejected = self._hook_engine.run_pre_tool_hooks(self._hook_tool_context("pre_tool_use", tool_name, tool_args))
+                        hook_events.extend(item.to_event() for item in self._hook_engine.drain_notifications())
+                        hook_prompts.extend(self._drain_hook_prompt_messages())
+                        if rejected:
+                            raise ToolAuthorizationError(tool_name, "hook_rejected", str(rejected.reason or "Tool rejected by hook"))
                     tool_text = self._execute_delegated_tool(
-                        tool_name,
-                        tool_args,
-                        allowed_tools=delegated_allowed_tools,
+                        tool_name, tool_args, allowed_tools=delegated_allowed_tools,
                         allow_write_tools=allow_write_tools,
                     )
-                    tool_status = "ok"
+                except ExecutionStopped:
+                    raise
                 except Exception as exc:
-                    tool_text = f"Error: {exc}"
-                    tool_status = "error"
+                    tool_text = f"ERROR: {exc}"
+                    error = getattr(exc, "code", "argument_error" if isinstance(exc, ValueError) else "tool_error")
+                _checkpoint()
                 elapsed = max(0.0, time.perf_counter() - started)
+                persisted = []
+                if not error and not classify_tool_error(tool_text, tool_name) and self._session_id:
+                    _, artifact, _ = persist_large_tool_result(
+                        self._session_id, tool_name, tool_text, runtime=self._workspace_runtime(), force=True,
+                    )
+                    if artifact is not None:
+                        persisted.append(artifact)
+                _checkpoint()
+                envelope = self._make_execution_tool_result(
+                    tool_name, tool_text, ok=False if error else None, error=error, artifacts=persisted,
+                    session_id=self._session_id, runtime=self._workspace_runtime(), args=tool_args,
+                    debug={"elapsed_seconds": round(elapsed, 3)},
+                )
+                notifications, prompts = self._run_post_tool_hooks(tool_name, tool_args, envelope)
+                hook_events.extend(notifications)
+                hook_prompts.extend(prompts)
                 used_tools.append(tool_name)
                 tool_events.append({
-                    "tool": tool_name,
-                    "args": tool_args,
-                    "result": str(tool_text)[:2000],
-                    "status": tool_status,
-                    "elapsed_seconds": round(elapsed, 3),
-                    "created_at": created_at,
+                    "tool": tool_name, "args": tool_args,
+                    "result": envelope.to_model_text()[:2000],
+                    "status": "ok" if envelope.ok else "error", "ok": envelope.ok,
+                    "error": envelope.error, "elapsed_seconds": round(elapsed, 3), "created_at": created_at,
+                    "envelope": envelope.to_dict(), "artifacts": envelope.artifacts,
+                    "evidence": collect_evidence_references(envelope.to_dict()), "hook_events": hook_events,
                 })
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": call_id,
-                    "content": str(tool_text)[:8000],
-                })
+                messages.append({"role": "tool", "tool_call_id": call_id, "content": envelope.to_model_text()})
+                hook_message = self._hook_prompt_system_message(hook_prompts)
+                if hook_message:
+                    messages.append(hook_message)
+                delegated_tools = _scope_tool_result_reader(self._delegated_tool_schemas(
+                    allowed_tools=delegated_allowed_tools, allow_write_tools=allow_write_tools,
+                ), self._turn_state()["grants"])
+                _checkpoint()
             if max_tool_calls is not None and len(used_tools) >= int(max_tool_calls):
                 break
         final_content = ""
@@ -1097,14 +1539,15 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
             final_messages = messages + [{
                 "role": "user",
                 "content": (
-                    "工具轮数已经用完。不要再调用任何工具，不要输出 <think>。"
+                    (QUALITY_REVIEW_INSTRUCTION + "\n" if quality_review else "Return raw valid JSON only.\n" if json_only else "")
+                    + "工具轮数已经用完。不要再调用任何工具，不要输出 <think>。"
                     "请只基于上面的工具结果，直接输出该成员给 Leader 的最终 Markdown 结论："
                     "包括关键发现、数据依据、风险/限制、可执行建议。"
                     "如果数据不足，请明确说明不足，而不是继续请求查询。"
                 ),
             }]
             final_kwargs = {
-                "model": self.model,
+                "model": model,
                 "messages": final_messages,
                 "stream": False,
                 "temperature": 0.1,
@@ -1115,35 +1558,34 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                 workflow_stage="team_delegate_final",
                 tools=[],
             )
-            final_audit = self._new_model_audit("team_delegate_final")
+            final_audit = self._new_model_audit("team_delegate_final", model=model)
             response = None
+            _checkpoint()
             try:
-                response = _call_with_retry(
-                    self.client.chat.completions.create,
-                    on_attempt=final_audit.attempt,
-                    **final_kwargs,
-                    timeout=max(10, min(self.DELEGATED_TIMEOUT_SECONDS, int(
-                        timeout_seconds or self.DELEGATED_TIMEOUT_SECONDS
-                    ))),
-                )
-            except TypeError:
-                final_kwargs.pop("timeout", None)
-                try:
-                    response = _call_with_retry(
-                        self.client.chat.completions.create,
-                        on_attempt=final_audit.attempt,
-                        **final_kwargs,
-                    )
-                except Exception as exc:
-                    final_audit.fail(exc)
-                    raise
+                response = _model_call(final_kwargs, final_audit)
+            except ExecutionStopped:
+                raise
             except Exception as exc:
                 final_audit.fail(exc)
                 log.warning("[team] delegated final synthesis failed: %s", exc)
             if response is not None:
-                final_audit.succeed(getattr(response, "usage", None))
+                final_usage = getattr(response, "usage", None)
+                final_audit.succeed(final_usage) if final_usage is not None else final_audit.missing_usage()
                 _capture_usage(response)
+                usage_recorder = getattr(self, "_usage_recorder", None)
+                if usage_recorder is not None:
+                    breakdown = finalize_prompt_breakdown(build_prompt_breakdown(
+                        final_messages, [], current_user_message=prompt + inbox_context,
+                        model=model, provider=getattr(self, "_provider", ""),
+                        activation_kind="team_delegate_final", chars_per_token=self._CHARS_PER_TOKEN,
+                    ), final_usage)
+                    usage_recorder(
+                        breakdown["actual_prompt_tokens"], breakdown["actual_completion_tokens"],
+                        breakdown=breakdown, cached_input_tokens=breakdown["cached_input_tokens"],
+                        cache_write_tokens=breakdown["cache_write_tokens"], update_last_prompt=False,
+                    )
                 final_content = _visible_text(getattr(response.choices[0].message, "content", "") or "")
+            _checkpoint()
         if not final_content:
             final_content = (
                 "成员工具调用已达到上限，未能生成完整最终总结。"
@@ -1152,25 +1594,170 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
         usage_summary["tool_calls"] = len(used_tools)
         return {"content": _with_tool_footer(final_content), "tool_events": tool_events, "usage": usage_summary}
 
+    @staticmethod
+    def _quality_reviewer_execution_member(member):
+        """The server review assignment includes bounded evidence replay."""
+        member = dict(member)
+        profile = dict(member.get("profile") or {})
+        if profile.get("allowed_tools"):
+            profile["allowed_tools"] = list(dict.fromkeys([*profile["allowed_tools"], "read_tool_result"]))
+        member["profile"] = profile
+        return member
+
+    def _begin_member_execution(self, store, team, member, **kwargs):
+        self._execution_checkpoint()
+        return store.begin_member_turn(
+            team, member, execution_context=self._current_execution(), **kwargs,
+        )
+
+    def _complete_member_execution(self, store, team, member, content, *, turn=None, **kwargs):
+        if kwargs.get("ok", True):
+            self._execution_checkpoint()
+        turn = turn or {}
+        return store.complete_member_turn(
+            team, member, content,
+            execution_context=turn.get("_execution_context"), attempt_id=turn.get("_execution_attempt_id", ""),
+            **kwargs,
+        )
+
+    def _delegate_member_task(self, args: dict):
+        """Run a constructed session agent through the same bounded executor."""
+        from agent.teams.a2a import task_state
+
+        self._authorize_tool("agent_delegate", args)
+        team_name = str(args.get("team_name") or "default")
+        member_name = str(args.get("member_name") or "analyst")
+        prompt = str(args.get("prompt") or "").strip()
+        if not prompt or len(prompt) > 20_000:
+            raise ValueError("agent_delegate requires a prompt of 1-20000 characters")
+        store = WorkspaceTeamStore(self._session_id, workspace_id=self._workspace_id)
+        constructed = store.create_agent(
+            member_name, team_name=team_name, role=str(args.get("role") or "analyst"),
+            instructions=str(args.get("instructions") or ""), profile=str(args.get("profile") or "inherit"),
+        )
+        team_name, member_name = constructed["team"], constructed["member"]["name"]
+        if not constructed["reused"]:
+            yield {"type": "team_event", "event": "agent_created", "team": team_name, "member": member_name}
+        # A single call is persisted before execution, just like HTTP SendMessage.
+        from agent.teams.a2a import text_message
+        task, _created = store.submit_task(team_name, member_name, text_message(prompt))
+        turn = self._begin_member_execution(store, team_name, member_name, task_id=task["id"])
+        inbox = turn.get("inbox", [])
+        inbox_context = "\n\n[Unread team mailbox]\n" + "\n".join(
+            f"- From {message.get('sender', '')}: {message.get('message', '')}" for message in inbox
+        ) if inbox else ""
+        hook_events, _prompts = self._run_hook_event(
+            "subagent_start", tool_name="agent_delegate", tool_args=dict(args), message=prompt[:1000],
+        )
+        yield from hook_events
+        yield {
+            "type": "team_event", "event": "member_started", "team": team_name,
+            "member": member_name, "description": args.get("description", ""), "task": task,
+        }
+        tool_events, evidence = [], {}
+        try:
+            delegated = self._run_delegated_llm(
+                member=turn["member"], prompt=prompt, inbox_context=inbox_context,
+                timeout_seconds=self.DELEGATED_TIMEOUT_SECONDS, max_tokens=2000,
+                max_tool_calls=self.TEAM_MEMBER_MAX_TOOL_CALLS,
+                execution_context=turn.get("_execution_context"),
+            )
+            evidence = self._accept_delegated_evidence(delegated)
+            content = str(delegated.get("content") or "")
+            tool_events = delegated.get("tool_events", [])
+            error = _delegated_result_invalid_reason(content, tool_events)
+            completion = self._complete_member_execution(
+                store, team_name, member_name, content, ok=not error, turn=turn, evidence=evidence,
+                tool_events=tool_events, task_id=task["id"],
+            )
+        except ExecutionStopped:
+            self._complete_member_execution(store, team_name, member_name, "Execution stopped", ok=False, turn=turn, task_id=task["id"])
+            raise
+        except Exception as exc:
+            error = str(exc)
+            content = ""
+            completion = self._complete_member_execution(
+                store, team_name, member_name, error, ok=False, turn=turn, evidence=evidence, tool_events=tool_events, task_id=task["id"],
+            )
+        state = task_state(completion["task"])
+        yield {
+            "type": "team_event", "event": "member_idle" if state == "completed" else "member_failed",
+            "team": team_name, "member": member_name, "message": completion.get("message", {}),
+            "task": completion["task"],
+        }
+        review_result = None
+        if state == "completed" and member_name != "质量复核员":
+            reviewer = store.ensure_quality_reviewer(team_name)
+            reviewer_name = reviewer["name"]
+            review_prompt = QUALITY_REVIEW_INSTRUCTION + "\n\n" + json.dumps({
+                "prompt": prompt, "member": member_name, "result": content,
+                "evidence": evidence,
+                "read_instruction": "Read supplied ec_/tr_ references with read_tool_result; use lineage/sql/result sections and page incomplete material. Final member prose is not independent data evidence.",
+            }, ensure_ascii=False)
+            review_turn = None
+            try:
+                store.send_message(
+                    team_name, reviewer_name, review_prompt, sender="leader", read=True,
+                    queue=False, message_type="quality_review_assignment",
+                )
+                review_turn = self._begin_member_execution(store, team_name, reviewer_name)
+                yield {"type": "team_event", "event": "quality_review_started", "team": team_name, "member": reviewer_name}
+                review = self._run_delegated_llm(
+                    member=self._quality_reviewer_execution_member(review_turn["member"]), prompt=review_prompt,
+                    timeout_seconds=self.DELEGATED_TIMEOUT_SECONDS, max_tokens=1800,
+                    max_tool_calls=self.TEAM_MEMBER_MAX_TOOL_CALLS,
+                    execution_context=review_turn.get("_execution_context"), quality_review=True,
+                )
+                review_content = str(review.get("content") or "")
+                review_events = review.get("tool_events", [])
+                review_evidence = self._accept_delegated_evidence(review)
+                decision, blocking = _quality_review_decision(review_content, evidence)
+                review_completion = self._complete_member_execution(
+                    store, team_name, reviewer_name, review_content, ok=not blocking,
+                    turn=review_turn, evidence=review_evidence, quality_review=decision,
+                    tool_events=review_events, task_id=review_turn["task"]["id"],
+                )
+                review_result = {
+                    "member": reviewer_name, "status": "needs_review" if blocking else "idle",
+                    "blocking_review": bool(blocking), "error": blocking, "result": review_content,
+                    "task": review_completion["task"], "decision": decision, "evidence": review_evidence,
+                }
+                yield {
+                    "type": "team_event", "event": "quality_review_completed", "team": team_name,
+                    "member": reviewer_name, "message": review_completion.get("message", {}),
+                }
+            except ExecutionStopped:
+                if review_turn is not None:
+                    self._complete_member_execution(store, team_name, reviewer_name, "Execution stopped", ok=False, turn=review_turn, task_id=review_turn["task"]["id"])
+                raise
+            except Exception as exc:
+                if review_turn is not None:
+                    self._complete_member_execution(
+                        store, team_name, reviewer_name, str(exc), ok=False, turn=review_turn, task_id=review_turn["task"]["id"],
+                    )
+                review_result = {"member": reviewer_name, "status": "failed", "blocking_review": True, "error": str(exc)}
+        result = {
+            "team": team_name, "member": member_name,
+            "status": "needs_review" if review_result and review_result.get("blocking_review") else state,
+            "error": error, "result": content if state == "completed" else "",
+            "consumed_messages": len(inbox), "tool_count": len(tool_events),
+            "quality_review": review_result, "evidence": evidence, "delivered_to": "leader", "task": completion["task"],
+        }
+        hook_events, _prompts = self._run_hook_event(
+            "subagent_stop", tool_name="agent_delegate", tool_args=dict(args), message=str(result)[:1000],
+        )
+        yield from hook_events
+        return result
+
     def _delegated_tool_schemas(
         self,
         *,
         allowed_tools: frozenset[str] | set[str] | None = None,
         allow_write_tools: bool = False,
     ) -> list[dict]:
-        allowed = {
-            "workspace_status",
-            "workspace_glob",
-            "workspace_grep",
-            "workspace_read_file",
-            "get_schema",
-            "get_table_detail",
-            "query_data",
-            "query_knowledge",
-            "memory_read",
-            "select_chart",
-            "profile_data",
-        }
+        from agent.teams.profiles import DELEGATED_READ_TOOLS
+
+        allowed = set(DELEGATED_READ_TOOLS) | {"read_tool_result"}
         if allow_write_tools:
             allowed.add("clean_data")
         schemas = [
@@ -1199,9 +1786,28 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
         allowed_tools: frozenset[str] | set[str] | None = None,
         allow_write_tools: bool = False,
     ) -> str:
+        from agent.teams.profiles import DELEGATED_READ_TOOLS
+
+        ceiling = set(DELEGATED_READ_TOOLS) | {"read_tool_result"}
+        if allow_write_tools:
+            ceiling.add("clean_data")
+        if allowed_tools is not None:
+            ceiling.intersection_update(allowed_tools)
+        policy = self._invocation_policy().child(allowed_tools=frozenset(ceiling), read_only=not allow_write_tools)
         try:
-            if allowed_tools is not None and name not in allowed_tools:
-                return f"Unauthorized delegated tool: {name}"
+            self._authorize_tool(name, args, policy=policy)
+        except ToolAuthorizationError as exc:
+            return f"ERROR: Unauthorized {'read-only ' if not allow_write_tools else ''}delegated tool [{name}]: {exc}"
+        authorization = self._workspace_path_authorization()
+        validation = _validate_tool_args(
+            name, args, allowed_roots=[] if self._workspace_id and authorization is None else None,
+            workspace_authorization=authorization,
+        )
+        if validation:
+            raise ValueError(validation)
+        try:
+            if name == "read_tool_result":
+                return self._read_controlled_result(args)
             if name == "workspace_status":
                 return self._tool_workspace_status()
             if name.startswith("workspace_"):
@@ -1232,11 +1838,21 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
             if name == "get_table_detail":
                 return self._tool_get_table_detail(args.get("table_name", ""))
             if name == "query_data":
-                return self._tool_query_data(args.get("sql", ""))
+                # The main Agent allows memory-table writes; delegated analysts
+                # need a stricter boundary than a prompt saying "read-only".
+                import sqlglot
+                from sqlglot import expressions as exp
+                sql = str(args.get("sql") or "")
+                statements = sqlglot.parse(sql, dialect="duckdb", error_level=sqlglot.ErrorLevel.RAISE)
+                if (len(statements) != 1 or not isinstance(statements[0], exp.Query)
+                        or any(isinstance(node, (exp.Insert, exp.Update, exp.Delete, exp.Create, exp.Drop, exp.Merge))
+                               for node in statements[0].walk())):
+                    raise ValueError("Delegated query_data accepts read-only SELECT queries only")
+                return self._tool_query_data(sql)
             if name == "query_knowledge":
                 if not self._knowledge_allowed_this_turn:
                     return "Knowledge lookup is not allowed for this request."
-                return self._tool_query_knowledge(args.get("question", ""))
+                return self._tool_query_knowledge(args.get("question", ""), definition_ref=args.get("definition_ref"))
             if name == "memory_read":
                 return read_memory(
                     args.get("name", ""), user_id=self._user_id,
@@ -1270,9 +1886,11 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                     # table (or choose a different persistent destination).
                     output_table="cleaned_data",
                 )
-            return f"Unsupported delegated tool: {name}"
+            return f"ERROR: Unsupported delegated tool: {name}"
+        except ExecutionStopped:
+            raise
         except Exception as exc:
-            return f"Delegated tool error [{name}]: {exc}"
+            return f"ERROR: Delegated tool error [{name}]: {exc}"
 
     def _tt(self, zh: str, en: str) -> str:
         """Pick a user-facing string in the UI language (A7 i18n)."""
@@ -1280,9 +1898,10 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
 
     def _workspace_runtime(self):
         """Resolve only the runtime frozen for this Agent turn (C5)."""
-        if not self._workspace_id:
+        workspace_id = getattr(self, "_workspace_id", "")
+        if not workspace_id:
             return None
-        return workspace_manager.get_by_workspace(self._workspace_id)
+        return workspace_manager.get_by_workspace(workspace_id)
 
     def _workspace_path_authorization(self):
         """Return the SQL sandbox capability for this Agent's fixed Workspace."""
@@ -1298,17 +1917,48 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
         """
         if self._job_runner is None:
             raise RuntimeError("JobRunner is not available for this session")
-        jid = self._job_runner.create(fn, job_type=job_type, label=label)
+        import threading
+
+        parent = self._current_execution()
+        context = parent.child() if parent is not None else ExecutionContext()
+        copied = copy_context()
+        entered = threading.Event()
+
+        def worker(job_context):
+            entered.set()
+            def execute():
+                # Preserve the worker's existing cooperative Job cancellation.
+                job_context.check_canceled()
+                result = fn(job_context)
+                if not (isinstance(result, dict) and result.get("result_committed") is True):
+                    job_context.check_canceled()
+                return result
+            return copied.run(self._run_execution_worker, context, execute)
+
+        try:
+            jid = self._job_runner.create(worker, job_type=job_type, label=label)
+        except BaseException:
+            context.acknowledge_exit()
+            raise
+        # A queued Job may be canceled before its worker wrapper starts. A
+        # running wrapper owns its child until the real worker finally returns.
+        self._job_runner.add_terminal_listener(
+            jid, lambda _job: context.acknowledge_exit() if not entered.is_set() else None,
+        )
         self._active_job_id = jid
         self._job_start_ts = time.monotonic()
         try:
             for event in self._job_runner.iter_events(jid):
+                self._execution_checkpoint()
                 yield event
+            self._execution_checkpoint()
             job = self._job_runner.get_status(jid)
             if job is None:
                 raise RuntimeError(f"job disappeared: {jid}")
             return job
         finally:
+            if not context.exit_acknowledged:
+                context.cancel("Job event bridge closed")
             current = self._job_runner.get_status(jid)
             if current is not None:
                 from data.jobs_store import _TERMINAL
@@ -1449,6 +2099,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
 
     # ── Agent loop ────────────────────────────────────────────────────────────
 
+    @_execution_bound_turn
     def run(
         self,
         user_message: str,
@@ -1520,6 +2171,11 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
             auto_match_skill,
         )
 
+        _CURRENT_INVOCATION_POLICY.set((id(self), self._build_invocation_policy(
+            activation=activation, user_message=user_message,
+            discovered_tools=discovered_tools, teams_enabled=teams_enabled,
+        )))
+
         # Explicit Workflow creation is deterministic. Letting the model choose
         # tools here can turn a requested definition into an ad-hoc analysis.
         if activation.kind == "none":
@@ -1538,10 +2194,12 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                     "display": f"{self._tt('创建 Workflow', 'Create Workflow')}: {workflow_args['name']}",
                 }
                 try:
+                    self._authorize_tool(tool_name, workflow_args)
                     tool_result = execute_workflow_tool(
                         tool_name, self._session_id, workflow_args,
                     )
-                    envelope = make_tool_result(
+                    self._execution_checkpoint()
+                    envelope = self._make_execution_tool_result(
                         tool_name,
                         tool_result,
                         debug={
@@ -1597,6 +2255,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
             yield {"type": "tool_start", "tool": "generate_ppt",
                    "display": f"{self._tt('生成 PPT', 'Generate PPT')}: {ppt_title} ({len(slides)} {self._tt('张', 'slides')})..."}
             try:
+                self._authorize_tool("generate_ppt", {"title": ppt_title, "slides": slides})
                 result = yield from self._tool_generate_ppt_with_jobs(
                     title=ppt_title, slides=slides, filename="",
                 )
@@ -1613,6 +2272,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
             yield {"type": "tool_start", "tool": "export_excel",
                    "display": f"{self._tt('导出 Excel', 'Export Excel')} → {', '.join(tables)[:50]}..."}
             try:
+                self._authorize_tool("export_excel", {"tables": tables, "filename": excel_filename})
                 result = yield from self._tool_export_excel_with_jobs(
                     tables=tables, filename=excel_filename,
                 )
@@ -1629,6 +2289,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
             yield {"type": "tool_start", "tool": "export_report",
                    "display": f"{self._tt('生成报告', 'Generate report')}: {report_title} ({len(sections)} {self._tt('个章节', 'sections')})..."}
             try:
+                self._authorize_tool("export_report", {"title": report_title, "sections": sections})
                 result = yield from self._tool_export_report_with_jobs(
                     title=report_title, sections=sections,
                 )
@@ -1645,6 +2306,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
             yield {"type": "tool_start", "tool": "generate_dashboard",
                    "display": f"{self._tt('生成看板', 'Generate dashboard')}: {dashboard_name} ({len(widgets)} {self._tt('个组件', 'widgets')})..."}
             try:
+                self._authorize_tool("generate_dashboard", {"name": dashboard_name, "widgets": widgets})
                 result = yield from self._tool_generate_dashboard_with_jobs(
                     name=dashboard_name, widgets=widgets
                 )
@@ -1670,6 +2332,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
         if _has_sources and not _has_schema:
             # One last attempt: try to get the schema right now.
             try:
+                self._authorize_tool("get_schema", {})
                 _live_schema = self._tool_get_schema()
             except Exception:
                 _live_schema = ""
@@ -1725,7 +2388,13 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
             set(skill_activation.requested_tools) if skill_activation else set()
         )
         _workspace_available = self._workspace_runtime() is not None
-        _knowledge_relevant = message_needs_knowledge(user_message)
+        _CURRENT_INVOCATION_POLICY.set((id(self), self._build_invocation_policy(
+            activation=activation, trusted_skill=trusted_skill_name,
+            skill_allowed_tools=skill_activation.requested_tools if skill_activation else None,
+            user_message=user_message, discovered_tools=discovered_tools, teams_enabled=teams_enabled,
+        )))
+        _ontology_relevant = self._prepare_ontology_knowledge(user_message)
+        _knowledge_relevant = message_needs_knowledge(user_message) or _ontology_relevant
         self._knowledge_allowed_this_turn = _knowledge_relevant
         _kb_checked_this_turn = False
         _preflight_knowledge_msg: List[Dict] = []
@@ -1738,7 +2407,9 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                 "display": f"{self._tt('查询知识库', 'Search knowledge base')}: {kb_question[:40]}",
                 "detail": f"查询知识库: {kb_question}",
             }
+            self._authorize_tool("query_knowledge", {"question": kb_question})
             kb_result, kb_refs = self._tool_query_knowledge_with_refs(kb_question)
+            self._execution_checkpoint()
             yield {"type": "tool_end", "tool": "query_knowledge"}
             if kb_refs:
                 yield {
@@ -1755,7 +2426,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                     "role": "system",
                     "content": (
                         "[RETRIEVED BUSINESS KNOWLEDGE — TOP MATCHES]\n"
-                        f"{kb_result[:3000]}\n"
+                        f"{kb_result}\n"
                         "[END RETRIEVED BUSINESS KNOWLEDGE]\n"
                         "Use only relevant entries above; do not infer omitted "
                         "knowledge or contradict canonical metric definitions."
@@ -1991,7 +2662,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
             }
             _working_history, _compacted = compact_history(
                 history=history,
-                client=self.client,
+                client=self._checkpoint_client(),
                 model=self.model,
                 audit_factory=lambda: self._new_model_audit("compaction"),
             )
@@ -2059,10 +2730,10 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
         _archived_turn_messages: List[Dict[str, Any]] = []
         _emergency_compaction_used = False
         _skip_auto_compact_once = False
-        _allowed_tool_result_artifacts = [
-            dict(item) for item in (tool_result_artifacts or ())
-            if isinstance(item, dict) and item.get("artifact_id")
-        ][-20:]
+        _allowed_tool_result_artifacts = self._turn_state()["grants"]
+        _remember_turn_tool_result_artifacts(
+            _allowed_tool_result_artifacts, tool_result_artifacts or [], session_id=self._session_id,
+        )
 
         try:
             _all_mcp_schemas = self._mcp_manager.get_all_openai_schemas()
@@ -2124,6 +2795,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
         _number_gate_retries = 0
         _MAX_NUMBER_GATE_RETRIES = 1
         for _iteration in range(self.MAX_ITERATIONS):
+            self._execution_checkpoint()
             # ── Hard exit guards ──────────────────────────────────────────────
             # _run_start is reset after every job completes (see _run_job), so
             # MAX_RUN_SECONDS effectively caps the *idle* time between productive
@@ -2182,6 +2854,12 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
             else:
                 _max_tokens = self._max_output_tokens
 
+            _CURRENT_INVOCATION_POLICY.set((id(self), self._build_invocation_policy(
+                activation=activation, trusted_skill=trusted_skill_name,
+                skill_allowed_tools=skill_activation.requested_tools if skill_activation else None,
+                user_message=user_message, discovered_tools=discovered_tools,
+                teams_enabled=teams_enabled, allowed_mcp_tools=_turn_discovered_mcp,
+            )))
             _available_tools = filter_tools_for_turn(
                 get_tools_with_mcp(
                     self._mcp_manager,
@@ -2200,7 +2878,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                 include_mcp=True,
                 allowed_mcp_tools=frozenset(_turn_discovered_mcp[-5:]),
             )
-            if _kb_checked_this_turn or not _knowledge_relevant:
+            if (_kb_checked_this_turn or not _knowledge_relevant) and not getattr(self, "_knowledge_followup_required", False):
                 _available_tools = [
                     schema for schema in _available_tools
                     if ((schema.get("function") or {}).get("name") or "")
@@ -2324,7 +3002,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                 }
                 _candidate_history, _did_compact = compact_history(
                     history=messages[1:],
-                    client=self.client,
+                    client=self._checkpoint_client(),
                     model=self.model,
                     audit_factory=lambda: self._new_model_audit("compaction"),
                 )
@@ -2456,14 +3134,28 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
             _t0 = time.monotonic()
             yield {"type": "agent_activity", "message": self._tt("正在分析…", "Analyzing…")}
             _model_audit = self._new_model_audit("chat", billing_scope="user")
+            _native_model_calls = []
+            def _native_request():
+                self._execution_checkpoint()
+                record = {
+                    "model_call_id": getattr(_model_audit, "application_call_id", "") or _model_audit.request_id, "attempt": len(_native_model_calls) + 1,
+                    "model": self.model, "provider": str(getattr(self, "_provider", "") or ""),
+                    "input_tokens": None, "output_tokens": None, "cached_input_tokens": None,
+                    "usage_available": False, "usage_source": "unavailable", "status": "failed",
+                }
+                _native_model_calls.append(record)
+                try:
+                    response = self._checked_model_create(**call_kwargs)
+                    record["status"] = "succeeded"
+                    return response
+                except ExecutionStopped:
+                    record["status"] = "canceled"
+                    raise
             try:
-                stream = _call_with_retry(
-                    self.client.chat.completions.create,
-                    on_attempt=_model_audit.attempt,
-                    **call_kwargs,
-                )
+                stream = _call_with_retry(_native_request, on_attempt=_model_audit.attempt)
             except Exception as exc:
                 _model_audit.fail(exc)
+                self._execution_checkpoint()
                 log.error("[llm] API call failed after retries: %s", exc)
                 if _is_context_length_error(exc) and not _emergency_compaction_used:
                     _emergency_compaction_used = True
@@ -2475,7 +3167,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                     }
                     _candidate_history, _did_compact = compact_history(
                         history=messages[1:],
-                        client=self.client,
+                        client=self._checkpoint_client(),
                         model=self.model,
                         audit_factory=lambda: self._new_model_audit("compaction"),
                     )
@@ -2500,9 +3192,9 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                         continue
                 retryable, _ = _is_retryable(exc)
                 if retryable:
-                    yield {"type": "error", "message": f"LLM 服务暂时不可用，请稍后重试: {exc}"}
+                    yield {"type": "error", "message": f"LLM 服务暂时不可用，请稍后重试: {exc}", "model_calls": _native_model_calls}
                 else:
-                    yield {"type": "error", "message": f"LLM 调用失败: {exc}"}
+                    yield {"type": "error", "message": f"LLM 调用失败: {exc}", "model_calls": _native_model_calls}
                 yield {"type": "done"}
                 return
 
@@ -2515,6 +3207,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
 
             try:
                 for chunk in stream:
+                    self._execution_checkpoint()
                     if getattr(chunk, "usage", None):
                         usage_data = chunk.usage
                     if not chunk.choices:
@@ -2552,7 +3245,9 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                 if tcd.function.arguments:
                                     tc_acc[idx]["args"] += tcd.function.arguments
             except BaseException as exc:
-                _model_audit.cancel() if isinstance(exc, GeneratorExit) else _model_audit.fail(exc)
+                _model_audit.cancel() if isinstance(exc, (GeneratorExit, ExecutionStopped)) else _model_audit.fail(exc)
+                if _native_model_calls:
+                    _native_model_calls[-1]["status"] = "canceled" if isinstance(exc, (GeneratorExit, ExecutionStopped)) else "failed"
                 raise
 
             if usage_data:
@@ -2573,52 +3268,43 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
             has_tool_calls = bool(tc_acc) and finish_reason == "tool_calls"
             reasoning_content = "".join(reasoning_parts) or None
 
-            if usage_data:
-                _elapsed = time.monotonic() - _t0
-                _prompt_breakdown = finalize_prompt_breakdown(
-                    _prompt_breakdown, usage_data,
+            _elapsed = time.monotonic() - _t0
+            _prompt_breakdown = finalize_prompt_breakdown(_prompt_breakdown, usage_data)
+            if _native_model_calls:
+                _native_model_calls[-1].update(
+                    input_tokens=_prompt_breakdown["actual_prompt_tokens"],
+                    output_tokens=_prompt_breakdown["actual_completion_tokens"],
+                    cached_input_tokens=_prompt_breakdown["cached_input_tokens"],
+                    usage_available=_prompt_breakdown["usage_available"],
+                    usage_source=_prompt_breakdown["usage_source"],
+                    measurement_mode=_prompt_breakdown["measurement_mode"],
                 )
-                record_payload_usage(
-                    self._compaction_state,
-                    _payload_signature,
-                    prompt_tokens=usage_data.prompt_tokens,
-                    completion_tokens=usage_data.completion_tokens,
-                )
+            if _prompt_breakdown["usage_available"]:
+                prompt_tokens = _prompt_breakdown["actual_prompt_tokens"]
+                completion_tokens = _prompt_breakdown["actual_completion_tokens"]
+                record_payload_usage(self._compaction_state, _payload_signature,
+                                     prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
                 self._compaction_state["last_usage"] = {
-                    "prompt_tokens": int(usage_data.prompt_tokens or 0),
-                    "completion_tokens": int(usage_data.completion_tokens or 0),
+                    "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
                     "estimated_payload_tokens": int(_payload_tokens),
                     "used_incremental_anchor": bool(_used_usage_anchor),
-                    "safety_margin": int(_turn_safety_margin),
-                    "recorded_at": time.time(),
+                    "safety_margin": int(_turn_safety_margin), "recorded_at": time.time(),
+                    "usage_available": True, "usage_source": _prompt_breakdown["usage_source"],
                 }
-                log.info(
-                    "[llm] stream done  finish=%s  in=%.0f out=%.0f  %.2fs",
-                    finish_reason,
-                    usage_data.prompt_tokens,
-                    usage_data.completion_tokens,
-                    _elapsed,
-                )
-                yield {
-                    "type": "usage",
-                    # The API layer persists this once as a durable numeric-only
-                    # cost event.  It is deliberately generated per completed
-                    # provider call instead of deriving an id from session
-                    # totals, which would make retries double-countable.
-                    "usage_event_id": f"session-llm-{uuid.uuid4().hex}",
-                    "usage_latency_ms": int(round(_elapsed * 1000)),
-                    "prompt_tokens": usage_data.prompt_tokens,
-                    "completion_tokens": usage_data.completion_tokens,
-                    "total_tokens": usage_data.total_tokens,
-                    "cached_input_tokens": _prompt_breakdown["cached_input_tokens"],
-                    "cache_write_tokens": _prompt_breakdown["cache_write_tokens"],
-                    "prompt_breakdown": _prompt_breakdown,
-                    "model_call_id": _model_audit.request_id,
-                    # context_window lets the frontend draw the context bar and
-                    # keeps the % shown there consistent with the compaction
-                    # trigger (both use _get_context_window()).
-                    "context_window": _ctx_window,
-                }
+            yield {
+                "type": "usage", "usage_event_id": f"session-llm-{uuid.uuid4().hex}",
+                "usage_latency_ms": int(round(_elapsed * 1000)),
+                "prompt_tokens": _prompt_breakdown["actual_prompt_tokens"],
+                "completion_tokens": _prompt_breakdown["actual_completion_tokens"],
+                "total_tokens": _prompt_breakdown["actual_total_tokens"],
+                "cached_input_tokens": _prompt_breakdown["cached_input_tokens"],
+                "cache_write_tokens": _prompt_breakdown["cache_write_tokens"],
+                "usage_available": _prompt_breakdown["usage_available"],
+                "usage_source": _prompt_breakdown["usage_source"],
+                "prompt_breakdown": _prompt_breakdown, "model_call_id": getattr(_model_audit, "application_call_id", "") or _model_audit.request_id,
+                "model_calls": _native_model_calls, "attempt": len(_native_model_calls), "status": "succeeded",
+                "context_window": _ctx_window,
+            }
 
             class _F:
                 def __init__(self, name, arguments):
@@ -2634,6 +3320,22 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                 _TC(v["id"], v["name"], v["args"])
                 for _, v in sorted(tc_acc.items())
             ]
+
+            # Recover provider pseudo-calls into the normal dispatcher. All
+            # paths share authorization, validation, hooks and result envelopes.
+            if not tc_acc:
+                recovered = _parse_text_fallback_tool_calls(full_content)
+                if recovered:
+                    tc_objects = [
+                        _TC(f"fallback_{uuid.uuid4().hex}", name, json.dumps(args, ensure_ascii=False))
+                        for name, args in recovered
+                    ]
+                    has_tool_calls = True
+                    for fallback_name in _TEXT_FALLBACK_TOOL_NAMES:
+                        full_content = re.sub(
+                            rf"<{fallback_name}\b[^>]*>[\s\S]*?</{fallback_name}>", "",
+                            full_content, flags=re.IGNORECASE,
+                        ).strip()
 
             # ── Dispatch tool calls ───────────────────────────────────────────
             if has_tool_calls:
@@ -2658,48 +3360,6 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
 
                 _outline_proposed = False
                 _ask_user_issued = False
-
-                # Guard: if any tool call is a blocked output tool, cancel the whole
-                # tool-call batch and instruct the model to reply with plain text.
-                _OUTPUT_TOOL_GUARDS = {
-                    "propose_ppt_outline":       {"ppt", "ppt_revise"},
-                    "generate_ppt":              {"ppt_confirm"},
-                    "propose_report_outline":    {"report", "report_revise"},
-                    "export_report":             {"report_confirm"},
-                    "propose_excel_export":      {"export", "excel_revise"},
-                    "export_excel":              {"excel_confirm"},
-                    "propose_dashboard_outline": {"dashboard", "dashboard_revise"},
-                    "generate_dashboard":        {"dashboard_confirm"},
-                }
-                # When activated via Skill, the skill name serves as the
-                # policy token (e.g. skill "dashboard" matches guard set
-                # {"dashboard", "dashboard_revise"}).
-                _guard_token = command or (activation.name if activation.kind == "skill" else "")
-                blocked = [
-                    tc for tc in tc_objects
-                    if tc.function.name in _OUTPUT_TOOL_GUARDS
-                    and _guard_token not in _OUTPUT_TOOL_GUARDS[tc.function.name]
-                ]
-                if blocked:
-                    blocked_names = ", ".join(tc.function.name for tc in blocked)
-                    log.warning("[tool] blocked output tool(s): %s (command=%r)", blocked_names, command)
-                    # asst_entry (with reasoning_content if present) was already appended at line 540.
-                    # Only append fake tool results so the model can continue.
-                    for tc in tc_objects:
-                        if tc.function.name in _OUTPUT_TOOL_GUARDS:
-                            content = (
-                                f"[SYSTEM BLOCK] '{tc.function.name}' requires a slash command. "
-                                "Do NOT call output tools in regular chat. "
-                                "Reply to the user in plain text, and suggest the relevant slash command if appropriate."
-                            )
-                        else:
-                            content = "ok"
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tc.id,
-                            "content": content,
-                        })
-                    continue  # next iteration — model will now reply in plain text
 
                 _parsed_tools = []
                 _hook_prompt_backlog: list[str] = []
@@ -2741,6 +3401,21 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                     elif name in ("propose_report_outline", "export_report"):
                         args = _normalize_report_outline_args(args)
 
+                    try:
+                        self._authorize_tool(name, args)
+                    except ToolAuthorizationError as exc:
+                        envelope = self._make_execution_tool_result(
+                            name, str(exc), ok=False, error=exc.code,
+                            session_id=self._session_id, runtime=self._workspace_runtime(), args=args,
+                        )
+                        yield {"type": "tool_audit", "tool": name, "ok": False,
+                               "error": exc.code, "summary": str(exc), "content": str(exc),
+                               "sources": [], "artifacts": [], "elapsed_seconds": 0.0}
+                        messages.append({"role": "tool", "tool_call_id": tc.id,
+                                         "content": envelope.to_model_text()})
+                        _consecutive_errors += 1
+                        continue
+
                     # Pre-dispatch validation: catch obviously bad args early
                     # A4：把 workspace 的 allowed_roots 传入，让 SQL 路径白名单生效
                     _ws_runtime = self._workspace_runtime()
@@ -2750,7 +3425,8 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                     _allowed_roots = [] if self._workspace_id and _workspace_auth is None else None
                     # Structured SQL validation for the UI badge (passed/failed/degraded).
                     # Computed before the blocking _validate_tool_args so both paths can surface it.
-                    _sql_validation = _sql_validation_event(name, args, _allowed_roots, _workspace_auth)
+                    _sql_dialect = self._query_dialect_for_sql(str(args.get("sql") or "")) if name in _SQL_TOOLS else "duckdb"
+                    _sql_validation = _sql_validation_event(name, args, _allowed_roots, _workspace_auth, _sql_dialect)
                     _sql_purpose = None
                     if name in _SQL_TOOLS and args.get("sql"):
                         _sql_purpose = (args.get("purpose") or "").strip() or _infer_sql_purpose(
@@ -2761,6 +3437,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                         args,
                         allowed_roots=_allowed_roots,
                         workspace_authorization=_workspace_auth,
+                        sql_dialect=_sql_dialect,
                     )
                     if _val_err:
                         _ask_user_error = (
@@ -2920,6 +3597,8 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                         "team_list":            _tt("列出分析团队", "List teams"),
                         "team_status":          f"{_tt('查看分析团队状态', 'Team status')}: {args.get('name', '?')}",
                         "send_message":         f"{_tt('发送团队消息', 'Send message')}: {args.get('recipient', '?')}",
+                        "agent_create":         f"{_tt('构建子 Agent', 'Create agent')}: {args.get('name', '?')}",
+                        "agent_task":           f"{_tt('查看或取消子任务', 'Inspect/cancel agent task')}: {args.get('task_id', '?')}",
                         "agent_delegate":       f"{_tt('委派分析任务', 'Delegate task')}: {args.get('description', '')[:40]}",
                         "plan_complete":        _tt("提交结构化计划", "Submit plan"),
                         "display_diagram":      f"{_tt('生成图表画布', 'Create diagram')}: {args.get('title', _tt('分析框架', 'framework'))}",
@@ -2957,7 +3636,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                 "validation": _sql_validation,
                                 "purpose": _sql_purpose,
                             }
-                            envelope = make_tool_result(
+                            envelope = self._make_execution_tool_result(
                                 name,
                                 f"ERROR: Tool call rejected by hook {rejected.hook_id}: {reason}",
                                 ok=False,
@@ -3003,17 +3682,22 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                     }
                     _parsed_tools.append((tc, name, args))
 
-                if should_parallelize_batch(_parsed_tools):
+                # A knowledge lookup can select this context's immutable
+                # semantic definition snapshot. Apply that transition in order.
+                if should_parallelize_batch(_parsed_tools) and not any(
+                    name == "query_knowledge" for _tc, name, _args in _parsed_tools
+                ):
                     from concurrent.futures import ThreadPoolExecutor, as_completed
 
                     def _run_parallel_tool(item):
                         tc, name, args = item
+                        self._authorize_tool(name, args)
                         t0 = time.monotonic()
                         sources: list[dict] = []
                         artifacts: list[dict] = []
                         if name == "query_knowledge":
                             raw, refs = self._tool_query_knowledge_with_refs(
-                                question=args.get("question", "")
+                                question=args.get("question", ""), definition_ref=args.get("definition_ref"),
                             )
                             sources = refs
                             events = [{
@@ -3041,7 +3725,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                         else:
                             raw = f"Unknown parallel tool: {name}"
                             events = []
-                        envelope = make_tool_result(
+                        envelope = self._make_execution_tool_result(
                             name,
                             raw,
                             sources=sources,
@@ -3064,7 +3748,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                     # most time waiting on network). 4 → 8: GIL released during IO,
                     # no DuckDB writes here, so higher concurrency is pure win.
                     with ThreadPoolExecutor(max_workers=min(8, len(_parsed_tools))) as ex:
-                        futures = [ex.submit(_run_parallel_tool, item) for item in _parsed_tools]
+                        futures = [self._submit_execution_worker(ex, _run_parallel_tool, item) for item in _parsed_tools]
                         parallel_results = [f.result() for f in as_completed(futures)]
 
                     result_by_id = {tc.id: (tc, name, env, events)
@@ -3075,6 +3759,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                             _allowed_tool_result_artifacts,
                             envelope.artifacts,
                             session_id=self._session_id,
+                            limit=max(20, len(_allowed_tool_result_artifacts) + len(envelope.artifacts)),
                         )
                         for event in events:
                             yield event
@@ -3110,6 +3795,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                     continue
 
                 for tc, name, args in _parsed_tools:
+                    self._authorize_tool(name, args)
                     _args_preview = {k: str(v)[:80] for k, v in args.items() if k != "slides"}
                     log.info("[tool] %s  args=%s", name, _args_preview)
                     _tool_t0 = time.monotonic()
@@ -3128,7 +3814,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                             )
                         elif name == "query_knowledge":
                             tool_result, kb_refs = self._tool_query_knowledge_with_refs(
-                                question=args.get("question", "")
+                                question=args.get("question", ""), definition_ref=args.get("definition_ref"),
                             )
                             tool_sources = kb_refs
                             yield {
@@ -3141,6 +3827,8 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                 args.get("name", ""), user_id=self._user_id,
                                 workspace_id=self._workspace_id,
                             )
+                        elif name == "prepare_training":
+                            tool_result = self._tool_prepare_training(args)
                         elif name == "get_schema":
                             tool_result = self._tool_get_schema()
                         elif name == "workspace_status":
@@ -3166,7 +3854,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                             )
                             yield {"type": "data_refs", "refs": tool_sources}
                         elif name == "run_analysis":
-                            tool_result = yield from self._tool_run_analysis_with_jobs(
+                            tool_result, tool_sources = yield from self._tool_run_analysis_with_refs(
                                 analysis_name=args.get("analysis_name", ""),
                                 sql=args.get("sql", ""),
                                 target_column=args.get("target_column", ""),
@@ -3174,15 +3862,10 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                 n_deciles=int(args.get("n_deciles", 10)),
                                 analysis_options=args.get("analysis_options", {}),
                             )
-                            tool_sources = self._data_refs_for_sql(
-                                args.get("sql", ""), self.data_source, None
-                            )
+                            tool_artifacts.extend(self._analysis_result_artifacts)
                             yield {"type": "data_refs", "refs": tool_sources}
                         elif name == "generate_chart":
-                            tool_sources = self._data_refs_for_sql(
-                                args.get("sql", ""), self.data_source, None
-                            )
-                            chart = yield from self._tool_generate_chart_with_jobs(
+                            chart, tool_sources = yield from self._tool_generate_chart_with_refs(
                                 chart_type=args.get("chart_type", "Bar_Chart"),
                                 sql=args.get("sql", ""),
                                 field_mapping=args.get("field_mapping", {}),
@@ -3256,6 +3939,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                     "index": len(pending_charts) - 1,
                                 }
                             tool_result = result.get("text", "数据概况生成失败。")
+                            tool_sources = result.get("sources", [])
                         elif name == "clean_data":
                             tool_result = yield from self._tool_clean_data_with_jobs(
                                 operation=args.get("operation", ""),
@@ -3647,21 +4331,8 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                 **result,
                             }, ensure_ascii=False)
                         elif name == "read_tool_result":
-                            tool_result = read_tool_result_artifact(
-                                args.get("artifact_id", ""),
-                                allowed_artifacts=_allowed_tool_result_artifacts,
-                                session_id=self._session_id,
-                                workspace_id=self._workspace_id,
-                                runtime=_ws_runtime,
-                                workspace_root=(
-                                    workspace_manager.root_for_workspace(
-                                        self._workspace_id
-                                    )
-                                    if self._workspace_id else None
-                                ),
-                                offset=args.get("offset", 0),
-                                limit=args.get("limit", 4000),
-                                query=args.get("query", ""),
+                            tool_result = self._read_controlled_result(
+                                args, allowed_artifacts=_allowed_tool_result_artifacts,
                             )
                         elif name == "search_mcp_tools":
                             matches = search_mcp_catalog(
@@ -3793,12 +4464,38 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                 )
                         elif name in {
                             "team_create", "team_delete", "team_list", "team_status",
-                            "send_message", "agent_delegate", "team_plan_create", "team_delegate",
+                            "send_message", "agent_create", "agent_task", "agent_delegate", "team_plan_create", "team_delegate",
                         }:
                             team_store = WorkspaceTeamStore(
                                 self._session_id, workspace_id=self._workspace_id,
                             )
-                            if name == "team_create":
+                            if name == "agent_create":
+                                team_name = str(args.get("team_name") or "default")
+                                tool_result = team_store.create_agent(
+                                    args.get("name", ""), team_name=team_name,
+                                    role=str(args.get("role") or "analyst"),
+                                    instructions=str(args.get("instructions") or ""),
+                                    profile=str(args.get("profile") or "inherit"),
+                                )
+                                team_name, member_name = tool_result["team"], tool_result["member"]["name"]
+                                rpc_path = "/api/session/{}/teams/{}/agents/{}/a2a".format(*(
+                                    urllib.parse.quote(value, safe="") for value in (self._session_id, team_name, member_name)
+                                ))
+                                tool_result["protocol"] = "a2a/1.0"
+                                tool_result["rpc_path"] = rpc_path
+                                tool_result["discovery_path"] = rpc_path.removesuffix("/a2a") + "/.well-known/agent-card.json"
+                                yield {
+                                    "type": "team_event", "event": "agent_created", "team": team_name,
+                                    "member": member_name, "reused": tool_result["reused"],
+                                }
+                            elif name == "agent_task":
+                                action = str(args.get("action") or "get")
+                                if action not in {"get", "cancel"}:
+                                    raise ValueError("agent_task action must be get or cancel")
+                                operation = team_store.cancel_task if action == "cancel" else team_store.get_task
+                                tool_result = operation(args.get("team_name", ""), args.get("task_id", ""))
+                                yield {"type": "team_event", "event": "task_" + action, "team": args.get("team_name", ""), "task": tool_result}
+                            elif name == "team_create":
                                 tool_result = team_store.create(
                                     args.get("name", ""), args.get("description", ""), args.get("members", [])
                                 )
@@ -4086,6 +4783,8 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                         max_tokens=task_max_tokens,
                                         max_tool_calls=task_max_tool_calls,
                                         allowed_tools=frozenset(profile_tools) if profile_tools is not None else None,
+                                        execution_context=item.get("execution_context"),
+                                        parent_claim_ids=item.get("parent_claim_ids"),
                                     )
                                     return item, delegated
 
@@ -4096,9 +4795,16 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                     if task["id"] not in selected_task_ids and task.get("status") == "completed"
                                 }
                                 failed_task_ids = set()
+                                dependency_results = {
+                                    task["id"]: str(task.get("result_summary") or "")
+                                    for task in dynamic_plan["tasks"] if task["id"] in succeeded_task_ids
+                                }
                                 executor = ThreadPoolExecutor(max_workers=max_workers)
                                 try:
                                     while remaining:
+                                        self._execution_checkpoint()
+                                        if dynamic_plan_store.get(dynamic_plan["id"])["status"] == "canceled":
+                                            break
                                         budget_state = dynamic_plan_store.check_token_budget(
                                             dynamic_plan["id"],
                                         )
@@ -4146,8 +4852,8 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                                     if dep in failed_task_ids
                                                 )
                                             )
-                                            completion = team_store.complete_member_turn(
-                                                team_name, item["member_name"], reason, ok=False
+                                            completion = self._complete_member_execution(team_store,
+                                                team_name, item["member_name"], reason, ok=False, task_id=""
                                             )
                                             results.append({
                                                 "task_id": item["task_id"],
@@ -4167,17 +4873,20 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                             }
                                             failed_task_ids.add(item["task_id"])
 
-                                        ready = [
-                                            item for item in remaining
-                                            if set(item["depends_on"]).issubset(succeeded_task_ids)
-                                        ]
+                                        ready = []
+                                        ready_members = set()
+                                        for item in remaining:
+                                            if (set(item["depends_on"]).issubset(succeeded_task_ids)
+                                                    and item["member_name"] not in ready_members):
+                                                ready.append(item)
+                                                ready_members.add(item["member_name"])
                                         if not ready:
                                             if remaining:
                                                 for item in list(remaining):
                                                     remaining.remove(item)
                                                     reason = "前置任务未满足，当前任务未派发。"
-                                                    completion = team_store.complete_member_turn(
-                                                        team_name, item["member_name"], reason, ok=False
+                                                    completion = self._complete_member_execution(team_store,
+                                                        team_name, item["member_name"], reason, ok=False, task_id=""
                                                     )
                                                     results.append({
                                                         "task_id": item["task_id"],
@@ -4199,24 +4908,53 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                             break
 
                                         future_to_item = {}
-                                        for item in ready:
+                                        # Launch only available workers so queued futures do
+                                        # not spend their execution deadline waiting for a slot.
+                                        for item in ready[:max_workers]:
                                             remaining.remove(item)
-                                            assignment_message = team_store.send_message(
-                                                team_name, item["member_name"],
-                                                f"任务：{item['description']}\n\n{item['prompt']}",
-                                                sender="leader", read=True, queue=False,
-                                                message_type="assignment",
-                                            )
-                                            turn_info = team_store.begin_member_turn(
-                                                team_name, item["member_name"]
-                                            )
-                                            item["member"] = turn_info["member"]
+                                            from agent.teams.a2a import text_message
+                                            submitted_task = None
+                                            try:
+                                                submitted_task, _created = team_store.submit_task(
+                                                    team_name, item["member_name"], text_message(item["prompt"]),
+                                                )
+                                                turn_info = self._begin_member_execution(
+                                                    team_store, team_name, item["member_name"], task_id=submitted_task["id"],
+                                                    timeout_seconds=timeout_seconds,
+                                                )
+                                            except Exception as exc:
+                                                if submitted_task is not None:
+                                                    self._complete_member_execution(team_store,
+                                                        team_name, item["member_name"], str(exc), ok=False,
+                                                        task_id=submitted_task["id"],
+                                                    )
+                                                failed_task_ids.add(item["task_id"])
+                                                dynamic_plan_store.task(dynamic_plan["id"], item["task_id"], "failed", error=str(exc))
+                                                results.append({"task_id": item["task_id"], "member": item["member_name"], "status": "failed", "error": str(exc), "result": ""})
+                                                yield {"type": "team_event", "event": "member_failed", "team": team_name, "member": item["member_name"], "error": str(exc)}
+                                                continue
+                                            assignment_message = {"message": item["prompt"], "a2a": submitted_task["history"][0], "task_id": submitted_task["id"]}
+                                            item["member"] = {**turn_info["member"], "_a2a_plan_id": dynamic_plan["id"]}
+                                            item["turn_info"] = turn_info
+                                            item["execution_context"] = turn_info.get("_execution_context")
+                                            item["a2a_task_id"] = turn_info["task"]["id"]
                                             inbox = turn_info.get("inbox", [])
                                             item["consumed_messages"] = len(inbox)
                                             item["inbox_context"] = "\n\n[Unread team mailbox]\n" + "\n".join(
                                                 f"- From {message.get('sender', '')}: {message.get('message', '')}"
                                                 for message in inbox
                                             ) if inbox else ""
+                                            if item["depends_on"]:
+                                                dependency_refs = collect_evidence_references([
+                                                    result.get("evidence", {}) for result in results
+                                                    if result.get("task_id") in item["depends_on"]
+                                                ])
+                                                item["parent_claim_ids"] = dependency_refs["claim_ids"]
+                                                item["inbox_context"] += "\n[Controlled dependency evidence]\n" + json.dumps(dependency_refs, ensure_ascii=False)
+                                                item["inbox_context"] += "\n\n[Completed dependency results]\n" + "\n".join(
+                                                    f"Task {dep}: {dependency_results.get(dep, '')[:4000]}"
+                                                    for dep in item["depends_on"]
+                                                )
                                             yield {
                                                 "type": "team_event",
                                                 "event": "member_started",
@@ -4236,10 +4974,11 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                             dynamic_task_jobs[item["task_id"]] = task_job_id
                                             dynamic_plan_store.task(
                                                 dynamic_plan["id"], item["task_id"], "running",
-                                                job_id=task_job_id,
+                                                job_id=task_job_id, a2a_task_id=item["a2a_task_id"],
+                                                a2a_context_id=turn_info["task"]["contextId"],
                                             )
                                             future_to_item[
-                                                executor.submit(_run_prepared_delegate, item)
+                                                self._submit_execution_worker(executor, _run_prepared_delegate, item, execution_context=item.get("execution_context"))
                                             ] = item
                                         try:
                                             completed_iter = as_completed(
@@ -4251,16 +4990,19 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                                 task_id = item["task_id"]
                                                 try:
                                                     _item, delegated = future.result()
+                                                    evidence = self._accept_delegated_evidence(delegated)
+                                                    item["evidence"] = evidence
                                                     content = str(delegated.get("content", ""))
                                                     tool_events = delegated.get("tool_events", [])
                                                     task_usage = delegated.get("usage", {})
                                                 except Exception as exc:
                                                     content = str(exc)
                                                     tool_events = []
-                                                    task_usage = {}
-                                                    completion = team_store.complete_member_turn(
+                                                    task_usage = getattr(exc, "delegated_usage", {})
+                                                    completion = self._complete_member_execution(team_store,
                                                         team_name, member_name, content, ok=False,
-                                                        tool_events=tool_events,
+                                                        tool_events=tool_events, task_id=item["a2a_task_id"],
+                                                        turn=item.get("turn_info"), evidence=item.get("evidence"),
                                                     )
                                                     results.append({
                                                         "task_id": task_id, "member": member_name,
@@ -4283,14 +5025,16 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                                     content, tool_events,
                                                 )
                                                 if invalid_reason:
-                                                    completion = team_store.complete_member_turn(
+                                                    completion = self._complete_member_execution(team_store,
                                                         team_name, member_name, content, ok=False,
-                                                        tool_events=tool_events,
+                                                        tool_events=tool_events, task_id=item["a2a_task_id"],
+                                                        turn=item.get("turn_info"), evidence=item.get("evidence"),
                                                     )
                                                     results.append({
                                                         "task_id": task_id, "member": member_name,
                                                         "status": "failed", "error": invalid_reason,
                                                         "result": content, "tool_count": len(tool_events),
+                                                        "evidence": item.get("evidence", {}),
                                                         "_dynamic_tool_events": tool_events,
                                                         "_dynamic_usage": task_usage,
                                                         "consumed_messages": item["consumed_messages"],
@@ -4307,14 +5051,24 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                                         "message": completion.get("message", {}), "parallel": True,
                                                     }
                                                     continue
-                                                completion = team_store.complete_member_turn(
+                                                completion = self._complete_member_execution(team_store,
                                                     team_name, member_name, content, ok=True,
-                                                    tool_events=tool_events,
+                                                    tool_events=tool_events, task_id=item["a2a_task_id"],
+                                                        turn=item.get("turn_info"), evidence=item.get("evidence"),
                                                 )
+                                                from agent.teams.a2a import task_state
+                                                if task_state(completion["task"]) != "completed":
+                                                    dynamic_plan_store.task(dynamic_plan["id"], task_id, "canceled", usage=task_usage)
+                                                    failed_task_ids.add(task_id)
+                                                    results.append({"task_id": task_id, "member": member_name, "status": "canceled", "task": completion["task"]})
+                                                    continue
                                                 results.append({
                                                     "task_id": task_id, "member": member_name,
+                                                    "a2a_task_id": completion["task"]["id"],
+                                                    "context_id": completion["task"]["contextId"],
                                                     "status": "idle", "error": "", "result": content,
                                                     "tool_count": len(tool_events),
+                                                    "evidence": item.get("evidence", {}),
                                                     "_dynamic_tool_events": tool_events,
                                                     "_dynamic_usage": task_usage,
                                                     "consumed_messages": item["consumed_messages"],
@@ -4325,6 +5079,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                                     usage=task_usage,
                                                 )
                                                 succeeded_task_ids.add(task_id)
+                                                dependency_results[task_id] = content
                                                 yield {
                                                     "type": "team_event", "event": "member_idle",
                                                     "team": team_name, "member": member_name,
@@ -4334,10 +5089,14 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                             for future, item in future_to_item.items():
                                                 if future.done():
                                                     continue
+                                                context = item.get("execution_context")
+                                                if context is not None:
+                                                    context.cancel("Delegated member timed out")
                                                 future.cancel()
                                                 reason = f"团队成员执行超过 {timeout_seconds} 秒未完成，已停止等待。"
-                                                completion = team_store.complete_member_turn(
-                                                    team_name, item["member_name"], reason, ok=False
+                                                completion = self._complete_member_execution(team_store,
+                                                    team_name, item["member_name"], reason, ok=False,
+                                                    task_id=item["a2a_task_id"], turn=item.get("turn_info"),
                                                 )
                                                 results.append({
                                                     "task_id": item["task_id"],
@@ -4356,6 +5115,15 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                                     "message": completion.get("message", {}), "parallel": True,
                                                 }
                                 finally:
+                                    for pending_item in prepared:
+                                        context = pending_item.get("execution_context")
+                                        if context is not None and not context.exit_acknowledged:
+                                            context.cancel("Team executor closed")
+                                            self._complete_member_execution(
+                                                team_store, team_name, pending_item["member_name"],
+                                                "Team executor closed", ok=False, turn=pending_item.get("turn_info"),
+                                                task_id=pending_item.get("a2a_task_id", ""),
+                                            )
                                     executor.shutdown(wait=False, cancel_futures=True)
                                 budget_state = dynamic_plan_store.check_token_budget(dynamic_plan["id"])
                                 if budget_state.get("warning_new"):
@@ -4368,7 +5136,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                         "max_total_tokens": budget_state["max_total_tokens"],
                                         "usage_ratio": budget_state["usage_ratio"],
                                     }
-                                if results:
+                                if results and dynamic_plan_store.get(dynamic_plan["id"])["status"] != "canceled":
                                     review_input = {
                                         "team": team_name,
                                         "assignments": [
@@ -4384,21 +5152,20 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                                 "status": item.get("status", ""),
                                                 "error": item.get("error", ""),
                                                 "tool_count": item.get("tool_count", 0),
-                                                "result": str(item.get("result", ""))[:1800],
+                                                "result": str(item.get("result", "")),
+                                                "evidence": item.get("evidence", {}),
                                             }
                                             for item in results
                                         ],
                                     }
-                                    review_prompt = (
-                                        "你是团队固定质量复核员，作为第二道屏障复核本轮团队输出。\n"
-                                        f"硬规则：最多调用 {self.TEAM_MEMBER_MAX_TOOL_CALLS} 次只读工具；"
-                                        "抽查关键指标即可，不要完整重跑所有分析；工具调用后必须输出最终 Markdown。\n"
-                                        "检查重点：1) 数字是否有本轮成员结果/工具证据；2) SQL、样本、分母、时间窗是否一致；"
-                                        "3) 成员结果是否有错误、空输出、省略号、旧值或图表失败；"
-                                        "4) 原因推断是否标为假设且没有无字段支撑的事实断言。\n"
-                                        "输出 Markdown，必须包含：通过项、需修正项、不可验证项、建议补充查询。\n\n"
+                                    review_prompt = QUALITY_REVIEW_INSTRUCTION + "\n\n" + (
+                                        "Check key figures, SQL, units, denominators and time windows independently. "
+                                        "Read supplied ec_/tr_ references with read_tool_result (lineage/sql/result). "
+                                        "Member summaries are claims to check, never independent evidence. "
+                                        "List unavailable material in missing_evidence.\n\n"
                                         + json.dumps(review_input, ensure_ascii=False)
-                                    )[:12_000]
+                                    )
+                                    review_turn = None
                                     try:
                                         review_message = team_store.send_message(
                                             team_name,
@@ -4409,7 +5176,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                             queue=False,
                                             message_type="quality_review_assignment",
                                         )
-                                        review_turn = team_store.begin_member_turn(team_name, reviewer_name)
+                                        review_turn = self._begin_member_execution(team_store, team_name, reviewer_name)
                                         yield {
                                             "type": "team_event",
                                             "event": "quality_review_started",
@@ -4419,12 +5186,13 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                             "parallel": False,
                                         }
                                         review_delegated = self._run_delegated_llm(
-                                            member=review_turn["member"],
+                                            member={**self._quality_reviewer_execution_member(review_turn["member"]), "_a2a_plan_id": dynamic_plan["id"]},
                                             prompt=review_prompt,
                                             inbox_context="",
                                             timeout_seconds=timeout_seconds,
                                             max_tokens=max(result_max_tokens, 1800),
                                             max_tool_calls=self.TEAM_MEMBER_MAX_TOOL_CALLS,
+                                            execution_context=review_turn.get("_execution_context"), quality_review=True,
                                         )
                                         review_content = str(review_delegated.get("content", ""))
                                         review_tool_events = review_delegated.get("tool_events", [])
@@ -4442,19 +5210,16 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                                 "max_total_tokens": budget_state["max_total_tokens"],
                                                 "usage_ratio": budget_state["usage_ratio"],
                                             }
-                                        review_blocking_reason = (
-                                            _delegated_result_invalid_reason(
-                                                review_content,
-                                                review_tool_events,
-                                            )
-                                            or _quality_review_blocking_reason(review_content)
-                                        )
-                                        review_completion = team_store.complete_member_turn(
+                                        review_evidence = self._accept_delegated_evidence(review_delegated)
+                                        decision, review_blocking_reason = _quality_review_decision(review_content, review_input)
+                                        review_completion = self._complete_member_execution(team_store,
                                             team_name,
                                             reviewer_name,
                                             review_content,
-                                            ok=not review_blocking_reason,
+                                            ok=not review_blocking_reason, turn=review_turn,
+                                            evidence=review_evidence, quality_review=decision,
                                             tool_events=review_tool_events,
+                                            task_id=review_turn["task"]["id"],
                                         )
                                         results.append({
                                             "member": reviewer_name,
@@ -4465,6 +5230,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                             "tool_count": len(review_tool_events),
                                             "quality_review": True,
                                             "blocking_review": bool(review_blocking_reason),
+                                            "decision": decision, "evidence": review_evidence,
                                         })
                                         yield {
                                             "type": "team_event",
@@ -4477,11 +5243,12 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                     except Exception as exc:
                                         review_error = str(exc)
                                         try:
-                                            review_completion = team_store.complete_member_turn(
+                                            review_completion = self._complete_member_execution(team_store,
                                                 team_name,
                                                 reviewer_name,
                                                 review_error,
-                                                ok=False,
+                                                ok=False, turn=review_turn,
+                                                task_id=(review_turn or {}).get("task", {}).get("id", ""),
                                             )
                                         except Exception:
                                             review_completion = {"message": {"message": review_error}}
@@ -4491,7 +5258,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                             "status": "failed",
                                             "error": review_error,
                                             "result": "",
-                                            "quality_review": True,
+                                            "quality_review": True, "blocking_review": True,
                                         })
                                         yield {
                                             "type": "team_event",
@@ -4580,7 +5347,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                     "plan": dynamic_plan,
                                 }
 
-                                failed = [item for item in results if item.get("status") == "failed"]
+                                failed = [item for item in results if item.get("status") in {"failed", "canceled"}]
                                 blocking_reviews = [
                                     item for item in results
                                     if item.get("status") == "needs_review"
@@ -4617,209 +5384,8 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                 )
                                 for hook_event in hook_events:
                                     yield hook_event
-                            else:
-                                team_name = args.get("team_name", "")
-                                member_name = args.get("member_name", "")
-                                turn_info = None
-                                if team_name and member_name:
-                                    delegated_prompt = str(args.get("prompt", ""))[:20_000]
-                                    assignment_note = (
-                                        f"任务：{str(args.get('description', '')).strip()}\n\n"
-                                        if str(args.get("description", "")).strip()
-                                        else "任务：单成员分析\n\n"
-                                    ) + delegated_prompt
-                                    assignment_message = team_store.send_message(
-                                        team_name,
-                                        member_name,
-                                        assignment_note,
-                                        sender="leader",
-                                        read=True,
-                                        queue=False,
-                                        message_type="assignment",
-                                    )
-                                    turn_info = team_store.begin_member_turn(team_name, member_name)
-                                    member = turn_info["member"]
-                                else:
-                                    member = {"role": "delegated business analyst", "instructions": ""}
-                                    assignment_message = {}
-                                    delegated_prompt = str(args.get("prompt", ""))[:20_000]
-                                inbox = turn_info.get("inbox", []) if turn_info else []
-                                inbox_context = ""
-                                if inbox:
-                                    inbox_context = "\n\n[Unread team mailbox]\n" + "\n".join(
-                                        f"- From {msg.get('sender', '')}: {msg.get('message', '')}"
-                                        for msg in inbox
-                                    )
-                                hook_events, _hook_prompts = self._run_hook_event(
-                                    "subagent_start",
-                                    tool_name=name,
-                                    tool_args=dict(args or {}),
-                                    message=delegated_prompt[:1000],
-                                )
-                                for hook_event in hook_events:
-                                    yield hook_event
-                                if team_name and member_name:
-                                    yield {
-                                        "type": "team_event",
-                                        "event": "member_started",
-                                        "team": team_name,
-                                        "member": member_name,
-                                        "description": args.get("description", ""),
-                                        "message": assignment_message,
-                                    }
-                                try:
-                                    delegated = self._run_delegated_llm(
-                                        member=member,
-                                        prompt=delegated_prompt,
-                                        inbox_context=inbox_context,
-                                        timeout_seconds=self.DELEGATED_TIMEOUT_SECONDS,
-                                        max_tokens=2000,
-                                        max_tool_calls=self.TEAM_MEMBER_MAX_TOOL_CALLS,
-                                    )
-                                    tool_result = str(delegated.get("content", ""))
-                                    tool_events = delegated.get("tool_events", [])
-                                except Exception as exc:
-                                    tool_events = []
-                                    if team_name and member_name:
-                                        completion = team_store.complete_member_turn(
-                                            team_name, member_name, str(exc), ok=False, tool_events=tool_events
-                                        )
-                                        yield {
-                                            "type": "team_event",
-                                            "event": "member_failed",
-                                            "team": team_name,
-                                            "member": member_name,
-                                            "message": completion.get("message", {}),
-                                        }
-                                    raise
-                                if team_name and member_name:
-                                    invalid_reason = _delegated_result_invalid_reason(
-                                        tool_result,
-                                        tool_events,
-                                    )
-                                    completion = team_store.complete_member_turn(
-                                        team_name,
-                                        member_name,
-                                        tool_result,
-                                        ok=not invalid_reason,
-                                        tool_events=tool_events,
-                                    )
-                                    yield {
-                                        "type": "team_event",
-                                        "event": "member_failed" if invalid_reason else "member_idle",
-                                        "team": team_name,
-                                        "member": member_name,
-                                        "message": completion.get("message", {}),
-                                    }
-                                    review_result = None
-                                    if member_name != "质量复核员":
-                                        reviewer = team_store.ensure_quality_reviewer(team_name)
-                                        reviewer_name = str(reviewer.get("name") or "质量复核员")
-                                        review_prompt = (
-                                            "你是团队固定质量复核员，请作为第二道屏障独立复核单成员输出。\n"
-                                            f"硬规则：最多调用 {self.TEAM_MEMBER_MAX_TOOL_CALLS} 次只读工具；"
-                                            "抽查关键数字即可，工具调用后必须输出最终 Markdown。\n"
-                                            "检查关键数字是否有工具证据、SQL/样本/分母/时间窗是否一致、"
-                                            "是否有工具错误、空输出或无字段支撑的业务归因。\n"
-                                            "输出 Markdown，必须包含：通过项、需修正项、不可验证项、建议补充查询。\n\n"
-                                            + json.dumps({
-                                                "team": team_name,
-                                                "member": member_name,
-                                                "description": args.get("description", ""),
-                                                "result": str(tool_result)[:2200],
-                                            }, ensure_ascii=False)
-                                        )[:8000]
-                                        try:
-                                            review_message = team_store.send_message(
-                                                team_name,
-                                                reviewer_name,
-                                                "任务：固定质量复核\n\n" + review_prompt,
-                                                sender="leader",
-                                                read=True,
-                                                queue=False,
-                                                message_type="quality_review_assignment",
-                                            )
-                                            review_turn = team_store.begin_member_turn(team_name, reviewer_name)
-                                            yield {
-                                                "type": "team_event",
-                                                "event": "quality_review_started",
-                                                "team": team_name,
-                                                "member": reviewer_name,
-                                                "message": review_message,
-                                            }
-                                            review_delegated = self._run_delegated_llm(
-                                                member=review_turn["member"],
-                                                prompt=review_prompt,
-                                                inbox_context="",
-                                                timeout_seconds=self.DELEGATED_TIMEOUT_SECONDS,
-                                                max_tokens=1800,
-                                                max_tool_calls=self.TEAM_MEMBER_MAX_TOOL_CALLS,
-                                            )
-                                            review_content = str(review_delegated.get("content", ""))
-                                            review_events = review_delegated.get("tool_events", [])
-                                            review_blocking_reason = (
-                                                _delegated_result_invalid_reason(
-                                                    review_content,
-                                                    review_events,
-                                                )
-                                                or _quality_review_blocking_reason(review_content)
-                                            )
-                                            review_completion = team_store.complete_member_turn(
-                                                team_name,
-                                                reviewer_name,
-                                                review_content,
-                                                ok=not review_blocking_reason,
-                                                tool_events=review_events,
-                                            )
-                                            review_result = {
-                                                "member": reviewer_name,
-                                                "role": "quality_reviewer",
-                                                "status": "needs_review" if review_blocking_reason else "idle",
-                                                "error": review_blocking_reason,
-                                                "result": review_content,
-                                                "tool_count": len(review_events),
-                                                "blocking_review": bool(review_blocking_reason),
-                                            }
-                                            yield {
-                                                "type": "team_event",
-                                                "event": "quality_review_completed",
-                                                "team": team_name,
-                                                "member": reviewer_name,
-                                                "message": review_completion.get("message", {}),
-                                            }
-                                        except Exception as exc:
-                                            review_result = {
-                                                "member": "质量复核员",
-                                                "role": "quality_reviewer",
-                                                "status": "failed",
-                                                "error": str(exc),
-                                            }
-                                    if invalid_reason:
-                                        delegate_status = "failed"
-                                    elif review_result and review_result.get("blocking_review"):
-                                        delegate_status = "needs_review"
-                                    else:
-                                        delegate_status = completion.get("status", "idle")
-                                    tool_result = {
-                                        "team": team_name,
-                                        "member": member_name,
-                                        "status": delegate_status,
-                                        "error": invalid_reason,
-                                        "consumed_messages": len(inbox),
-                                        "result": tool_result,
-                                        "tool_count": len(tool_events),
-                                        "quality_review": review_result,
-                                        "delivered_to": "leader",
-                                    "dynamic_plan_id": dynamic_plan["id"],
-                                    }
-                                hook_events, _hook_prompts = self._run_hook_event(
-                                    "subagent_stop",
-                                    tool_name=name,
-                                    tool_args=dict(args or {}),
-                                    message=str(tool_result)[:1000],
-                                )
-                                for hook_event in hook_events:
-                                    yield hook_event
+                            elif name == "agent_delegate":
+                                tool_result = yield from self._delegate_member_task(args)
                         elif name == "plan_complete":
                             tool_result = {
                                 "summary": args.get("summary", ""),
@@ -4864,6 +5430,8 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                         else:
                             tool_result = f"Unknown tool: {name}"
 
+                    except ExecutionStopped:
+                        raise
                     except Exception as exc:
                         tool_result = f"工具执行错误 [{name}]: {exc}"
                         log.error("[tool] %s FAILED (%.2fs): %s", name, time.monotonic() - _tool_t0, exc)
@@ -4893,7 +5461,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                         if _vr is not None:
                             tool_result = _vr
 
-                    envelope = make_tool_result(
+                    envelope = self._make_execution_tool_result(
                         name,
                         tool_result,
                         sources=tool_sources,
@@ -4910,6 +5478,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                         _allowed_tool_result_artifacts,
                         envelope.artifacts,
                         session_id=self._session_id,
+                        limit=max(20, len(_allowed_tool_result_artifacts) + len(envelope.artifacts)),
                     )
                     # SQL execution errors (column/table not found, syntax, engine
                     # errors) are real errors even when the AST security check
@@ -4970,68 +5539,6 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
 
             # ── Final text response ───────────────────────────────────────────
             else:
-                # Text fallback: some providers (e.g. MiniMax-M3) emit the
-                # display_diagram tool call as pseudo-XML inside the reply text
-                # instead of via native tool_calls. Parse and execute it here so
-                # the canvas still renders.
-                _fallback_calls = _parse_text_fallback_tool_calls(full_content)
-                if _fallback_calls and not tc_acc:
-                    from agent.tools.business.diagram import (
-                        handle_display_diagram,
-                        handle_edit_diagram,
-                    )
-                    log.info(
-                        "[tool] text-fallback recovered %d tool call(s) from reply text: %s",
-                        len(_fallback_calls),
-                        [n for n, _ in _fallback_calls],
-                    )
-                    for fb_name, fb_args in _fallback_calls:
-                        _fb_t0 = time.monotonic()
-                        yield {"type": "tool_start", "tool": fb_name, "display": fb_name}
-                        try:
-                            if fb_name == "display_diagram":
-                                fb_result = handle_display_diagram(fb_args, session_id=self._session_id)
-                            elif fb_name == "edit_diagram":
-                                fb_result = handle_edit_diagram(fb_args, session_id=self._session_id)
-                            else:
-                                fb_result = {"ok": False, "error": f"unknown fallback tool {fb_name}"}
-                        except Exception as exc:
-                            fb_result = {"ok": False, "error": str(exc)}
-                            log.error("[tool] text-fallback %s FAILED: %s", fb_name, exc)
-                        if isinstance(fb_result, dict) and fb_result.get("ok"):
-                            yield {
-                                "type": "canvas_event",
-                                "canvas_action": "diagram_update",
-                                "xml": fb_result.get("xml", ""),
-                                "project_id": (fb_result.get("project") or {}).get("id", "")
-                                or fb_args.get("project_id", ""),
-                            }
-                        yield {
-                            "type": "tool_result",
-                            "tool": fb_name,
-                            "ok": bool(isinstance(fb_result, dict) and fb_result.get("ok")),
-                            "error": fb_result.get("error") if isinstance(fb_result, dict) else "",
-                            "content": str(fb_result)[:500],
-                            "elapsed_seconds": round(time.monotonic() - _fb_t0, 3),
-                        }
-                        log.info(
-                            "[tool] text-fallback %s OK  %.2fs  ok=%s",
-                            fb_name,
-                            time.monotonic() - _fb_t0,
-                            bool(isinstance(fb_result, dict) and fb_result.get("ok")),
-                        )
-                    # Strip the pseudo-XML tool tags from the visible reply
-                    # so the user only sees the diagram + any plain commentary.
-                    _stripped = full_content
-                    for _tn in _TEXT_FALLBACK_TOOL_NAMES:
-                        _stripped = re.sub(
-                            rf"<{_tn}\b[^>]*>[\s\S]*?</{_tn}>",
-                            "",
-                            _stripped,
-                            flags=re.IGNORECASE,
-                        )
-                    full_content = _stripped.strip()
-
                 _missing_skill_tools = _missing_required_skill_tools(
                     trusted_skill_name, _successful_tool_names,
                 )
@@ -5113,11 +5620,13 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                 # tool results from this conversation (or to user/SQL-argument
                 # context). Unsupported values get one repair round; anything
                 # still unsupported afterwards is disclosed in a footnote.
-                if _successful_tool_names & NUMBER_EVIDENCE_TOOLS:
+                if (_successful_tool_names | self._turn_state().get("data_tools", set())) & NUMBER_EVIDENCE_TOOLS:
                     _ev_texts, _ctx_texts = collect_number_evidence(messages)
+                    _all_number_evidence = [*_ev_texts, *self._turn_state().get("number_evidence", [])]
                     _unsupported_keys, _unsupported_total = audit_report_numbers(
-                        full_content, _ev_texts, _ctx_texts,
+                        full_content, _all_number_evidence, _ctx_texts,
                     )
+                    _number_gaps = number_evidence_gaps(full_content, _all_number_evidence, _ctx_texts)
                     if _unsupported_keys:
                         if _number_gate_retries < _MAX_NUMBER_GATE_RETRIES:
                             _number_gate_retries += 1
@@ -5137,6 +5646,7 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                                         "exact value from the tool results, or "
                                         "remove the claim. Never keep a number "
                                         "that no tool result supports."
+                                        + (" Missing evidence: " + json.dumps(_number_gaps, ensure_ascii=False) if _number_gaps else "")
                                     ),
                                 },
                             ])
@@ -5166,6 +5676,11 @@ class BusinessAgent(DataToolsMixin, ExportToolsMixin):
                             + ", ".join(_unsupported_keys)
                             + "."
                         )
+                        if _number_gaps:
+                            full_content += self._tt(
+                                " 百分比缺口：缺少带单位的比率来源或同单位分子、分母（",
+                                " Percentage evidence missing: a rate with declared units or same-unit numerator/denominator (",
+                            ) + ", ".join(gap["value"] for gap in _number_gaps) + ")."
 
                 for chart_item in pending_charts:
                     yield {"type": "chart_html", **chart_item}

@@ -10,6 +10,10 @@ from typing import Any, Mapping
 from data.workflow_run_store import WorkflowRunStore, WorkflowRunStoreError
 from data.workflow_store import WorkflowStore, WorkflowStoreError
 from data.workspace import workspace_manager
+from agent.execution import ExecutionCancelled, ExecutionContext
+from agent.teams.review import QUALITY_REVIEW_INSTRUCTION, QualityReviewError, parse_quality_review
+from agent.tools.invocation import ToolInvocationPolicy
+from agent.tools.registry import BUILTIN_TOOL_REGISTRY
 
 from .models import WorkflowContractError, WorkflowErrorCode
 from .scheduler import WorkflowScheduler
@@ -134,6 +138,40 @@ class WorkflowRuntime:
         )
 
     def _execute_node(self, node: dict, materials: dict, _ctx) -> dict[str, Any]:
+        """Keep the Job/limiter lease until all descendant bodies really exit."""
+        parent = getattr(_ctx, "execution_context", None)
+        cancellation_check = getattr(_ctx, "is_canceled", None)
+        timeout = float(dict(node.get("limits") or {}).get("max_run_seconds") or 300)
+        context = (
+            parent.child(timeout_seconds=timeout, cancellation_check=cancellation_check)
+            if isinstance(parent, ExecutionContext) else
+            ExecutionContext(request_id=str(getattr(_ctx, "job_id", "") or ""),
+                             timeout_seconds=timeout, cancellation_check=cancellation_check)
+        )
+        snapshot = None
+        try:
+            context.checkpoint()
+            record = getattr(_ctx, "record_event", None)
+            if callable(record):
+                record("execution_started", execution=context.to_dict())
+                context.add_exit_callback(lambda: record("execution_exited", execution=context.to_dict()))
+            acquire = getattr(self.session, "acquire_data_source_snapshot", None)
+            if node.get("type") not in {"validation", "router", "export"} and callable(acquire):
+                snapshot = acquire()
+                context.add_exit_callback(snapshot.release)
+            result = self._execute_node_body(node, materials, _ctx, context, snapshot)
+            context.checkpoint()
+            return result
+        except ExecutionCancelled as exc:
+            from agent.jobs import JobCanceled
+            raise JobCanceled(str(getattr(_ctx, "job_id", "") or context.request_id)) from exc
+        finally:
+            context.acknowledge_exit()
+            # A timed-out delegate may still own an uninterruptible child. The
+            # worker must not return and release its Job's workspace lease yet.
+            context.wait_for_exit()
+
+    def _execute_node_body(self, node: dict, materials: dict, _ctx, execution_context, source_snapshot=None) -> dict[str, Any]:
         # Keep the guard in the executor as defense in depth; normal dispatch
         # is rejected by _preflight_node before it creates a Job.
         self._preflight_node(node)
@@ -142,7 +180,7 @@ class WorkflowRuntime:
         if node.get("type") == "router":
             return self._execute_router_node(node, materials)
         if node.get("type") == "sql":
-            return self._execute_sql_node(node)
+            return self._execute_sql_node(node, execution_context=execution_context, source_snapshot=source_snapshot)
         if node.get("type") == "export":
             return self._execute_export_node(node, materials)
 
@@ -154,7 +192,24 @@ class WorkflowRuntime:
         is_controlled_cleaning = "write_data" in set(node.get("side_effects") or ())
         agent = _build_agent(
             self.session,
-            workspace_id=self.workspace.workspace_id,
+            workspace_id=self.workspace.workspace_id, source_snapshot=source_snapshot,
+        )
+        agent._execution_context = execution_context
+        tools = frozenset(profile.get("allowed_tools") or ())
+        side_effects = set(node.get("side_effects") or ())
+        approved_tools = frozenset(
+            name for name in tools
+            if (spec := BUILTIN_TOOL_REGISTRY.get(name)) is not None
+            and ((spec.category == "write" and "write_data" in side_effects)
+                 or (spec.category == "output" and "export_file" in side_effects)
+                 or (spec.side_effect == "external" and "network" in side_effects))
+        )
+        agent._tool_invocation_policy = ToolInvocationPolicy(
+            allowed_tools=tools, discovered_tools=tools,
+            has_data_source=getattr(agent, "data_source", None) is not None,
+            has_workspace=True, has_runtime=True,
+            read_only=not bool(side_effects & {"write_data", "export_file", "network"}),
+            workflow_approved_tools=approved_tools,
         )
         if is_controlled_cleaning:
             persistent_source = self._workspace_persistent_source()
@@ -162,11 +217,14 @@ class WorkflowRuntime:
             agent._all_sources = [persistent_source]
             agent._merged_source = None
             agent._combined_schema = persistent_source.get_schema()
-        model_policy = str(profile.get("model_policy") or "inherit").strip()
-        if model_policy and model_policy != "inherit":
-            # A Workflow profile is an immutable capability revision; honor its
-            # model selection without changing the interactive session default.
-            agent.model = model_policy
+        from agent.teams.model_policy import resolve_profile_model
+        routing = resolve_profile_model(
+            profile, inherited_model=str(getattr(agent, "model", "") or ""),
+            inherited_provider=str(getattr(agent, "_provider", "") or ""),
+            tier_mapping=getattr(agent, "_approved_role_model_policy", None),
+            gate=getattr(agent, "_model_routing_gate", None),
+        )
+        agent.model = routing["model"]
         output_names = list(node.get("output_contract") or [])
         node_limits = dict(node.get("limits") or {})
         verifier_config = dict(node.get("verifier") or {})
@@ -179,8 +237,7 @@ class WorkflowRuntime:
                 "You are an independent verifier. Do not rewrite the deliverable. "
                 "Assess only the supplied materials against these acceptance standards:\n"
                 + standards
-                + "\nReturn JSON only with keys: decision (pass|rework|escalate), "
-                "issues (string array), evidence (string array).\n\n"
+                + "\n" + QUALITY_REVIEW_INSTRUCTION + "\n\n"
             )
         operating_report_instruction = ""
         if "operating_report" in output_names:
@@ -247,6 +304,7 @@ class WorkflowRuntime:
             member={
                 "role": profile["role"],
                 "instructions": profile["instructions"],
+                "_structured_output_only": requires_json_output,
             },
             prompt=prompt,
             timeout_seconds=int(node_limits.get("max_run_seconds") or 300),
@@ -388,28 +446,13 @@ class WorkflowRuntime:
     @staticmethod
     def _parse_verifier_result(content: str) -> dict[str, Any]:
         try:
-            parsed = json.loads(content)
-        except (TypeError, ValueError) as exc:
+            # Historical Workflow contracts declare decision/issues/evidence;
+            # teams require missing_evidence explicitly, Workflow stays additive.
+            return parse_quality_review(content)
+        except QualityReviewError as exc:
             raise WorkflowContractError(
-                WorkflowErrorCode.OUTPUT_CONTRACT_VIOLATION,
-                "verifier must return a JSON decision",
+                WorkflowErrorCode.OUTPUT_CONTRACT_VIOLATION, str(exc),
             ) from exc
-        if not isinstance(parsed, Mapping) or parsed.get("decision") not in {
-            "pass", "rework", "escalate",
-        }:
-            raise WorkflowContractError(
-                WorkflowErrorCode.OUTPUT_CONTRACT_VIOLATION,
-                "verifier decision must be pass, rework, or escalate",
-            )
-        for key in ("issues", "evidence"):
-            if not isinstance(parsed.get(key), list) or any(
-                not isinstance(item, str) for item in parsed[key]
-            ):
-                raise WorkflowContractError(
-                    WorkflowErrorCode.OUTPUT_CONTRACT_VIOLATION,
-                    f"verifier {key} must be a string array",
-                )
-        return dict(parsed)
 
     @staticmethod
     def _execute_validation_node(node: Mapping[str, Any], materials: Mapping[str, Any]) -> dict[str, Any]:
@@ -486,7 +529,9 @@ class WorkflowRuntime:
         output_names = list(node.get("output_contract") or [])
         return {name: value for name in output_names} or {"route": value}
 
-    def _execute_sql_node(self, node: Mapping[str, Any]) -> dict[str, Any]:
+    def _execute_sql_node(
+        self, node: Mapping[str, Any], *, execution_context: ExecutionContext | None = None, source_snapshot=None,
+    ) -> dict[str, Any]:
         """Execute a declared read-only query after the shared AST validation."""
         from agent.validate import validate_tool_args
         from api.chat import _build_agent
@@ -501,8 +546,18 @@ class WorkflowRuntime:
         )
         if error:
             raise WorkflowContractError(WorkflowErrorCode.OUTPUT_CONTRACT_VIOLATION, error)
-        agent = _build_agent(self.session, workspace_id=self.workspace.workspace_id)
+        agent = _build_agent(self.session, workspace_id=self.workspace.workspace_id, source_snapshot=source_snapshot)
+        agent._execution_context = execution_context
+        policy = ToolInvocationPolicy(
+            has_data_source=getattr(agent, "data_source", None) is not None,
+            has_workspace=True, has_runtime=True, allowed_tools=frozenset({"query_data"}), read_only=True,
+        )
+        policy.authorize("query_data", {"sql": sql})
+        if execution_context is not None:
+            execution_context.checkpoint()
         text, refs = agent._tool_query_data_with_refs(sql)
+        if execution_context is not None:
+            execution_context.checkpoint()
         if text.startswith("SQL Error:") or text.startswith("No data source"):
             raise RuntimeError(text)
         result = {"sql": sql, "result": text, "sources": refs}

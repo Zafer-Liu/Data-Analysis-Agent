@@ -16,6 +16,10 @@ from .state import session_manager, config_manager, chart_store, check_session_o
 from agent.activation import ActivationContext, INTERNAL_ACTIONS
 from agent.agent import BusinessAgent
 from agent.commands import CommandLoader, CommandType
+from agent.execution import (
+    ExecutionCancelled, ExecutionDeadlineExceeded, ExecutionStopped,
+    begin_request_execution, cancel_request_execution, finish_request_execution,
+)
 from agent.model_call_audit import audit_model_call
 try:
     from agent.memory import (
@@ -248,8 +252,9 @@ def _build_team_context(sid: str, workspace_id: str = "", *, max_teams: int = 6,
         return ""
 
     lines = [
-        "Existing workspace analyst teams are available. Use team_status when details may be stale, "
-        "send_message to queue work for members, and team_delegate for parallel bounded member turns.",
+        "Existing session analyst teams are available. Use team_status when details may be stale, "
+        "agent_create to construct a member, agent_delegate to execute one, and team_delegate for parallel turns. "
+        "send_message only delivers mailbox context; it does not execute a member.",
         "Delegated members have limited read-only tools for schema, data queries, knowledge search, "
         "and workspace file reading. They cannot mutate data or create nested teams.",
         "For a fresh user request, do not synthesize old member results as if they were new work. "
@@ -562,7 +567,7 @@ def _build_agent(
     if not prompt_cache_mode:
         prompt_cache_mode = provider_defaults.get("prompt_cache_mode", "none")
 
-    return BusinessAgent(
+    agent = BusinessAgent(
         client=client, model=cfg.model,
         data_source=(source_snapshot.primary if source_snapshot is not None else sess.data_source),
         combined_schema=combined_schema,
@@ -598,6 +603,15 @@ def _build_agent(
             )
         ),
     )
+    from Function.Knowledge.ontology_store import source_descriptors
+    entries = (source_snapshot.entries if source_snapshot is not None
+               else sess._active_entries() if hasattr(sess, "_active_entries") else [])
+    agent._ontology_sources = source_descriptors(entries, sess.session_id)
+    from infrastructure.optimization_config import load_optimization_config
+    optimization = load_optimization_config()
+    agent._approved_role_model_policy = optimization.get("tier_mapping")
+    agent._model_routing_gate = optimization.get("gate")
+    return agent
 
 
 # ── Session lifecycle ──────────────────────────────────────────────────────
@@ -741,8 +755,15 @@ def get_cost_events(sid: str):
         return jsonify({"error": "trend_days must be an integer", "code": "invalid_request"}), 400
     from data.cost_event_store import get_cost_event_store
     store = get_cost_event_store()
+    from agent.context_optimization import recommend_context_optimization
+    from infrastructure.optimization_config import load_optimization_config
+    session = session_manager.get(sid)
+    breakdowns = list(getattr(session, "usage_breakdowns", None) or [])
+    latest_breakdown = breakdowns[-1] if breakdowns else {}
     return jsonify({
         "ok": True,
+        "context_advice": recommend_context_optimization(latest_breakdown, gate=load_optimization_config().get("gate")),
+        "unavailable_usage_calls": getattr(session, "unavailable_usage_calls", 0),
         "summary": store.summary(session_id=sid),
         "cache_trends": store.cache_trends(session_id=sid, days=trend_days),
         "events": store.list_events(session_id=sid, limit=limit),
@@ -852,8 +873,17 @@ def stop_session(sid: str):
     if not allowed:
         return jsonify({"error": "无权访问此会话", "code": "forbidden"}), 403
     sess = session_manager.get(sid)
-    if sess:
-        sess.cancel_requested = True
+    body = request.get_json(silent=True)
+    request_id = str(body.get("request_id") or body.get("requestId") or "") if isinstance(body, dict) else ""
+    context = cancel_request_execution(sid, request_id=request_id)
+    if sess and context is not None:
+        sess.cancel_requested = True  # UI compatibility; execution uses the captured token.
+        job_id = str(getattr(context, "job_id", "") or "")
+        runner = getattr(sess, "job_runner", None)
+        if runner is not None and job_id:
+            # cancel marks a running tracked Job canceling; cancel_tracked would
+            # acknowledge it and release the workspace before its body exits.
+            runner.cancel(job_id)
         try:
             from agent.hooks.models import HookContext
             from data.hooks_store import load_engine
@@ -865,7 +895,8 @@ def stop_session(sid: str):
         except Exception as exc:
             log.debug("[hooks] stop skipped sid=%s error=%s", sid, exc)
         log.info("[session] stop requested  sid=%s", sid)
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "stopping": context is not None,
+                    "request_id": context.request_id if context is not None else request_id})
 
 
 # ── Prompt suggestion ───────────────────────────────────────────────────────
@@ -1025,7 +1056,6 @@ def chat_stream(sid: str):
     added_tools = sess.record_discovered_tools(discovery_message)
     if added_tools:
         log.info("[tools] discovered sid=%s tools=%s", sid, added_tools)
-    sess.cancel_requested = False
     _command_usage_before = (
         sess.total_input_tokens,
         sess.total_output_tokens,
@@ -1070,12 +1100,61 @@ def chat_stream(sid: str):
             except FileHistoryError:
                 log.exception("[filehistory] snapshot finalize failed sid=%s", sid)
         return jsonify({"error": f"无法固定当前数据源：{exc}"}), 500
-    sess.record_activation(activation, message, conversation_job_id)
-    sess.job_runner.append_tracked_event(conversation_job_id, {
-        "type": "conversation_activation",
-        "job_id": conversation_job_id,
-        "activation": activation.to_record(),
-    })
+    request_id = str(d.get("request_id") or d.get("requestId") or uuid.uuid4().hex)[:200]
+    try:
+        execution_context = begin_request_execution(
+            sid, request_id=request_id,
+            timeout_seconds=1800,
+            cancellation_check=lambda: (sess.job_runner.get_status(conversation_job_id) or {}).get("status") in {"canceling", "canceled"},
+        )
+    except ExecutionStopped:
+        source_snapshot.release()
+        sess.job_runner.fail_tracked(conversation_job_id, "Another conversation request is still executing.")
+        if file_history is not None and file_history_snapshot_id:
+            file_history.finalize_snapshot(file_history_snapshot_id, "failed")
+        return jsonify({"error": "当前回合仍在退出，请稍后重试。", "code": "execution_in_progress",
+                        "requestId": request_id}), 409
+    execution_context.job_id = conversation_job_id
+    execution_context.add_exit_callback(source_snapshot.release)
+    sess.cancel_requested = False
+    conversation_outcome = None
+
+    def _settle_conversation(kind: str, payload=None) -> None:
+        nonlocal conversation_outcome
+        if conversation_outcome is not None:
+            return
+        conversation_outcome = kind
+        # Tracked Job APIs release workspace leases. Invoke them only after the
+        # request body and all delegated executors have actually exited.
+        def settle() -> None:
+            if kind == "canceled" or execution_context.cancellation_requested:
+                sess.job_runner.cancel_tracked(conversation_job_id)
+            elif execution_context.deadline is not None and execution_context.deadline <= time.monotonic():
+                sess.job_runner.fail_tracked(conversation_job_id, "Execution deadline exceeded")
+            elif kind == "failed":
+                sess.job_runner.fail_tracked(conversation_job_id, str(payload or "Conversation failed."))
+            else:
+                sess.job_runner.succeed_tracked(conversation_job_id, payload)
+        execution_context.add_exit_callback(settle)
+
+    try:
+        sess.record_activation(activation, message, conversation_job_id)
+        sess.job_runner.append_tracked_event(conversation_job_id, {
+            "type": "conversation_activation",
+            "job_id": conversation_job_id,
+            "activation": activation.to_record(),
+        })
+    except Exception:
+        log.exception("[chat] activation setup failed sid=%s", sid)
+        _settle_conversation("failed", "Conversation activation setup failed.")
+        finish_request_execution(sid, execution_context)
+        if file_history is not None and file_history_snapshot_id:
+            try:
+                file_history.finalize_snapshot(file_history_snapshot_id, "failed")
+            except FileHistoryError:
+                log.exception("[filehistory] snapshot finalize failed sid=%s", sid)
+        return jsonify({"error": "会话初始化失败。", "code": "execution_setup_failed",
+                        "requestId": execution_context.request_id}), 500
 
     from api.saved_sessions import _visible_msg_count
     _turn_start = time.monotonic()
@@ -1087,12 +1166,13 @@ def chat_stream(sid: str):
         from agent.events import serialize_event
         return f"data: {json.dumps(serialize_event(obj), ensure_ascii=False)}\n\n"
 
-    def generate():
+    def generate_events():
         # Yield immediately so Flask flushes response headers before any blocking
         # setup work (agent build, hook loading, schema snapshot). Without this,
         # the frontend `await fetch()` blocks until the first real event arrives,
         # keeping the typing-dots invisible for the entire setup phase.
-        yield _sse({"type": "agent_activity", "message": ""})
+        yield _sse({"type": "agent_activity", "message": "", "request_id": execution_context.request_id})
+        execution_context.checkpoint()
 
         runner = sess.job_runner
         command_metric_recorded = False
@@ -1149,14 +1229,17 @@ def chat_stream(sid: str):
                 hook_context=hook_context,
                 user_id=user_id,
             )
-        except ValueError as exc:
+            agent._execution_context = execution_context
+            execution_context.checkpoint()
+        except ExecutionStopped:
+            raise
+        except Exception as exc:
             log.error("[chat] build_agent failed  sid=%s  error=%s", sid, exc)
             public_message = (
                 "模型服务暂时不可用，请稍后重试。"
                 if hosted_model else str(exc)
             )
-            runner.fail_tracked(conversation_job_id, public_message)
-            source_snapshot.release()
+            _settle_conversation("failed", public_message)
             _record_prompt_command_metric("error", "agent_build_failed")
             yield _sse({"type": "error", "message": public_message})
             yield _sse({"type": "done"})
@@ -1317,7 +1400,7 @@ def chat_stream(sid: str):
         teams_enabled = bool(d.get("teams_enabled"))
         auto_match_skill = d.get("auto_match_skill", True)
         memory_enabled = d.get("memory_enabled", True)
-        team_context = _build_team_context(sid, fixed_workspace_id) if teams_enabled else ""
+        team_context = _build_team_context(sid, fixed_workspace_id)
 
         conversation_scope = runner.conversation_scope(conversation_job_id)
         conversation_scope.__enter__()
@@ -1351,13 +1434,14 @@ def chat_stream(sid: str):
                     getattr(sess, "recent_artifacts", []) or []
                 ),
             ):
-                if sess.cancel_requested:
-                    log.info("[chat] cancelled by user  sid=%s", sid)
-                    runner.cancel_tracked(conversation_job_id)
-                    sess.cancel_requested = False
-                    yield _sse({"type": "stopped"})
-                    return
-
+                if event.get("model_calls"):
+                    try:
+                        from data.cost_recording import record_model_calls
+                        record_model_calls(event["model_calls"], session_id=sid,
+                                           workspace_id=fixed_workspace_id, scope_type="session", scope_id=sid)
+                    except Exception:
+                        log.exception("[cost-events] failed to record model attempts sid=%s", sid)
+                execution_context.checkpoint()
                 etype = event.get("type")
                 if etype == "tool_start":
                     _start_step(event)
@@ -1476,9 +1560,12 @@ def chat_stream(sid: str):
                 elif etype == "ppt_scheme":
                     sess.ppt_color_scheme = event.get("scheme", "mckinsey")
                 elif etype == "usage":
+                    measured_usage = event.get("prompt_tokens") is not None and event.get("completion_tokens") is not None
+                    if isinstance(event.get("prompt_breakdown"), dict):
+                        measured_usage = measured_usage and event["prompt_breakdown"].get("usage_available", True) is not False
                     sess.record_usage(
-                        event.get("prompt_tokens", 0),
-                        event.get("completion_tokens", 0),
+                        event.get("prompt_tokens"),
+                        event.get("completion_tokens"),
                         breakdown=event.get("prompt_breakdown"),
                         cached_input_tokens=event.get("cached_input_tokens", 0),
                         cache_write_tokens=event.get("cache_write_tokens", 0),
@@ -1491,7 +1578,7 @@ def chat_stream(sid: str):
                     usage_hosted_model = config_manager.get_hosted_model(
                         effective_provider
                     )
-                    if mode == "cloud" and usage_hosted_model:
+                    if mode == "cloud" and usage_hosted_model and measured_usage:
                         from data.auth_store import record_usage_event
                         record_usage_event(
                             user_id,
@@ -1522,8 +1609,9 @@ def chat_stream(sid: str):
                         from data.cost_event_store import get_cost_event_store
                         breakdown = event.get("prompt_breakdown")
                         breakdown = breakdown if isinstance(breakdown, dict) else {}
-                        get_cost_event_store().record(
-                            event_id=str(event.get("usage_event_id") or uuid.uuid4().hex),
+                        if not event.get("model_calls"):
+                            get_cost_event_store().record(
+                                event_id=str(event.get("usage_event_id") or uuid.uuid4().hex),
                             occurred_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                             scope_type="session",
                             scope_id=sid,
@@ -1531,12 +1619,18 @@ def chat_stream(sid: str):
                             session_id=sid,
                             provider=str(breakdown.get("provider") or sess.model_provider or ""),
                             model=str(breakdown.get("model") or sess.model or ""),
-                            input_tokens=event.get("prompt_tokens", 0),
-                            output_tokens=event.get("completion_tokens", 0),
-                            cached_input_tokens=event.get("cached_input_tokens", 0),
-                            cache_write_tokens=event.get("cache_write_tokens", 0),
+                            input_tokens=event.get("prompt_tokens") if measured_usage else None,
+                            output_tokens=event.get("completion_tokens") if measured_usage else None,
+                            cached_input_tokens=event.get("cached_input_tokens") if measured_usage else None,
+                            cache_write_tokens=event.get("cache_write_tokens") if measured_usage else None,
                             latency_ms=event.get("usage_latency_ms"),
                             attribution=breakdown,
+                            status=str(event.get("status") or "succeeded"),
+                            usage_source=str(breakdown.get("usage_source") or "provider_reported") if measured_usage else "unavailable",
+                            measurement_mode=str(breakdown.get("measurement_mode") or "actual_model"),
+                            model_call_id=str(event.get("model_call_id") or event.get("usage_event_id") or ""),
+                            attempt=max(1, int(event.get("attempt") or 1)),
+                            retry_of_event_id=str(event.get("retry_of_event_id") or ""),
                         )
                     except Exception:
                         log.exception("[cost-events] failed to record session usage sid=%s", sid)
@@ -1546,6 +1640,8 @@ def chat_stream(sid: str):
                         "max_output_tokens": cfg.max_output_tokens if cfg else None,
                         "session_total_input":  sess.total_input_tokens,
                         "session_total_output": sess.total_output_tokens,
+                        "usage_available": measured_usage,
+                        "unavailable_usage_calls": getattr(sess, "unavailable_usage_calls", 0),
                     }
                     if usage_hosted_model:
                         # Upstream model IDs are deployment secrets. Usage SSE
@@ -1583,6 +1679,7 @@ def chat_stream(sid: str):
             for tool, queue in list(pending_steps.items()):
                 while queue:
                     _finish_step(tool, ok=not bool(stream_error), error=stream_error)
+            execution_context.checkpoint()
             completed_normally = True
             final_answer = "".join(collected).strip()
             if not final_answer:
@@ -1642,16 +1739,17 @@ def chat_stream(sid: str):
                 for notification in hook_engine.run_hooks("turn_end", end_context):
                     yield _sse(notification.to_event())
             _collect_downloads(final_answer)
+            execution_context.checkpoint()
             if stream_error:
-                runner.fail_tracked(conversation_job_id, stream_error)
+                _settle_conversation("failed", stream_error)
             else:
-                runner.succeed_tracked(conversation_job_id, {
+                _settle_conversation("succeeded", {
                     "answer": final_answer,
                     "step_count": step_count,
                     "chart_ids": turn_chart_ids,
                     "activation": activation.to_record(),
                 })
-                if not sess.cancel_requested:
+                if not execution_context.cancellation_requested:
                     try:
                         if memory_enabled and _schedule_memory_extraction is not None:
                             _schedule_memory_extraction(
@@ -1692,13 +1790,19 @@ def chat_stream(sid: str):
                 reply_preview,
             )
 
+        except ExecutionCancelled:
+            _settle_conversation("canceled")
+            yield _sse({"type": "stopped", "request_id": execution_context.request_id})
+        except ExecutionDeadlineExceeded as exc:
+            _settle_conversation("failed", str(exc))
+            yield _sse({"type": "error", "code": "execution_timeout", "message": "本轮执行已超时。"})
         except Exception as exc:
             log.exception("[chat] unhandled agent error  sid=%s", sid)
             public_message = (
                 "模型服务暂时不可用，请稍后重试。"
                 if hosted_model else f"内部错误：{exc}"
             )
-            runner.fail_tracked(conversation_job_id, public_message)
+            _settle_conversation("failed", public_message)
             if hook_engine and hook_context:
                 hook_error = (
                     "模型服务暂时不可用，请稍后重试。"
@@ -1711,33 +1815,70 @@ def chat_stream(sid: str):
 
         finally:
             conversation_scope.__exit__(None, None, None)
-            current = runner.get_status(conversation_job_id)
-            if current and current.get("status") not in {"succeeded", "failed", "canceled"}:
-                if sess.cancel_requested:
-                    runner.cancel_tracked(conversation_job_id)
-                    sess.cancel_requested = False
-                elif not completed_normally:
-                    runner.fail_tracked(conversation_job_id, "Conversation stream ended before completion.")
-            if file_history is not None and file_history_snapshot_id:
+            if execution_context.cancellation_requested:
+                _settle_conversation("canceled")
+            elif not completed_normally:
+                _settle_conversation("failed", "Conversation stream ended before completion.")
+
+            def record_metric_after_exit() -> None:
                 current = runner.get_status(conversation_job_id) or {}
-                try:
-                    file_history.finalize_snapshot(
-                        file_history_snapshot_id,
-                        str(current.get("status") or "interrupted"),
-                    )
-                except FileHistoryError:
-                    log.exception("[filehistory] snapshot finalize failed sid=%s", sid)
-            source_snapshot.release()
-            current = runner.get_status(conversation_job_id) or {}
-            status = str(current.get("status") or "")
-            _record_prompt_command_metric(
-                "success" if status == "succeeded" else "error",
-                "" if status == "succeeded" else (status or "stream_incomplete"),
-            )
+                status = str(current.get("status") or "")
+                _record_prompt_command_metric(
+                    "success" if status == "succeeded" else "error",
+                    "" if status == "succeeded" else (status or "stream_incomplete"),
+                )
+            execution_context.add_exit_callback(record_metric_after_exit)
             yield _sse({"type": "done"})
 
-    return Response(
+    stream_started = Event()
+
+    def generate():
+        # Cover setup failures and early stream exits as well as the main loop.
+        stream_started.set()
+        try:
+            yield from generate_events()
+        except ExecutionCancelled:
+            _settle_conversation("canceled")
+            yield _sse({"type": "stopped", "request_id": execution_context.request_id})
+            yield _sse({"type": "done"})
+        except ExecutionDeadlineExceeded as exc:
+            _settle_conversation("failed", str(exc))
+            yield _sse({"type": "error", "code": "execution_timeout", "message": "本轮执行已超时。"})
+            yield _sse({"type": "done"})
+        except Exception:
+            log.exception("[chat] stream setup failed sid=%s", sid)
+            _settle_conversation("failed", "Conversation setup failed.")
+            yield _sse({"type": "error", "message": "会话执行失败，请稍后重试。"})
+            yield _sse({"type": "done"})
+        finally:
+            if conversation_outcome is None:
+                _settle_conversation("canceled" if execution_context.cancellation_requested else "failed")
+            if file_history is not None and file_history_snapshot_id:
+                def finalize_history() -> None:
+                    current = sess.job_runner.get_status(conversation_job_id) or {}
+                    try:
+                        file_history.finalize_snapshot(file_history_snapshot_id, str(current.get("status") or "interrupted"))
+                    except FileHistoryError:
+                        log.exception("[filehistory] snapshot finalize failed sid=%s", sid)
+                execution_context.add_exit_callback(finalize_history)
+            finish_request_execution(sid, execution_context)
+
+    response = Response(
         _background_sse_relay(generate()),
         mimetype="text/event-stream",
-        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache",
+                 "X-Request-ID": execution_context.request_id},
     )
+
+    def close_unstarted_stream() -> None:
+        if not stream_started.is_set():
+            execution_context.cancel("Response closed before execution started")
+            _settle_conversation("canceled")
+            if file_history is not None and file_history_snapshot_id:
+                try:
+                    file_history.finalize_snapshot(file_history_snapshot_id, "canceled")
+                except FileHistoryError:
+                    log.exception("[filehistory] snapshot finalize failed sid=%s", sid)
+            finish_request_execution(sid, execution_context)
+    response.call_on_close(close_unstarted_stream)
+    return response

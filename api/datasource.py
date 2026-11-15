@@ -16,6 +16,7 @@ from werkzeug.utils import secure_filename
 from .state import session_manager, datasource_config_manager, check_session_ownership, require_session_ownership
 from data.connector import ExcelDataSource, CSVDataSource, SQLDataSource, GoogleSheetsDataSource, HTTPAPIDataSource
 from data.sources.excel import excel_requires_job, parse_excel_job
+from data.sources.csv import SMALL_CSV_BYTES
 from data.sources.feishu_bitable import FeishuBitableDataSource
 from data.sources.workspace_persistent import WorkspacePersistentSource
 from data.feishu_bitable_service import (
@@ -68,7 +69,7 @@ UPLOAD_DIR = _BASE_UPLOAD_DIR
 WAREHOUSE_SAVE_DIR = _BASE_WAREHOUSE_DIR
 PARSED_EXCEL_DIR = _BASE_UPLOAD_DIR / ".parsed_excel"
 PARSED_EXCEL_DIR.mkdir(parents=True, exist_ok=True)
-ALLOWED_EXTS = {".xlsx", ".xls", ".csv", ".pdf"}
+ALLOWED_EXTS = {".xlsx", ".xls", ".csv", ".parquet", ".pdf"}
 _finalize_lock = threading.RLock()
 
 
@@ -186,6 +187,18 @@ def _serialize_source(entry: dict, active_ids: set[str]) -> dict | None:
         "active": source_id in active_ids,
     }
 
+    dataset_handle = getattr(source, "handle", None)
+    if dataset_handle is not None:
+        manifest = dataset_handle.manifest
+        return {**base, "kind": "dataset", "dataset_id": manifest["dataset_id"],
+                "snapshot_id": manifest["snapshot_id"], "catalog_owner_id": manifest["owner_id"],
+                "catalog_session_id": manifest["session_id"], "catalog_workspace_id": manifest.get("workspace_id", "")}
+    cluster_config = getattr(source, "config", None)
+    connection_id = str(getattr(source, "connection_id", "") or "")
+    if connection_id and isinstance(cluster_config, dict) and cluster_config.get("kind") in {"trino", "hive", "spark_sql"}:
+        scope = getattr(getattr(source, "store", None), "scope", ())
+        return {**base, "kind": "cluster", "connection_id": connection_id,
+                "catalog_owner_id": scope[0] if scope else "local-default"}
     if isinstance(source, CSVDataSource):
         return {**base, "kind": "csv", "file_path": getattr(source, "file_path", "")}
     if isinstance(source, ExcelDataSource):
@@ -234,9 +247,39 @@ def _serialize_source(entry: dict, active_ids: set[str]) -> dict | None:
     return None
 
 
-def _restore_source(info: dict):
+def _restore_source(info: dict, *, sid: str = "", user_id: str = ""):
     kind = str(info.get("kind") or "")
     name = str(info.get("name") or "").strip()
+    if kind == "dataset":
+        from data.dataset_catalog import DatasetCatalog
+        from data.sources.dataset import DatasetDataSource
+        owner = user_id or "local-default"
+        if str(info.get("catalog_owner_id") or "") != owner:
+            raise PermissionError("Dataset snapshot belongs to another user")
+        origin_session = str(info.get("catalog_session_id") or "")
+        workspace = str(info.get("catalog_workspace_id") or "")
+        if not origin_session or len(origin_session) > 160 or len(workspace) > 160:
+            raise ValueError("Dataset snapshot scope is invalid")
+        catalog = DatasetCatalog(owner_id=owner, session_id=origin_session, workspace_id=workspace)
+        handle = catalog.get(str(info.get("dataset_id") or ""), snapshot_id=str(info.get("snapshot_id") or ""), verify=True)
+        source = DatasetDataSource(handle, name=name)
+        source._dataset_workspace_id = workspace
+        return source
+    if kind == "cluster":
+        if not sid or str(info.get("catalog_owner_id") or "") != (user_id or "local-default"):
+            raise PermissionError("Cluster source requires its owning session/user")
+        from .cluster import create_session_source
+        session = session_manager.get_or_create(sid)
+        source = create_session_source(str(info.get("connection_id") or ""), {
+            "owner_id": user_id or "local-default", "session_id": sid,
+            "workspace_id": str(getattr(session, "workspace_id", "") or ""),
+        })
+        try:
+            source.test_connection()
+        except BaseException:
+            source.close()
+            raise
+        return source
     if kind == "csv":
         file_path = str(info.get("file_path") or "")
         if not Path(file_path).is_file():
@@ -395,13 +438,13 @@ def upload_file(sid: str):
 
     for f in files:
         if not f.filename or not _allowed(f.filename):
-            errors.append(f"{f.filename}: 仅支持 .xlsx / .xls / .csv / .pdf 文件")
+            errors.append(f"{f.filename}: 仅支持 .xlsx / .xls / .csv / .parquet / .pdf 文件")
             continue
 
         display_name = f.filename
         ext = Path(f.filename).suffix.lower()
-        safe_stem = secure_filename(f.filename)
-        safe_name = safe_stem if safe_stem else f"upload_{uuid.uuid4().hex[:8]}{ext}"
+        safe_stem = secure_filename(Path(f.filename).stem)
+        safe_name = (safe_stem or f"upload_{uuid.uuid4().hex[:8]}") + ext
         save_path = upload_dir / f"{sid[:8]}_{uuid.uuid4().hex[:6]}_{safe_name}"
         f.save(str(save_path))
         register_artifact(save_path, artifact_type="upload", session_id=sid)
@@ -411,6 +454,18 @@ def upload_file(sid: str):
             log.info("[upload] saved → %s  (display: %s)", save_path, display_name)
 
         try:
+            large_dataset = ext == ".parquet" or (ext == ".csv" and save_path.stat().st_size > SMALL_CSV_BYTES)
+            large_dataset = large_dataset or (ext == ".xlsx" and save_path.stat().st_size > 5 * 1024 * 1024)
+            if large_dataset:
+                from .datasets import plan_authorized_file, submit_import_plan
+                plan = plan_authorized_file(sid, save_path, input_name=display_name)
+                submitted = submit_import_plan(sid, plan["plan_id"], idempotency_key="upload:" + save_path.name)
+                pending_jobs.append({"id": submitted["job_id"], "type": "dataset_import",
+                                     "source_name": display_name, "status": submitted["status"],
+                                     "operation_id": submitted["operation_id"]})
+                continue
+            if ext == ".xls" and save_path.stat().st_size > 5 * 1024 * 1024:
+                raise ValueError("大型 .xls 文件请先转换为 CSV、Parquet 或 XLSX；不执行整文件内存回退")
             if ext == ".pdf":
                 from data.sources.extracted import ExtractedTableDataSource
                 from data.table_extract import (
@@ -562,6 +617,27 @@ def finalize_upload_job(sid: str, jid: str):
 
     sess = session_manager.get_or_create(sid)
     job = sess.job_runner.get_status(jid)
+    if job is not None and job.get("type") == "dataset_import":
+        if job.get("status") != "succeeded":
+            return jsonify({"error": "数据集导入尚未完成", "status": job.get("status")}), 409
+        result = job.get("result") or {}
+        try:
+            from .datasets import catalog_for_session
+            from data.sources.dataset import DatasetDataSource
+            handle = catalog_for_session(sid).get(result["dataset_id"], snapshot_id=result["snapshot_id"], verify=True)
+            with _finalize_lock:
+                existing = next((entry for entry in sess._sources
+                                 if getattr(getattr(entry.get("source"), "handle", None), "snapshot_id", None) == handle.snapshot_id), None)
+                if existing is None:
+                    source = DatasetDataSource(handle)
+                    existing = {"id": sess.add_source(source), "source": source}
+            source = existing["source"]
+            return jsonify({"ok": True, "added": [{"source_id": existing["id"], "source_name": source.name,
+                                                   "schema_preview": source.get_schema()}],
+                            "sources": sess.list_sources(), "source_name": source.name,
+                            "schema_preview": source.get_schema(), "warehouse_autosave": None})
+        except (ValueError, TypeError, KeyError, OSError) as exc:
+            return jsonify({"error": str(exc), "code": "dataset_unavailable"}), 400
     if job is None or job.get("type") != "excel_parse":
         return jsonify({"error": "Excel 解析任务不存在"}), 404
     if job.get("status") != "succeeded":
@@ -707,7 +783,7 @@ def load_data_warehouse(sid: str):
     errors = []
     for info in data.get("sources") or []:
         try:
-            source = _restore_source(info)
+            source = _restore_source(info, sid=sid, user_id=user_id)
             source_id = sess.add_source(source)
             restored.append((source_id, bool(info.get("active", True))))
         except Exception as exc:

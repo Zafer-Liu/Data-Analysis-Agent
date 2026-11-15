@@ -78,6 +78,9 @@ hiddenimports = [
     "python_calamine",
     # SQLAlchemy/DuckDB select drivers and dialects at runtime.
     "duckdb",
+    "pyarrow",
+    "pyarrow.parquet",
+    "psutil",
     "pymysql",
     "psycopg2",
     "pyodbc",
@@ -106,6 +109,9 @@ hiddenimports = [
 ]
 hiddenimports += collect_submodules("charts")
 hiddenimports += collect_submodules("PPT")
+# The controller uses the fixed protocol without importing Torch at startup.
+# Keep its versioned namespace available to frozen dataset/training facades.
+hiddenimports += collect_submodules("remote_runner")
 # sqlglot resolves dialect/parser/generator/typing modules dynamically from
 # the requested dialect name.  PyInstaller cannot discover that registry
 # lookup, so a frozen build otherwise contains sqlglot itself but omits the

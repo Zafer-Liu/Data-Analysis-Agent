@@ -45,8 +45,8 @@ _STRONG_DIAGRAM_RE = re.compile(
 )
 
 _TEAM_TOOLS = {
-    "team_create", "team_delete", "team_list", "team_status", "send_message",
-    "agent_delegate", "team_plan_create", "team_delegate",
+    "agent_create", "agent_delegate", "agent_task", "team_create", "team_delete",
+    "team_list", "team_status", "send_message", "team_plan_create", "team_delegate",
 }
 _TASK_TOOLS = {"task_create", "task_get", "task_list", "task_update"}
 _WORKFLOW_TOOLS = {
@@ -134,34 +134,47 @@ def discover_tool_names_for_query(query: str) -> set[str]:
             discovered.add("display_diagram")
 
     # CRUD families should expose the requested action, not every tool sharing
-    # the family noun. Teams mode remains an authorization gate in
-    # ``filter_tools_for_turn``.
+    # the family noun. Exact tool names also preserve single-member calls when
+    # a prompt mentions parallel work or a team identifier.
     team_hits = discovered & _TEAM_TOOLS
     if team_hits:
-        if re.search(r"(删除|移除|delete|remove).{0,12}(团队|team)", raw, re.IGNORECASE):
-            discovered -= _TEAM_TOOLS
+        explicit_team_tools = {
+            name for name in team_hits
+            if _normalize_discovery_text(name) in haystack
+        }
+        discovered -= _TEAM_TOOLS
+        if explicit_team_tools:
+            discovered.update(explicit_team_tools)
+        elif "agent_task" in team_hits:
+            discovered.add("agent_task")
+        elif "agent_create" in team_hits:
+            discovered.add("agent_create")
+        elif re.search(r"(删除|移除|delete|remove).{0,12}(团队|team)", raw, re.IGNORECASE):
             discovered.update({"team_delete", "team_status"})
         elif re.search(r"(查看|查询|状态|status).{0,12}(团队|team)|(团队|team).{0,12}(状态|status)", raw, re.IGNORECASE):
-            discovered -= _TEAM_TOOLS
             discovered.add("team_status")
         elif re.search(r"(列出|列表|有哪些|list).{0,12}(团队|team)|(团队|team).{0,12}(列表|list)", raw, re.IGNORECASE):
-            discovered -= _TEAM_TOOLS
             discovered.add("team_list")
         elif re.search(r"(发送|发消息|send|message|mailbox|收件箱)", raw, re.IGNORECASE):
-            discovered -= _TEAM_TOOLS
             discovered.add("send_message")
+        elif "team_plan_create" in team_hits and re.search(
+            r"(团队计划|动态计划|先建计划|预览计划|dynamic\s*plan)", raw, re.IGNORECASE,
+        ):
+            discovered.add("team_plan_create")
         elif re.search(r"(并行|并发|批量|parallel|team\s*delegate)", raw, re.IGNORECASE):
-            discovered -= _TEAM_TOOLS
             discovered.add("team_delegate")
-        elif re.search(r"(委派|子任务|delegate)", raw, re.IGNORECASE):
-            discovered -= _TEAM_TOOLS
+        elif re.search(r"(委派|子任务|子\s*agent|子代理|subagent|delegate)", raw, re.IGNORECASE):
             discovered.add("agent_delegate")
         elif re.search(r"(创建|新建|create).{0,12}(团队|team)|(团队|team).{0,12}(创建|新建|create)", raw, re.IGNORECASE):
-            discovered -= _TEAM_TOOLS
             discovered.add("team_create")
+        else:
+            discovered.update(team_hits)
 
     task_hits = discovered & _TASK_TOOLS
-    if task_hits:
+    if "agent_task" in discovered:
+        # A2A Tasks are session-scoped and are distinct from the workspace board.
+        discovered -= _TASK_TOOLS
+    elif task_hits:
         discovered -= _TASK_TOOLS
         if re.search(r"(创建|新建|添加|create|add)", raw, re.IGNORECASE):
             discovered.add("task_create")
@@ -240,15 +253,11 @@ def filter_tools_for_turn(
         skill=trusted_skill,
         discovered_tools=discovered,
     )
-    if not teams_enabled:
-        allowed -= _TEAM_TOOLS
-    elif has_workspace:
-        # Teams mode authorizes coordination but does not expose every CRUD
-        # action on every turn. Creation/deletion/mailbox tools remain driven
-        # by current or recent explicit intent.
-        allowed |= {
-            "team_status", "agent_delegate", "team_delegate",
-        }
+    if teams_enabled:
+        # Teams mode is a collaboration preference. Core subagent calls are
+        # always exposed; extra coordination tools remain useful without a
+        # mounted workspace. CRUD actions still require discovery.
+        allowed |= {"team_status", "team_delegate"}
     if skill_allowed_tools:
         # Intersection happens after normal source/workspace/command policy, so
         # a Skill can only reduce an already authorized set.
@@ -294,6 +303,7 @@ def filter_tools_for_turn(
 _ESSENTIAL_TOOL_NAMES = {
     "ask_user", "workspace_status", "read_tool_result", "search_mcp_tools",
     "query_knowledge", "get_schema", "query_data", "load_analysis_skill",
+    "agent_create", "agent_delegate",
 }
 
 

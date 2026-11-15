@@ -1,0 +1,5 @@
+# Bounded dataset version profile, also declared in the runtime requirements.
+# Validated locally on Python 3.13; remote training and cluster extras are separate.
+duckdb>=1.5.6,<2
+pyarrow==24.0.0
+psutil>=7.2,<8

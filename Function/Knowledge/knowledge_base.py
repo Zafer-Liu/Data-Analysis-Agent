@@ -84,9 +84,11 @@ def _env_float(name: str, default: float) -> float:
 
 
 MIN_STRUCTURED_SCORE = _env_float("BAA_KB_MIN_STRUCTURED_SCORE", 0.015)
-MIN_CHUNK_SCORE = _env_float("BAA_KB_MIN_CHUNK_SCORE", 0.02)
+MIN_CHUNK_SCORE = _env_float("BAA_KB_MIN_CHUNK_SCORE", 0.015)
 MIN_STRUCTURED_LEXICAL_SCORE = _env_float("BAA_KB_MIN_STRUCTURED_LEXICAL_SCORE", 0.12)
 MIN_STRUCTURED_VECTOR_SCORE = _env_float("BAA_KB_MIN_STRUCTURED_VECTOR_SCORE", 0.55)
+MIN_CHUNK_LEXICAL_SCORE = _env_float("BAA_KB_MIN_CHUNK_LEXICAL_SCORE", 0.12)
+MIN_CHUNK_VECTOR_SCORE = _env_float("BAA_KB_MIN_CHUNK_VECTOR_SCORE", 0.55)
 DEFAULT_CATEGORY_NAME = "默认业务"
 
 
@@ -95,6 +97,9 @@ def _ensure_dir() -> None:
 
 
 def _init_db(conn: sqlite3.Connection) -> None:
+    chunk_fts_schema = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE name='rag_chunks_fts'"
+    ).fetchone()
     had_categories_table = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='knowledge_categories'"
     ).fetchone() is not None
@@ -108,25 +113,27 @@ def _init_db(conn: sqlite3.Connection) -> None:
 
         CREATE TABLE IF NOT EXISTS metrics (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            name         TEXT NOT NULL UNIQUE,
+            name         TEXT NOT NULL,
             alias        TEXT DEFAULT '',
             definition   TEXT DEFAULT '',
             sql_template TEXT DEFAULT '',
             notes        TEXT DEFAULT '',
             category_id  INTEGER DEFAULT 1,
             enabled      INTEGER DEFAULT 1,
-            updated_at   REAL NOT NULL
+            updated_at   REAL NOT NULL,
+            UNIQUE(category_id, name)
         );
 
         CREATE TABLE IF NOT EXISTS business_rules (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            rule_id     TEXT NOT NULL UNIQUE,
+            rule_id     TEXT NOT NULL,
             description TEXT DEFAULT '',
             condition   TEXT DEFAULT '',
             severity    TEXT DEFAULT 'warning',
             category_id INTEGER DEFAULT 1,
             enabled     INTEGER DEFAULT 1,
-            updated_at  REAL NOT NULL
+            updated_at  REAL NOT NULL,
+            UNIQUE(category_id, rule_id)
         );
 
         CREATE TABLE IF NOT EXISTS context_notes (
@@ -170,8 +177,7 @@ def _init_db(conn: sqlite3.Connection) -> None:
         );
 
         CREATE VIRTUAL TABLE IF NOT EXISTS rag_chunks_fts
-            USING fts5(source_name, content,
-                       content=rag_chunks, content_rowid=id);
+            USING fts5(source_name, content);
     """)
     now = time.time()
     if not had_categories_table:
@@ -202,6 +208,25 @@ def _init_db(conn: sqlite3.Connection) -> None:
         except sqlite3.OperationalError as e:
             log.debug("[knowledge_base] 列已存在，跳过 DDL: %s", e)
     conn.execute("UPDATE rag_chunks SET category_id=1 WHERE category_id IS NULL")
+    from Function.Knowledge.definition_history import init_definition_history
+    init_definition_history(conn)
+    from Function.Knowledge.ontology_store import init_ontology_tables
+    init_ontology_tables(conn)
+    # External-content FTS indexed raw Chinese text while queries were segmented.
+    # Migrate only the derived index; original chunks and embeddings stay intact.
+    legacy_fts = chunk_fts_schema and re.search(r"\bcontent\s*=", chunk_fts_schema[0])
+    if legacy_fts or chunk_fts_schema is None:
+        conn.execute("SAVEPOINT migrate_chunk_fts")
+        try:
+            if legacy_fts:
+                conn.execute("DROP TABLE rag_chunks_fts")
+                conn.execute("CREATE VIRTUAL TABLE rag_chunks_fts USING fts5(source_name, content)")
+            _rebuild_chunk_fts(conn)
+        except Exception:
+            conn.execute("ROLLBACK TO migrate_chunk_fts")
+            conn.execute("RELEASE migrate_chunk_fts")
+            raise
+        conn.execute("RELEASE migrate_chunk_fts")
     conn.commit()
 
 
@@ -304,6 +329,15 @@ def _jieba_tokenize(text: str) -> str:
     return " ".join(w.strip() for w in words if w.strip())
 
 
+def _rebuild_chunk_fts(conn: sqlite3.Connection) -> None:
+    conn.execute("DELETE FROM rag_chunks_fts")
+    rows = conn.execute("SELECT id, source_name, content FROM rag_chunks").fetchall()
+    conn.executemany(
+        "INSERT INTO rag_chunks_fts(rowid, source_name, content) VALUES (?, ?, ?)",
+        ((row[0], _jieba_tokenize(row[1]), _jieba_tokenize(row[2])) for row in rows),
+    )
+
+
 def _rrf_fuse(
     ranked_lists: list[list[dict]],
     id_key: str,
@@ -390,8 +424,14 @@ class KnowledgeBase:
         self._path = Path(db_path) if db_path is not None else scope_dir / "knowledge.db"
         self._conn = sqlite3.connect(str(self._path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        _init_db(self._conn)
+        try:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            _init_db(self._conn)
+            from Function.Knowledge.ontology_store import OntologyStore
+            self.ontologies = OntologyStore(self._conn)
+        except Exception:
+            self._conn.close()
+            raise
 
     def close(self) -> None:
         """Close the SQLite connection explicitly.
@@ -540,8 +580,7 @@ class KnowledgeBase:
             self._conn.execute(
                 "INSERT INTO context_notes_fts(context_notes_fts) VALUES('rebuild')")
         elif table == "rag_chunks":
-            self._conn.execute(
-                "INSERT INTO rag_chunks_fts(rag_chunks_fts) VALUES('rebuild')")
+            _rebuild_chunk_fts(self._conn)
         self._conn.commit()
 
     # ── categories ────────────────────────────────────────────────────────────
@@ -607,6 +646,11 @@ class KnowledgeBase:
             f"UPDATE knowledge_categories SET {set_clause} WHERE id=?",
             (*updates.values(), cid),
         )
+        for kind, table in (("metric", "metrics"), ("rule", "business_rules")):
+            for row in list(self._conn.execute(f"SELECT id FROM {table} WHERE category_id=?", (cid,))):
+                self._record_definition(kind, row[0])
+        for row in list(self._conn.execute("SELECT id FROM ontologies WHERE category_id=?", (cid,))):
+            self.ontologies._record_revision(row[0])
         self._conn.commit()
         return self.get_category_by_id(cid)
 
@@ -621,6 +665,7 @@ class KnowledgeBase:
             "rules": "business_rules",
             "notes": "context_notes",
             "chunks": "rag_chunks",
+            "ontologies": "ontologies",
         }
         counts = {
             key: int(self._conn.execute(
@@ -638,13 +683,18 @@ class KnowledgeBase:
                               (SELECT id FROM {table} WHERE category_id=?)""",
                     (entity_type, cid),
                 )
+            self._conn.execute(
+                "DELETE FROM ontology_nodes WHERE ontology_id IN (SELECT id FROM ontologies WHERE category_id=?)",
+                (cid,),
+            )
             for table in tables.values():
                 self._conn.execute(f"DELETE FROM {table} WHERE category_id=?", (cid,))
             self._conn.execute("DELETE FROM knowledge_categories WHERE id=?", (cid,))
-            for fts_table in ("metrics_fts", "context_notes_fts", "rag_chunks_fts"):
+            for fts_table in ("metrics_fts", "context_notes_fts"):
                 self._conn.execute(
                     f"INSERT INTO {fts_table}({fts_table}) VALUES('rebuild')"
                 )
+            _rebuild_chunk_fts(self._conn)
             self._conn.commit()
         except Exception:
             self._conn.rollback()
@@ -663,6 +713,7 @@ class KnowledgeBase:
         if not isinstance(snapshot, dict):
             raise ValueError("知识库快照格式无效")
 
+        ontology_snapshot = self.ontologies.prepare_snapshot(snapshot)
         raw_categories = snapshot.get("categories") or []
         category_rows = []
         seen_names: set[str] = set()
@@ -713,11 +764,11 @@ class KnowledgeBase:
                 cid = category_ids.get(str(item.get("category_name") or ""), fallback_category)
                 self._conn.execute(
                     """INSERT INTO metrics
-                       (name, alias, definition, sql_template, notes, category_id, enabled, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                       (name, alias, definition, sql_template, notes, category_id, enabled, updated_at, source_filename)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (name, str(item.get("alias") or ""), str(item.get("definition") or ""),
                      str(item.get("sql_template") or ""), str(item.get("notes") or ""), cid,
-                     1 if item.get("enabled", True) else 0, now),
+                     1 if item.get("enabled", True) else 0, now, self._source_filename(item.get("source_filename"))),
                 )
                 inserted["metrics"] += 1
             for item in records_by_kind["rules"]:
@@ -729,11 +780,11 @@ class KnowledgeBase:
                 cid = category_ids.get(str(item.get("category_name") or ""), fallback_category)
                 self._conn.execute(
                     """INSERT INTO business_rules
-                       (rule_id, description, condition, severity, category_id, enabled, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                       (rule_id, description, condition, severity, category_id, enabled, updated_at, source_filename)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                     (rule_id, str(item.get("description") or ""), str(item.get("condition") or ""),
                      str(item.get("severity") or "warning"), cid,
-                     1 if item.get("enabled", True) else 0, now),
+                     1 if item.get("enabled", True) else 0, now, self._source_filename(item.get("source_filename"))),
                 )
                 inserted["rules"] += 1
             for item in records_by_kind["notes"]:
@@ -753,7 +804,11 @@ class KnowledgeBase:
                 inserted["notes"] += 1
             self._conn.execute("INSERT INTO metrics_fts(metrics_fts) VALUES('rebuild')")
             self._conn.execute("INSERT INTO context_notes_fts(context_notes_fts) VALUES('rebuild')")
-            self._conn.execute("INSERT INTO rag_chunks_fts(rag_chunks_fts) VALUES('rebuild')")
+            _rebuild_chunk_fts(self._conn)
+            inserted["ontologies"] = self.ontologies.restore(ontology_snapshot, category_ids)
+            for kind, table in (("metric", "metrics"), ("rule", "business_rules")):
+                for row in list(self._conn.execute(f"SELECT id FROM {table}")):
+                    self._record_definition(kind, row[0])
             self._conn.commit()
         except Exception:
             self._conn.rollback()
@@ -761,6 +816,11 @@ class KnowledgeBase:
 
         if sum(inserted.values()):
             self.rebuild_structured_embeddings()
+        if inserted["ontologies"]:
+            try:
+                self.ontologies.rebuild_embeddings()
+            except Exception:
+                log.warning("[ontology] restored with lexical retrieval; vectors can be rebuilt", exc_info=True)
         return {**inserted, "categories": len(category_rows)}
 
     # ── enabled summary (admin/debug display only; never prompt injection) ─────
@@ -836,40 +896,86 @@ class KnowledgeBase:
                    sql_template: str = "", notes: str = "",
                    enabled: int = 1, category_id: int | str | None = None,
                    cache_embedding: bool = True,
-                   rebuild_fts: bool = True) -> dict:
-        cur = self._conn.execute(
+                   rebuild_fts: bool = True, source_filename: str | None = None) -> dict:
+        cid = self._normalize_category_id(category_id)
+        self._conn.execute(
             """INSERT INTO metrics
-                 (name, alias, definition, sql_template, notes, category_id, enabled, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(name) DO UPDATE SET
+                 (name, alias, definition, sql_template, notes, category_id, enabled, updated_at, source_filename)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(category_id,name) DO UPDATE SET
                  alias=excluded.alias, definition=excluded.definition,
                  sql_template=excluded.sql_template, notes=excluded.notes,
-                 category_id=excluded.category_id, enabled=excluded.enabled,
-                 updated_at=excluded.updated_at""",
-            (name.strip(), alias, definition, sql_template, notes,
-             self._normalize_category_id(category_id), enabled, self._now()),
+                 enabled=excluded.enabled, updated_at=excluded.updated_at,
+                 source_filename=CASE WHEN ? IS NULL THEN metrics.source_filename ELSE excluded.source_filename END""",
+            (name.strip(), alias, definition, sql_template, notes, cid, enabled, self._now(),
+             self._source_filename(source_filename), source_filename),
         )
+        mid = self._metric_id(name, cid)
+        self._record_definition("metric", mid)
         self._conn.commit()
         if rebuild_fts:
             self._rebuild_fts("metrics")
-        record = self.get_metric_by_id(cur.lastrowid or self._metric_id(name))
+        record = self.get_metric_by_id(mid)
         if cache_embedding:
             self._try_cache_structured_record("metric", record)
         return record
 
-    def _metric_id(self, name: str) -> int:
+    @staticmethod
+    def _source_filename(value) -> str:
+        return Path(str(value or "").replace("\\", "/")).name if value else ""
+
+    def _record_definition(self, kind: str, definition_id: int):
+        from .definition_history import record_definition
+        return record_definition(self._conn, kind, definition_id)
+
+    def definition_revision(self, kind: str, definition_id: int, revision_id: str) -> dict | None:
+        from .definition_history import get_definition_revision
+        return get_definition_revision(self._conn, kind, definition_id, revision_id)
+
+    def definition_revisions(self, kind: str, definition_id: int, *, offset=0, limit=100) -> list[dict]:
+        from .definition_history import definition_revisions
+        return definition_revisions(self._conn, kind, definition_id, offset=offset, limit=limit)
+
+    def prune_history(self, before: float) -> dict:
+        """Apply an explicit retention cutoff inside this owner's content store."""
+        from .definition_history import prune_definition_history
+        try:
+            counts = {"definitions": prune_definition_history(self._conn, before),
+                      "ontologies": self.ontologies.prune_history(before, commit=False)}
+            self._conn.commit()
+            return counts
+        except Exception:
+            self._conn.rollback()
+            raise
+
+    def source_delete_impact(self, filename: str) -> dict:
+        filename = self._source_filename(filename)
+        linked = {}
+        for kind, table in (("metrics", "metrics"), ("rules", "business_rules")):
+            linked[kind] = [dict(row) for row in self._conn.execute(
+                f"SELECT id,revision_id FROM {table} WHERE source_filename=? AND source_filename<>''", (filename,))]
+        linked["ontologies"] = [dict(row) for row in self._conn.execute(
+            "SELECT id,revision_id FROM ontologies WHERE filename=?", (filename,))]
+        linked["chunks"] = self._conn.execute("SELECT COUNT(*) FROM rag_chunks WHERE source_name=?", (filename,)).fetchone()[0]
+        return {"filename": filename, "linked": linked, "ordinary_definitions_retained": True,
+                "history_retained": True, "legacy_sources": "unknown"}
+
+    def _metric_id(self, name: str, category_id: int | str | None = None) -> int:
         row = self._conn.execute(
-            "SELECT id FROM metrics WHERE name=?", (name,)).fetchone()
+            "SELECT id FROM metrics WHERE name=? AND category_id=?", (name.strip(), self._normalize_category_id(category_id))).fetchone()
         return row["id"] if row else -1
 
     def get_metric_by_id(self, mid: int) -> dict | None:
         row = self._conn.execute(
-            "SELECT * FROM metrics WHERE id=?", (mid,)).fetchone()
+            "SELECT m.*,c.name AS business_namespace FROM metrics m "
+            "LEFT JOIN knowledge_categories c ON c.id=m.category_id WHERE m.id=?", (mid,)).fetchone()
         return dict(row) if row else None
 
     def update_metric(self, mid: int, **fields) -> dict | None:
-        allowed = {"name", "alias", "definition", "sql_template", "notes", "enabled", "category_id"}
+        allowed = {"name", "alias", "definition", "sql_template", "notes", "enabled", "category_id", "source_filename"}
         updates = {k: v for k, v in fields.items() if k in allowed}
+        if "source_filename" in updates:
+            updates["source_filename"] = self._source_filename(updates["source_filename"])
         if "category_id" in updates:
             updates["category_id"] = self._normalize_category_id(updates["category_id"])
         if not updates:
@@ -880,6 +986,7 @@ class KnowledgeBase:
             f"UPDATE metrics SET {set_clause} WHERE id=?",
             (*updates.values(), mid),
         )
+        self._record_definition("metric", mid)
         self._conn.commit()
         self._rebuild_fts("metrics")
         record = self.get_metric_by_id(mid)
@@ -897,7 +1004,9 @@ class KnowledgeBase:
     def list_metrics(self, category_id: int | str | None = None) -> list[dict]:
         cid = self._normalize_category_id(category_id)
         return self._rows(
-            self._conn.execute("SELECT * FROM metrics WHERE category_id=? ORDER BY name", (cid,)))
+            self._conn.execute("SELECT m.*,c.name AS business_namespace FROM metrics m "
+                               "LEFT JOIN knowledge_categories c ON c.id=m.category_id "
+                               "WHERE m.category_id=? ORDER BY m.name", (cid,)))
 
     # ── business_rules CRUD ───────────────────────────────────────────────────
 
@@ -905,40 +1014,46 @@ class KnowledgeBase:
                  condition: str = "", severity: str = "warning",
                  enabled: int = 1, category_id: int | str | None = None,
                  cache_embedding: bool = True,
-                 rebuild_fts: bool = True) -> dict:
-        cur = self._conn.execute(
+                 rebuild_fts: bool = True, source_filename: str | None = None) -> dict:
+        cid = self._normalize_category_id(category_id)
+        self._conn.execute(
             """INSERT INTO business_rules
-                 (rule_id, description, condition, severity, category_id, enabled, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(rule_id) DO UPDATE SET
+                 (rule_id, description, condition, severity, category_id, enabled, updated_at, source_filename)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(category_id,rule_id) DO UPDATE SET
                  description=excluded.description, condition=excluded.condition,
-                 severity=excluded.severity, category_id=excluded.category_id,
-                 enabled=excluded.enabled, updated_at=excluded.updated_at""",
-            (rule_id.strip(), description, condition, severity,
-             self._normalize_category_id(category_id), enabled, self._now()),
+                 severity=excluded.severity, enabled=excluded.enabled, updated_at=excluded.updated_at,
+                 source_filename=CASE WHEN ? IS NULL THEN business_rules.source_filename ELSE excluded.source_filename END""",
+            (rule_id.strip(), description, condition, severity, cid, enabled, self._now(),
+             self._source_filename(source_filename), source_filename),
         )
+        rid = self._rule_id(rule_id, cid)
+        self._record_definition("rule", rid)
         self._conn.commit()
-        rid = cur.lastrowid or self._rule_id(rule_id)
         record = self.get_rule_by_id(rid)
         if cache_embedding:
             self._try_cache_structured_record("rule", record)
         return record
 
-    def _rule_id(self, rule_id: str) -> int:
+    def _rule_id(self, rule_id: str, category_id: int | str | None = None) -> int:
         row = self._conn.execute(
-            "SELECT id FROM business_rules WHERE rule_id=?", (rule_id,)
+            "SELECT id FROM business_rules WHERE rule_id=? AND category_id=?",
+            (rule_id.strip(), self._normalize_category_id(category_id))
         ).fetchone()
         return row["id"] if row else -1
 
     def get_rule_by_id(self, rid: int) -> dict | None:
         row = self._conn.execute(
-            "SELECT * FROM business_rules WHERE id=?", (rid,)
+            "SELECT r.*,c.name AS business_namespace FROM business_rules r "
+            "LEFT JOIN knowledge_categories c ON c.id=r.category_id WHERE r.id=?", (rid,)
         ).fetchone()
         return dict(row) if row else None
 
     def update_rule(self, rid: int, **fields) -> dict | None:
-        allowed = {"rule_id", "description", "condition", "severity", "enabled", "category_id"}
+        allowed = {"rule_id", "description", "condition", "severity", "enabled", "category_id", "source_filename"}
         updates = {key: value for key, value in fields.items() if key in allowed}
+        if "source_filename" in updates:
+            updates["source_filename"] = self._source_filename(updates["source_filename"])
         if "category_id" in updates:
             updates["category_id"] = self._normalize_category_id(updates["category_id"])
         if not updates:
@@ -949,6 +1064,7 @@ class KnowledgeBase:
             f"UPDATE business_rules SET {set_clause} WHERE id=?",
             (*updates.values(), rid),
         )
+        self._record_definition("rule", rid)
         self._conn.commit()
         record = self.get_rule_by_id(rid)
         self._try_cache_structured_record("rule", record)
@@ -963,7 +1079,9 @@ class KnowledgeBase:
     def list_rules(self, category_id: int | str | None = None) -> list[dict]:
         cid = self._normalize_category_id(category_id)
         return self._rows(self._conn.execute(
-            "SELECT * FROM business_rules WHERE category_id=? ORDER BY severity DESC, rule_id", (cid,)))
+            "SELECT r.*,c.name AS business_namespace FROM business_rules r "
+            "LEFT JOIN knowledge_categories c ON c.id=r.category_id "
+            "WHERE r.category_id=? ORDER BY r.severity DESC, r.rule_id", (cid,)))
 
     # ── context_notes CRUD ────────────────────────────────────────────────────
 
@@ -1101,9 +1219,14 @@ class KnowledgeBase:
         if not records:
             return []
         texts = [self._structured_text(entity_type, record) for record in records]
-        embeddings = self._load_structured_embeddings(
-            entity_type, records, _embedding_signature()
-        )
+        embeddings = {}
+        if q_vec:
+            try:
+                embeddings = self._load_structured_embeddings(
+                    entity_type, records, _embedding_signature()
+                )
+            except Exception:
+                log.warning("[knowledge_base] structured vectors unavailable; using lexical retrieval", exc_info=True)
 
         vec_ranked = []
         for record in records:
@@ -1114,7 +1237,7 @@ class KnowledgeBase:
         vec_list = [
             dict(record, vector_score=round(score, 4))
             for score, record in vec_ranked[:limit * 3]
-            if score >= MIN_STRUCTURED_VECTOR_SCORE
+            if score > 0 and score >= MIN_STRUCTURED_VECTOR_SCORE
         ]
 
         lex_ranked = []
@@ -1125,11 +1248,21 @@ class KnowledgeBase:
         lex_list = [
             dict(record, lexical_score=round(score, 4))
             for score, record in lex_ranked[:limit * 3]
-            if score >= MIN_STRUCTURED_LEXICAL_SCORE
+            if score > 0 and score >= MIN_STRUCTURED_LEXICAL_SCORE
         ]
 
         fused = _rrf_fuse([vec_list, lex_list], id_key="id", limit=limit)
+        vector_scores = {row["id"]: row["vector_score"] for row in vec_list}
+        lexical_scores = {row["id"]: row["lexical_score"] for row in lex_list}
+        for row in fused:
+            row["vector_score"] = vector_scores.get(row["id"], 0.0)
+            row["lexical_score"] = lexical_scores.get(row["id"], 0.0)
+            row["matched_channels"] = [
+                channel for channel, scores in (("vector", vector_scores), ("lexical", lexical_scores))
+                if row["id"] in scores
+            ]
         return [row for row in fused if row.get("rrf_score", 0) >= min_score]
+
     def _search_chunks(
         self,
         question: str,
@@ -1138,7 +1271,12 @@ class KnowledgeBase:
         q_vec: list[float] | None = None,
     ) -> list[dict]:
         q = question.strip()
-        q_jieba = _jieba_tokenize(q)
+        if not q:
+            return []
+        q_jieba = " ".join(
+            '"' + token.replace('"', '""') + '"'
+            for token in _jieba_tokenize(q).split()
+        )
         fts_rows: list[dict] = []
         try:
             fts_rows = self._rows(self._conn.execute(
@@ -1174,56 +1312,68 @@ class KnowledgeBase:
         for r in fts_rows:
             by_id[r["id"]] = r
 
-        q_vec = q_vec or _embed_query(q)
-        # Channel 1: vector similarity
+        if q_vec is None:
+            try:
+                q_vec = _embed_query(q)
+            except Exception:
+                log.warning("[knowledge_base] query vector unavailable; using text retrieval", exc_info=True)
+                q_vec = []
+        try:
+            signature = _embedding_signature() if q_vec else None
+        except Exception:
+            signature = None
         vec_ranked: list[tuple[float, dict]] = []
-        # Channel 2: lexical score
-        lex_ranked: list[tuple[float, dict]] = []
-        # Channel 3: FTS keyword score (BM25 via SQLite FTS5 rank)
-        kw_ranked: list[tuple[float, dict]] = []
-
-        fts_ids = {r["id"] for r in fts_rows}
+        text_ranked: list[tuple[float, int, dict]] = []
+        fts_order = {row["id"]: index for index, row in enumerate(fts_rows)}
 
         for row in by_id.values():
-            try:
-                emb = (
-                    json.loads(row.get("embedding") or "[]")
-                    if row.get("embedding_signature") == _embedding_signature()
-                    else []
-                )
-            except json.JSONDecodeError as e:
-                log.debug("[knowledge_base] embedding JSON 解析失败: %s", e)
-                emb = []
-            vector_score = _cosine(q_vec, emb)
+            vector_score = 0.0
+            if signature and row.get("embedding_signature") == signature:
+                try:
+                    embedding = json.loads(row.get("embedding") or "[]")
+                    if isinstance(embedding, list) and len(embedding) == len(q_vec):
+                        vector_score = _cosine(q_vec, embedding)
+                    if not math.isfinite(vector_score):
+                        vector_score = 0.0
+                except (TypeError, ValueError):
+                    vector_score = 0.0
             lexical_score = _text_match_score(
-                q,
-                f"{row.get('source_name', '')}\n{row.get('content', '')}",
+                q, f"{row.get('source_name', '')}\n{row.get('content', '')}",
             )
-            keyword_score = 1.0 if row["id"] in fts_ids else 0.0
+            keyword_score = 1.0 if row["id"] in fts_order else 0.0
+            channels = []
+            if vector_score > 0 and vector_score >= MIN_CHUNK_VECTOR_SCORE:
+                channels.append("vector")
+            if lexical_score > 0 and lexical_score >= MIN_CHUNK_LEXICAL_SCORE:
+                channels.append("lexical")
+            if keyword_score:
+                channels.append("keyword")
+            if not channels:
+                continue
             clean = {
-                k: v for k, v in row.items()
-                if k not in {"embedding", "embedding_signature", "keyword_score"}
+                key: value for key, value in row.items()
+                if key not in {"embedding", "embedding_signature", "keyword_score"}
             }
-            clean["vector_score"] = round(vector_score, 4)
-            clean["lexical_score"] = round(lexical_score, 4)
-            clean["keyword_score"] = keyword_score
-            vec_ranked.append((vector_score, clean))
-            lex_ranked.append((lexical_score, clean))
-            kw_ranked.append((keyword_score, clean))
+            clean.update(
+                vector_score=round(vector_score, 4), lexical_score=round(lexical_score, 4),
+                keyword_score=keyword_score, matched_channels=channels,
+            )
+            if "vector" in channels:
+                vec_ranked.append((vector_score, clean))
+            # Lexical and FTS are two views of the same text evidence. Combining
+            # them gives documents the same two independent channels as metrics.
+            if "lexical" in channels or "keyword" in channels:
+                text_score = max(lexical_score if "lexical" in channels else 0.0, keyword_score)
+                text_ranked.append((text_score, fts_order.get(row["id"], len(fts_rows)), clean))
 
-        vec_ranked.sort(key=lambda item: item[0], reverse=True)
-        lex_ranked.sort(key=lambda item: item[0], reverse=True)
-        kw_ranked.sort(key=lambda item: item[0], reverse=True)
-
-        vec_list = [r for _, r in vec_ranked[:limit * 3]]
-        lex_list = [r for _, r in lex_ranked[:limit * 3]]
-        kw_list = [r for _, r in kw_ranked[:limit * 3]]
-
-        fused = _rrf_fuse([vec_list, lex_list, kw_list], id_key="id", limit=limit)
-
-        # Filter by minimum RRF score
-        result = [r for r in fused if r.get("rrf_score", 0) >= min_score]
-        return result
+        vec_ranked.sort(key=lambda item: -item[0])
+        text_ranked.sort(key=lambda item: (-item[0], item[1]))
+        fused = _rrf_fuse(
+            [[row for _, row in vec_ranked[:limit * 3]],
+             [row for _, _, row in text_ranked[:limit * 3]]],
+            id_key="id", limit=limit,
+        )
+        return [row for row in fused if row.get("rrf_score", 0) >= min_score]
 
     # ── search (only enabled records) ─────────────────────────────────────────
 
@@ -1232,15 +1382,23 @@ class KnowledgeBase:
         q = question.strip()
         limit = max(1, min(int(limit or 5), 10))
 
-        q_vec = _embed_query(q)
+        if not q:
+            return {"metrics": [], "rules": [], "notes": [], "documents": []}
+        try:
+            q_vec = _embed_query(q)
+        except Exception:
+            log.warning("[knowledge_base] query vector unavailable; using text retrieval", exc_info=True)
+            q_vec = []
 
         # Vector fallback for structured records.  This complements SQLite FTS,
         # especially for Chinese wording variations where tokenization is weak.
         all_metrics = self._rows(self._conn.execute(
-            "SELECT * FROM metrics WHERE enabled=1 AND category_id IN (SELECT id FROM knowledge_categories WHERE enabled=1)"
+            "SELECT m.*,c.name AS business_namespace FROM metrics m "
+            "JOIN knowledge_categories c ON c.id=m.category_id WHERE m.enabled=1 AND c.enabled=1"
         ))
         all_rules = self._rows(self._conn.execute(
-            "SELECT * FROM business_rules WHERE enabled=1 AND category_id IN (SELECT id FROM knowledge_categories WHERE enabled=1)"
+            "SELECT r.*,c.name AS business_namespace FROM business_rules r "
+            "JOIN knowledge_categories c ON c.id=r.category_id WHERE r.enabled=1 AND c.enabled=1"
         ))
         all_notes = self._rows(self._conn.execute(
             "SELECT * FROM context_notes WHERE enabled=1 AND category_id IN (SELECT id FROM knowledge_categories WHERE enabled=1)"
@@ -1298,7 +1456,8 @@ class KnowledgeBase:
 
     # ── bulk insert ───────────────────────────────────────────────────────────
 
-    def bulk_insert(self, records: list[dict], category_id: int | str | None = None) -> dict[str, int]:
+    def bulk_insert(self, records: list[dict], category_id: int | str | None = None,
+                    *, source_filename: str | None = None) -> dict[str, int]:
         counts: dict[str, int] = {"metrics": 0, "rules": 0, "notes": 0}
         # Defer FTS rebuild: add_metric/add_note would otherwise rebuild the
         # full-text index once per record (O(N) rebuilds -> O(N^2) work).
@@ -1312,6 +1471,7 @@ class KnowledgeBase:
                     sql_template=rec.get("sql_template", ""),
                     notes=rec.get("notes", ""),
                     category_id=rec.get("category_id") or category_id,
+                    source_filename=source_filename,
                     cache_embedding=False,
                     rebuild_fts=False,
                 )
@@ -1323,6 +1483,7 @@ class KnowledgeBase:
                     condition=rec.get("condition", ""),
                     severity=rec.get("severity", "warning"),
                     category_id=rec.get("category_id") or category_id,
+                    source_filename=source_filename,
                     cache_embedding=False,
                 )
                 counts["rules"] += 1
@@ -1377,8 +1538,10 @@ class KnowledgeBase:
                 )
             self._conn.commit()
         structured = self.rebuild_structured_embeddings()
+        ontology_nodes = self.ontologies.rebuild_embeddings()
         return {
-            "rebuilt": len(stale) + structured,
+            "rebuilt": len(stale) + structured + ontology_nodes,
             "document_chunks": len(stale),
             "structured_records": structured,
+            "ontology_nodes": ontology_nodes,
         }

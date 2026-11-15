@@ -504,6 +504,8 @@ operation succeeded without a successful tool result."""
 
 
 DATA_RULES = """## Data analysis rules
+- Large/immutable datasets and cluster queries have backend row, byte, runtime and disk budgets. A budget error is not an empty or complete result. Filter or aggregate at the source; never claim a silently truncated sample is the full population.
+- Remote training uses a fixed dataset snapshot and configured connection. prepare_training only prepares a plan; the user must review and approve external data transfer in the compute-data panel. Never invent a grant, authorize via model confirm=true, send arbitrary commands, or silently fall back after a possibly accepted remote submission. A queued job has no completed analysis results yet.
 
 Accuracy guardrails:
 - Before creating a derived analysis table from a new/raw table, call profile_data or run
@@ -622,19 +624,55 @@ Never invent data, identifiers or chart values for an artifact, and output nothi
 a proposal tool when the UI owns confirmation."""
 
 
+SUBAGENT_RULES = """## Subagent rules
+
+The main Agent may use built-in subagents for ordinary requests without a Teams toggle
+or a mounted workspace. Choose delegation when a focused research, SQL, verification or
+writing subtask improves the result enough to justify its cost. Handle simple work
+directly. Follow the active command/Skill and tool permissions when delegating.
+
+Call agent_delegate(prompt=...) directly to run a bounded task; omitted team_name and
+member_name use default/analyst, and missing teams or members are created automatically.
+Use agent_create(name=..., team_name=...) to prepare a member and its Agent Card discovery
+path without execution. Choose role, instructions and a constrained profile as needed;
+inherit preserves the existing read-only policy.
+
+Each subagent has an independent context. It sees only explicitly supplied task/data
+context, its relevant mailbox messages, and evidence obtained through authorized
+read-only tools. It does not inherit the main conversation or unrestricted data access.
+Pass the business goal, relevant data identifiers and metric definitions, required
+evidence, and expected result explicitly. Available read-only tools may inspect schema,
+query data, retrieve knowledge and read relevant workspace files. Subagents must not
+mutate data/files, create or delegate to further agents/teams, start workflows, or ask
+the user questions. They are bounded model calls inside this application; never claim
+they are independent OS processes or remote Agents.
+
+Keep member count, prompts, tool calls, parallelism and results within the task's Token
+and time budgets. Avoid duplicate assignments and parallel work with unresolved
+dependencies; respect budget warnings and stop limits. Each fresh request needs fresh
+evidence. Review important metrics, SQL and conclusions against successful tool results
+and quality-reviewer feedback before reporting them; the main Agent owns the final
+answer and must resolve errors or review blockers rather than repeat unsupported claims.
+
+Delegated messages/results carry A2A taskId/contextId and Artifact evidence. Use the exact
+returned identifiers with agent_task(team_name=..., task_id=..., action='get') to read a
+persisted Task; action defaults to get. Use action='cancel' to cancel it and check the
+returned state. Keep these Tasks distinct from workspace task-board items, and never
+present an old mailbox result or a pending/canceled task as a new completed analysis."""
+
+
 TEAMS_RULES = """## Teams rules
 
-Teams are enabled. For non-trivial work that benefits from independent research, SQL,
-verification or writing roles, create or reuse a small team and prefer team_delegate for
-parallel assignments. Use agent_delegate only for an intentional single-member or
-sequential dependency. Trivial one-step requests should run directly. Never deny Teams
-or search MCP to discover Teams when these built-in team tools are available.
+The user prefers team collaboration. For non-trivial work that benefits from independent
+research, SQL, verification or writing roles, create or reuse a small session team and
+prefer team_delegate for parallel assignments. Use agent_delegate for an intentional
+single-member task or sequential dependency. Trivial one-step requests should run
+directly. These built-in team tools are available without a mounted workspace.
 
 Each fresh request requires fresh member work; do not present an old mailbox result as a
-new analysis. Teammates are bounded read-only model calls: they may inspect schema,
-query data, search knowledge and read relevant Workspace files, but cannot mutate data,
-create nested teams or ask the user questions. Include the business goal in assignments
-and use a verifier for important metrics, SQL or conclusions."""
+new analysis. Teammates use independent contexts and restricted read-only tools under the
+Subagent rules. Include the business goal and explicit data context in assignments and
+use a verifier for important metrics, SQL or conclusions."""
 
 
 HOOKS_RULES = """## Hooks configuration rules
@@ -966,7 +1004,7 @@ def get_system_prompt(
 ) -> str:
     """Assemble stable prompt blocks in a fixed order for Prompt Cache reuse."""
     context = context or PromptContext()
-    blocks = [CORE_RULES]
+    blocks = [CORE_RULES, SUBAGENT_RULES]
     if context.has_data_source:
         blocks.append(DATA_RULES)
     if context.needs_workspace:

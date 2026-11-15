@@ -16,7 +16,9 @@ bp = Blueprint("knowledge", __name__)
 # Source mode: <project>/uploads/knowledge; packaged mode: <data-root>/uploads/knowledge.
 # This file lives at <root>/api/knowledge.py → parent = api/ → parent = root
 _KB_DIR = content_data_path("uploads", "knowledge")
-_ALLOWED_EXTS = {".xlsx", ".xls", ".docx"}
+_YAML_EXTS = {".yaml", ".yml"}
+_ALLOWED_EXTS = {".xlsx", ".xls", ".docx", *_YAML_EXTS}
+_ONTOLOGY_MAX_BYTES = 256 * 1024
 
 
 def _ensure_dir() -> None:
@@ -151,12 +153,265 @@ def toggle_category(cid: int):
 def delete_category(cid: int):
     try:
         with _kb() as kb:
+            source_files = [row["filename"] for row in kb.ontologies.list(cid)]
             deleted = kb.delete_category(cid)
+        for filename in source_files:
+            (_kb_dir() / Path(filename).name).unlink(missing_ok=True)
         return jsonify({"ok": True, "deleted": deleted})
     except LookupError as e:
         return jsonify({"error": str(e)}), 404
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
+
+
+# ── Ontology lifecycle and source binding ─────────────────────────────────────
+
+def _ontology_body() -> dict:
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        raise ValueError("请求正文必须是 JSON 对象")
+    return body
+
+
+def _ontology_sources(*, active_only: bool = False) -> list[dict]:
+    from .state import check_session_ownership
+    from Function.Knowledge.ontology_store import source_descriptors
+    body = _ontology_body() if request.is_json else {}
+    sid = str(request.args.get("session_id") or request.form.get("session_id")
+              or body.get("session_id") or "")
+    if not sid:
+        return []
+    allowed, _ = check_session_ownership(sid)
+    if not allowed:
+        raise PermissionError("无权访问此会话的数据源")
+    sess = session_manager.get(sid)
+    entries = (sess._active_entries() if active_only else list(getattr(sess, "_sources", []))) if sess else []
+    return source_descriptors(entries, sid, catalog=not active_only)
+
+
+def _ontology_binding(document: dict, body: dict):
+    from Function.Knowledge.ontology_store import validate_binding
+    source_id = str(body.get("source_id") or "")
+    sources = _ontology_sources()
+    source = next((item for item in sources if item["source_id"] == source_id), None)
+    if source_id and source is None:
+        raise ValueError("数据源已移除，请刷新后重新绑定")
+    return validate_binding(document, source, body.get("mapping"), body.get("column_mapping"))
+
+
+def _ontology_error(exc):
+    return jsonify({"error": str(exc), "errors": getattr(exc, "errors", [])}), (
+        403 if isinstance(exc, PermissionError) else 400
+    )
+
+
+@bp.get("/api/knowledge/ontology-sources")
+def ontology_sources():
+    try:
+        return jsonify({"sources": _ontology_sources()})
+    except (ValueError, PermissionError) as exc:
+        return _ontology_error(exc)
+
+
+@bp.get("/api/knowledge/ontologies")
+def list_ontologies():
+    with _kb() as kb:
+        if request.args.get("export") == "1":
+            return jsonify(kb.ontologies.export())
+        return jsonify(kb.ontologies.list(_category_id()))
+
+
+@bp.get("/api/knowledge/ontologies/<oid>")
+def get_ontology(oid: str):
+    with _kb() as kb:
+        record = kb.ontologies.get(oid)
+    if record is None:
+        return jsonify({"error": "本体不存在"}), 404
+    return jsonify(record)
+
+
+@bp.get("/api/knowledge/ontologies/<oid>/definition")
+def get_ontology_definition(oid: str):
+    path = request.args.get("path", "")
+    if not path or len(path) > 512:
+        return jsonify({"error": "请提供有效的定义路径"}), 400
+    try:
+        offset, limit = _read_bounds()
+        with _kb() as kb:
+            definition = kb.ontologies.definition(oid, path, revision_id=request.args.get("revision_id", ""),
+                                                  offset=offset, limit=limit)
+        if definition is None:
+            return jsonify({"error": "未找到该定义或修订已过保留期"}), 404
+        return jsonify(definition)
+    except (ValueError, TypeError) as exc:
+        return _ontology_error(exc)
+
+
+def _read_bounds(max_limit=4000):
+    try:
+        return max(0, int(request.args.get("offset", 0))), max(1, min(max_limit, int(request.args.get("limit", max_limit))))
+    except (ValueError, TypeError) as exc:
+        raise ValueError("offset 和 limit 必须是整数") from exc
+
+
+@bp.get("/api/knowledge/ontologies/<oid>/revisions")
+def ontology_revisions(oid: str):
+    try:
+        offset, limit = _read_bounds(100)
+        with _kb() as kb:
+            revisions = kb.ontologies.revisions(oid, offset=offset, limit=limit)
+        return jsonify({"id": oid, "revisions": revisions, "offset": offset,
+                        "next_offset": offset + len(revisions) if len(revisions) == limit else None})
+    except (ValueError, TypeError) as exc:
+        return _ontology_error(exc)
+
+
+@bp.get("/api/knowledge/<kind>/<int:did>/revisions")
+@bp.get("/api/knowledge/<kind>/<int:did>/revisions/<revision_id>")
+def ordinary_definition_revisions(kind: str, did: int, revision_id: str = ""):
+    from Function.Knowledge.definition_history import canonical_json
+    kinds = {"metrics": "metric", "rules": "rule"}
+    if kind not in kinds:
+        return jsonify({"error": "Unknown definition kind"}), 404
+    try:
+        offset, limit = _read_bounds(4000 if revision_id else 100)
+        with _kb() as kb:
+            if not revision_id:
+                rows = kb.definition_revisions(kinds[kind], did, offset=offset, limit=limit)
+                return jsonify({"revisions": rows, "offset": offset,
+                                "next_offset": offset + len(rows) if len(rows) == limit else None})
+            definition = kb.definition_revision(kinds[kind], did, revision_id)
+        if definition is None:
+            return jsonify({"error": "未找到该修订或已过保留期"}), 404
+        text = canonical_json(definition)
+        offset = min(offset, len(text))
+        content = text[offset:offset + limit]
+        end = offset + len(content)
+        return jsonify({"definition_id": did, "kind": kinds[kind], "revision_id": revision_id,
+                        "content_hash": definition["content_hash"], "content": content,
+                        "definition": definition if offset == 0 and end == len(text) else None,
+                        "offset": offset, "returned_chars": len(content), "total_chars": len(text),
+                        "next_offset": end if end < len(text) else None})
+    except (ValueError, TypeError) as exc:
+        return _ontology_error(exc)
+
+
+@bp.post("/api/knowledge/ontologies/<oid>/preview")
+def preview_ontology_retrieval(oid: str):
+    try:
+        body = _ontology_body()
+        question = body.get("question", "")
+        if not isinstance(question, str) or not question.strip() or len(question) > 4000:
+            raise ValueError("请输入 1–4000 字符的检索问题")
+        sources = _ontology_sources(active_only=True)
+        with _kb() as kb:
+            record = kb.ontologies.get(oid)
+            if record is None:
+                return jsonify({"error": "本体不存在"}), 404
+            bound = kb.ontologies._bound_source(record["binding"], sources) is not None
+            matches = kb.ontologies.search(f"{question} ontology:{oid}", sources)
+        return jsonify({"matches": matches, "bound_to_active_source": bound,
+                        "enabled": bool(record["enabled"]), "security_status": "advisory_only"})
+    except (ValueError, PermissionError) as exc:
+        return _ontology_error(exc)
+
+
+@bp.get("/api/knowledge/ontologies/<oid>/source")
+def download_ontology(oid: str):
+    with _kb() as kb:
+        record = kb.ontologies.get(oid)
+    if record is None:
+        return jsonify({"error": "本体不存在"}), 404
+    import yaml
+    from flask import Response
+    from werkzeug.http import dump_options_header
+    response = Response(yaml.safe_dump(record["document"], allow_unicode=True, sort_keys=False),
+                        content_type="application/x-yaml; charset=utf-8")
+    name = Path(record["source_name"]).name.replace("\\", "_").replace("\r", "").replace("\n", "")
+    response.headers["Content-Disposition"] = dump_options_header(
+        "attachment", {"filename": name if name.isascii() else "ontology.yaml"},
+    )
+    return response
+
+
+@bp.put("/api/knowledge/ontologies/<oid>")
+def update_ontology(oid: str):
+    try:
+        body = _ontology_body()
+        with _kb() as kb:
+            old = kb.ontologies.get(oid)
+            if old is None:
+                return jsonify({"error": "本体不存在"}), 404
+            binding = warnings = None
+            if any(key in body for key in ("source_id", "mapping", "column_mapping")):
+                from Function.Knowledge.ontology_parser import validate_ontology
+                parsed = validate_ontology(old["document"])
+                binding, extra = _ontology_binding(old["document"], {**old["binding"], **body})
+                warnings = [*parsed["warnings"], *extra]
+            enabled = body.get("enabled")
+            if enabled is not None and not isinstance(enabled, bool):
+                raise ValueError("enabled 必须是布尔值")
+            record = kb.ontologies.update(oid, binding=binding, enabled=enabled, warnings=warnings)
+        return jsonify(record)
+    except (ValueError, PermissionError) as exc:
+        return _ontology_error(exc)
+
+
+@bp.delete("/api/knowledge/ontologies/<oid>")
+def delete_ontology(oid: str):
+    with _kb() as kb:
+        record = kb.ontologies.get(oid)
+        if record is None:
+            return jsonify({"error": "本体不存在"}), 404
+        kb.ontologies.delete(oid)
+    (_kb_dir() / Path(record["filename"]).name).unlink(missing_ok=True)
+    return jsonify({"ok": True})
+
+
+def _parse_ontology_upload(file, save_path: Path, filename: str):
+    from Function.Knowledge.ontology_parser import parse_ontology
+    from Function.Knowledge.ontology_store import physical_tables, table_requirements
+    try:
+        raw = file.stream.read(_ONTOLOGY_MAX_BYTES + 1)
+        if len(raw) > _ONTOLOGY_MAX_BYTES:
+            raise ValueError("本体文件不能超过 256 KB")
+        parsed = parse_ontology(raw.decode("utf-8-sig"))
+        sources = _ontology_sources()
+        save_path.write_bytes(raw)
+        return jsonify({**parsed, "filename": filename, "source_name": Path(file.filename).name,
+                        "sources": sources, "expected_tables": sorted(physical_tables(parsed["ontology"])),
+                        "table_requirements": table_requirements(parsed["ontology"])})
+    except (ValueError, PermissionError, UnicodeError) as exc:
+        save_path.unlink(missing_ok=True)
+        return _ontology_error(exc)
+
+
+def _confirm_ontology(body: dict, source_path: Path):
+    from Function.Knowledge.ontology_parser import parse_ontology
+    try:
+        if not source_path.is_file() or source_path.stat().st_size > _ONTOLOGY_MAX_BYTES:
+            raise ValueError("本体源文件不存在或超过 256 KB，请重新上传")
+        parsed = parse_ontology(source_path.read_text(encoding="utf-8-sig"))
+        binding, warnings = _ontology_binding(parsed["ontology"], body)
+        oid = str(body.get("ontology_id") or "")
+        with _kb() as kb:
+            old = (kb.ontologies.get(oid) if oid else next(
+                (row for row in kb.ontologies.list() if row["filename"] == source_path.name), None,
+            ))
+            oid = old["id"] if old else oid
+            record = kb.ontologies.save(
+                parsed, filename=source_path.name,
+                source_name=str(body.get("source_name") or source_path.name)[:240],
+                category_id=kb._normalize_category_id(_category_id()), binding=binding,
+                ontology_id=oid, enabled=bool(old["enabled"]) if old else True,
+                extra_warnings=warnings,
+            )
+        if old and old["filename"] != source_path.name:
+            (_kb_dir() / Path(old["filename"]).name).unlink(missing_ok=True)
+        return jsonify({"ok": True, "ontology": record,
+                        "replaced_filename": old["filename"] if old else ""})
+    except (ValueError, PermissionError, UnicodeError) as exc:
+        return _ontology_error(exc)
 
 
 # ── File parse → preview ──────────────────────────────────────────────────────
@@ -177,13 +432,15 @@ def parse_file():
     ext = Path(original_name).suffix.lower()
 
     if ext not in _ALLOWED_EXTS:
-        return jsonify({"error": f"不支持的文件格式 {ext}，请上传 .xlsx / .xls / .docx"}), 400
+        return jsonify({"error": f"不支持的文件格式 {ext}，请上传 .xlsx / .xls / .docx / .yaml / .yml"}), 400
 
     # Keep original filename; prepend uuid prefix to avoid collisions
     safe_stem = "".join(c if c.isalnum() or c in "-_." else "_"
                         for c in Path(original_name).stem)[:60]
     filename = f"{uuid.uuid4().hex[:8]}_{safe_stem}{ext}"
     save_path = scope_dir / filename
+    if ext in _YAML_EXTS:
+        return _parse_ontology_upload(f, save_path, filename)
     f.save(str(save_path))
 
     try:
@@ -234,6 +491,12 @@ def list_files():
     return jsonify(files)
 
 
+@bp.get("/api/knowledge/files/<filename>/impact")
+def source_delete_impact(filename: str):
+    with _kb() as kb:
+        return jsonify(kb.source_delete_impact(filename))
+
+
 @bp.delete("/api/knowledge/files/<filename>")
 def delete_file(filename: str):
     """Delete a source file from uploads/knowledge/."""
@@ -242,28 +505,39 @@ def delete_file(filename: str):
     target = _kb_dir() / filename
     if not target.exists():
         return jsonify({"error": "File not found"}), 404
+    with _kb() as kb:
+        impact = kb.source_delete_impact(filename)
+        for record in kb.ontologies.list():
+            if record["filename"] == filename:
+                kb.ontologies.delete(record["id"])
     target.unlink()
     try:
         with _kb() as kb:
             kb.delete_document_index(filename)
     except Exception:
         log.exception("Failed to delete RAG index for %s", filename)
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "impact": impact})
 
 
 # ── Confirm → bulk insert ─────────────────────────────────────────────────────
 
 @bp.post("/api/knowledge/confirm")
 def confirm_records():
-    body = request.get_json(silent=True) or {}
+    try:
+        body = _ontology_body()
+    except ValueError as exc:
+        return _ontology_error(exc)
     records = body.get("records", [])
     filename = Path(body.get("filename") or "").name
+    if Path(filename).suffix.lower() in _YAML_EXTS:
+        return _confirm_ontology(body, _kb_dir() / filename)
     if not records and not filename:
         return jsonify({"error": "No records or source file provided"}), 400
     try:
         category_id = _category_id()
         with _kb() as kb:
-            counts = kb.bulk_insert(records, category_id=category_id) if records else {"metrics": 0, "rules": 0, "notes": 0}
+            linked_filename = filename if filename and (_kb_dir() / filename).is_file() else None
+            counts = kb.bulk_insert(records, category_id=category_id, source_filename=linked_filename) if records else {"metrics": 0, "rules": 0, "notes": 0}
             rag = {"chunks": 0}
             if filename:
                 source_path = _kb_dir() / filename
@@ -290,11 +564,11 @@ def restore_structured_snapshot():
         # server's file list cannot retain stale copies across restarts/tabs.
         scope_dir = _kb_dir()
         scope_dir.mkdir(parents=True, exist_ok=True)
+        with _kb() as kb:
+            restored = kb.replace_structured_snapshot(body.get("snapshot") or {})
         for path in scope_dir.iterdir():
             if path.is_file() and path.suffix.lower() in _ALLOWED_EXTS:
                 path.unlink()
-        with _kb() as kb:
-            restored = kb.replace_structured_snapshot(body.get("snapshot") or {})
         return jsonify({"ok": True, "restored": restored})
     except Exception as e:
         log.exception("Knowledge structured restore failed")
@@ -317,6 +591,19 @@ def restore_source_file():
     target = _kb_dir() / filename
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
+        if ext in _YAML_EXTS:
+            from Function.Knowledge.ontology_parser import parse_ontology
+            raw = f.stream.read(_ONTOLOGY_MAX_BYTES + 1)
+            if len(raw) > _ONTOLOGY_MAX_BYTES:
+                raise ValueError("本体文件不能超过 256 KB")
+            parsed = parse_ontology(raw.decode("utf-8-sig"))
+            with _kb() as kb:
+                record = kb.ontologies.get(str(request.form.get("ontology_id") or ""))
+                if not record or record["document"] != parsed["ontology"]:
+                    raise ValueError("请先恢复匹配的本体结构化快照")
+                target.write_bytes(raw)
+                kb.ontologies.update(record["id"], filename=filename)
+            return jsonify({"ok": True, "filename": filename, "rag": {"chunks": 0}})
         f.save(str(target))
         category_name = str(request.form.get("category_name") or "").strip()
         with _kb() as kb:
@@ -499,9 +786,15 @@ def delete_note(nid: int):
 def search():
     q = request.args.get("q", "").strip()
     if not q:
-        return jsonify({"metrics": [], "rules": [], "notes": []})
-    with _kb() as kb:
-        return jsonify(kb.search(q))
+        return jsonify({"metrics": [], "rules": [], "notes": [], "ontologies": []})
+    try:
+        sources = _ontology_sources(active_only=True)
+        with _kb() as kb:
+            results = kb.search(q)
+            results["ontologies"] = kb.ontologies.search(q, sources)
+        return jsonify(results)
+    except PermissionError as exc:
+        return _ontology_error(exc)
 
 
 # ── Temporary per-session prompt ──────────────────────────────────────────────

@@ -13,6 +13,7 @@ export default defineConfig({
     outDir: "static/dist",
     emptyOutDir: false,
     sourcemap: false,
+    manifest: true,
     rollupOptions: {
       input: resolve(root, "frontend/entries/chat-app.js"),
       output: {
@@ -23,9 +24,16 @@ export default defineConfig({
           const normalized = id.replace(/\\/g, "/");
           if (
             normalized.endsWith("/frontend/core/ui-registry.js") ||
-            normalized.endsWith("/frontend/core/event-bus.js")
+            normalized.endsWith("/frontend/core/event-bus.js") ||
+            normalized.endsWith("/frontend/core/overlay.js") ||
+            normalized.endsWith("/frontend/core/dom.js") ||
+            normalized.endsWith("/frontend/core/request-state.js") ||
+            normalized.endsWith("/frontend/features/compute-data.js")
           ) {
             return "ui-registry";
+          }
+          if (normalized.endsWith("/frontend/core/api-client.js")) {
+            return "api-client";
           }
         },
       },

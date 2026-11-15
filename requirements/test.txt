@@ -1,2 +1,8 @@
 # Development/CI only; application runtime dependencies live in ../requirements.txt.
 pytest>=8.0,<10.0
+-r bigdata.txt
+-r cluster-hs2.txt
+safetensors>=0.8,<1
+# CI installs the platform-appropriate CPU build first; control-only runtime
+# startup still does not require Torch. The Linux runner profile is separate.
+torch>=2.2,<3

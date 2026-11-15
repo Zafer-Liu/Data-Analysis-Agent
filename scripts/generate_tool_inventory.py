@@ -81,22 +81,17 @@ def main() -> int:
     rendered = render()
     if args.check:
         if not TARGET.exists():
-            # docs/ is local-only in this repository (see .gitignore), so a
-            # clean checkout, e.g. CI, has no inventory to diff against.
-            # render() above already enforced registry / schema / job-plan
-            # consistency, which is the part of the check that matters there.
-            print(
-                f"tool inventory not found at {TARGET.relative_to(ROOT)}; "
-                "registry validation passed, skipping the diff"
+            raise SystemExit(
+                f"Required tool inventory is missing: {TARGET.relative_to(ROOT)}; "
+                "run scripts/generate_tool_inventory.py and include the generated contract."
             )
-            return 0
         current = TARGET.read_text(encoding="utf-8")
         if current != rendered:
             raise SystemExit(
                 "tool inventory is stale; run scripts/generate_tool_inventory.py"
             )
         return 0
-    TARGET.write_text(rendered, encoding="utf-8")
+    TARGET.write_text(rendered, encoding="utf-8", newline="\n")
     return 0
 
 

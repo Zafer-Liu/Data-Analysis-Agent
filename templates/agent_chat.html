@@ -437,14 +437,15 @@
           <div class="kb-import-zone" id="kb-drop-zone">
             <div class="kb-import-icon"><svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg></div>
             <div class="kb-import-hint">拖拽文件到此处，或点击选择</div>
-            <div class="kb-import-sub">支持 .xlsx / .xls / .docx</div>
-            <input type="file" id="kb-file-input" accept=".xlsx,.xls,.docx" class="hidden" data-change="kbOnFileSelect">
+            <div class="kb-import-sub">支持 .xlsx / .xls / .docx / .yaml / .yml；本体文件最大 256 KB</div>
+            <input type="file" id="kb-file-input" accept=".xlsx,.xls,.docx,.yaml,.yml" class="hidden" data-change="kbOnFileSelect">
             <button class="btn-sm btn-sm-primary f-mt10" data-action="kbPickFile">选择文件</button>
           </div>
 
-          <div class="ds-loading hidden" id="kb-parsing">
-            <div class="ds-spinner"></div>
-            <span>正在解析文件，请稍候…</span>
+          <div class="ds-loading hidden" id="kb-parsing" role="status" aria-live="polite">
+            <div class="ds-spinner" aria-hidden="true"></div>
+            <span data-i18n="request.parsing">正在解析文件，请稍候…</span>
+            <button type="button" class="btn-sm btn-sm-ghost" data-action="kbCancelImport" data-i18n="common.cancel">取消</button>
           </div>
           <div id="kb-preview-area" class="kb-preview-area hidden">
             <div class="kb-preview-header">
@@ -454,13 +455,17 @@
               </div>
               <div class="f-kb-preview-btns">
                 <button type="button" class="btn-sm btn-sm-ghost" data-action="kbCancelImport">重新选择</button>
-                <button type="button" class="btn-sm btn-sm-primary" data-action="kbConfirmImport"><svg viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></svg> 全部入库</button>
+                <button type="button" class="btn-sm btn-sm-primary" data-action="kbConfirmImport"><svg viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></svg> <span id="kb-confirm-label">全部入库</span></button>
               </div>
             </div>
             <div class="kb-preview-list" id="kb-preview-list"></div>
           </div>
-          <div class="msg-err f-kb-import-err" id="kb-import-err"></div>
-          <div class="msg-ok  f-kb-import-ok"  id="kb-import-ok"></div>
+          <div class="msg-err f-kb-import-err" id="kb-import-err" role="alert"></div>
+          <div class="msg-ok  f-kb-import-ok"  id="kb-import-ok" role="status" aria-live="polite"></div>
+          <section class="kb-import-section" aria-label="业务本体">
+            <div class="kb-import-section-head"><span class="f-section-title">业务本体</span></div>
+            <div id="kb-ontology-list" aria-live="polite"><p class="kb-ontology-note">上传 YAML 本体并关联数据源，让分析使用明确的业务关系和指标口径。</p></div>
+          </section>
           <section id="kb-files-section" class="kb-import-section">
             <div class="kb-import-section-head">
               <span class="f-section-title">已上传的源文件</span>
@@ -766,6 +771,11 @@
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
                 <span data-i18n="sidebar.workspace">工作目录</span>
               </button>
+              <button class="composer-tool composer-compute" type="button" data-action="openComputeData:datasets"
+                      data-i18n-title="compute.title" title="数据与计算">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 9v12M14 13h3M14 17h3"/></svg>
+                <span data-i18n="compute.title">数据与计算</span>
+              </button>
               <button class="composer-tool composer-teams" type="button" data-action="openTeams"
                       title="团队">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M18 8a3 3 0 1 1-6 0 3 3 0 0 1 6 0M12 11a4 4 0 0 1 4 4v2"/></svg>
@@ -829,7 +839,7 @@
     <div class="modal-title" data-i18n="modal.excel.title">📂 上传 Excel / CSV / PDF 文件</div>
     <div class="f-row">
       <label data-i18n="modal.excel.label">选择文件</label>
-      <input type="file" id="xl-file" accept=".xlsx,.xls,.csv,.pdf" multiple>
+      <input type="file" id="xl-file" accept=".xlsx,.xls,.csv,.parquet,.pdf" multiple>
       <div class="f-hint" data-i18n="modal.excel.hint">支持 .xlsx / .xls / .csv / .pdf</div>
     </div>
     <div class="upload-progress hidden" id="xl-progress">
@@ -1385,6 +1395,13 @@
       <button class="btn-sm btn-sm-ghost"   data-action="closeOverlay:ov-workspace" data-i18n="modal.close">关闭</button>
       <button class="btn-sm btn-sm-primary" id="ws-mount-btn" data-action="mountWorkspace" data-i18n="modal.workspace.mount_btn">挂载</button>
     </div>
+  </div>
+</div>
+
+<!-- ── Bounded datasets, remote training and cluster queries ───────── -->
+<div class="overlay" id="ov-compute-data">
+  <div class="modal compute-data-modal">
+    <div id="compute-data-root"></div>
   </div>
 </div>
 

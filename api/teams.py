@@ -3,10 +3,13 @@ from __future__ import annotations
 
 from flask import Blueprint, jsonify, request
 
+from agent.execution import execution_owner_alive, get_execution_context
 from agent.tools.workspace.teams import WorkspaceTeamError, WorkspaceTeamStore
 from .state import require_session_ownership
+from .team_a2a import register_routes as register_a2a_routes
 
 bp = Blueprint("teams", __name__)
+register_a2a_routes(bp)
 
 
 def _error_response(error: Exception, status: int):
@@ -111,18 +114,37 @@ def control_team_plan(sid: str, plan_id: str, action: str):
     except WorkspaceTeamError as exc:
         return _error_response(exc, 409 if "cannot" in str(exc) else 400)
     canceled_jobs = 0
+    canceled_tasks = 0
     if action == "cancel":
         from api.state import session_manager
+        from agent.teams.a2a import A2AError
 
         session = session_manager.get(sid)
         runner = getattr(session, "job_runner", None) if session else None
-        if runner is not None:
-            for task in plan.get("tasks") or []:
-                job_id = str(task.get("job_id") or "")
-                if job_id:
+        team_store = WorkspaceTeamStore(sid)
+        for task in plan.get("tasks") or []:
+            a2a_task_id = str(task.get("a2a_task_id") or "")
+            execution = {}
+            if a2a_task_id:
+                try:
+                    canceled = team_store.cancel_task(plan["team_name"], a2a_task_id)
+                    if isinstance(canceled, dict):
+                        execution = canceled.get("metadata", {}).get("execution") or {}
+                    canceled_tasks += 1
+                except A2AError as exc:
+                    if exc.code not in {-32001, -32002}:
+                        raise
+            job_id = str(task.get("job_id") or "")
+            if runner is not None and job_id:
+                context = get_execution_context(execution.get("attempt_id", ""))
+                if execution.get("attempt_id") and execution_owner_alive(execution) is not False:
+                    runner.cancel(job_id)
+                    if context is not None:
+                        context.add_exit_callback(lambda jid=job_id: runner.cancel_tracked(jid))
+                else:
                     runner.cancel_tracked(job_id)
-                    canceled_jobs += 1
-    return jsonify({"ok": True, "plan": plan, "canceled_jobs": canceled_jobs})
+                canceled_jobs += 1
+    return jsonify({"ok": True, "plan": plan, "canceled_jobs": canceled_jobs, "canceled_a2a_tasks": canceled_tasks})
 
 
 @bp.post("/api/session/<sid>/team-plans/<plan_id>/workflow-draft")

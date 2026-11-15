@@ -21,26 +21,63 @@ def stable_prompt_cache_key(
     model: str,
     workflow_stage: str,
     tools: Sequence[Mapping[str, Any]],
+    stable_prefix: str | Sequence[Mapping[str, Any]] = "",
+    stable_revision: str = "",
 ) -> str:
-    """Build a non-sensitive routing key for one stable capability prefix."""
-    tool_names = [
-        str(((tool.get("function") or {}).get("name") or ""))
-        for tool in tools
-    ]
+    """Fingerprint full stable schemas/content; return only an opaque digest.
+
+    Callers explicitly supply stable rules. Questions, knowledge, memory, user
+    instructions and task state belong in the dynamic suffix. Object key order
+    is canonicalized; tool/message sequence order remains significant because
+    it changes the provider's actual prefix. No prefix text is logged here.
+    """
     payload = json.dumps({
-        "v": 1,
+        "v": 2,
         "provider": str(provider or ""),
         "model": str(model or ""),
         "stage": str(workflow_stage or ""),
-        "tools": tool_names,
-    }, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+        "tools": list(tools),
+        "stable_prefix": stable_prefix,
+        "stable_revision": str(stable_revision or ""),
+    }, ensure_ascii=True, separators=(",", ":"), sort_keys=True, allow_nan=False)
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
     return f"baa-{digest}"
 
 
+def build_cacheable_prompt(
+    *, stable_messages: Sequence[Mapping[str, Any]],
+    dynamic_messages: Sequence[Mapping[str, Any]], tools: Sequence[Mapping[str, Any]],
+    provider: str, model: str, workflow_stage: str = "", stable_revision: str = "",
+) -> dict[str, Any]:
+    """Assemble an explicit stable prefix followed by unmodified dynamic state.
+
+    This is opt-in: it never guesses which existing system messages are stable,
+    trims instructions, or inserts provider-specific cache breakpoints. The
+    caller must preserve its existing instruction precedence when adopting it.
+    """
+    from copy import deepcopy
+
+    stable = deepcopy(list(stable_messages))
+    dynamic = deepcopy(list(dynamic_messages))
+    schemas = deepcopy(list(tools))
+    if any(message.get("role") not in {"system", "developer"} for message in stable):
+        raise ValueError("stable_messages must contain only system/developer rules")
+    key = stable_prompt_cache_key(
+        provider=provider, model=model, workflow_stage=workflow_stage, tools=schemas,
+        stable_prefix=stable, stable_revision=stable_revision,
+    )
+    return {
+        "messages": stable + dynamic, "tools": schemas, "cache_key": key,
+        "metadata": {
+            "identity_version": 2, "stable_message_count": len(stable),
+            "dynamic_message_count": len(dynamic), "tool_count": len(schemas),
+        },
+    }
+
+
 def cache_scope_user_id(*, user_id: str = "", workspace_id: str = "") -> str:
     """Return an opaque provider-safe cache isolation id without PII."""
-    owner = f"{str(user_id or 'local-default')}|{str(workspace_id or 'user')}"
+    owner = json.dumps([str(user_id or "local-default"), str(workspace_id or "user")], separators=(",", ":"))
     digest = hashlib.sha256(owner.encode("utf-8")).hexdigest()[:32]
     return f"baa_{digest}"
 

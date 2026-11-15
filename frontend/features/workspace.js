@@ -191,6 +191,7 @@ import { sysMsg } from "../legacy/msg.js";
     const permTrigger = document.querySelector(".composer-permission-trigger");
     if (permTrigger) {
       permTrigger.disabled = !mounted;
+      permTrigger.dataset.i18nTitle = mounted ? "workspace.permission_hint" : "workspace.permission_disabled";
       permTrigger.title = mounted
         ? (window.t?.("workspace.permission_hint") || "连接工作目录后可调整权限")
         : (window.t?.("workspace.permission_disabled") || "请先挂载工作目录");

@@ -1,5 +1,6 @@
 // Compatibility data-source module: uploads, databases, sheets, APIs and multi-source management.
 import { eventBus } from "../core/event-bus.js";
+import { apiClient, requestErrorMessage } from "../core/api-client.js";
 import { $, esc } from "../core/dom.js";
 import { closeOverlay, openOverlay, toast } from "../core/overlay.js";
 import { sysMsg } from "./msg.js";
@@ -8,6 +9,24 @@ import { invalidate as invalidatePreview } from "./preview.js";
 
 const state = window.BAA.state;
 let warehouseDeleteBusy = false;
+let computeSourceRefresh = 0;
+
+async function refreshComputeSources({ source_id } = {}) {
+  const generation = ++computeSourceRefresh;
+  const sid = state.SID;
+  const workspaceId = state.workspace_id || state.workspaceId || state.workspace?.workspace_id || "";
+  try {
+    const result = await apiClient.get(`/api/session/${encodeURIComponent(sid)}/sources`);
+    const currentWorkspace = state.workspace_id || state.workspaceId || state.workspace?.workspace_id || "";
+    if (generation !== computeSourceRefresh || sid !== state.SID || workspaceId !== currentWorkspace) return;
+    const source = (result.sources || []).find(item => item.id === source_id);
+    onSourcesUpdated(result.sources || [], source?.name || "");
+  } catch (error) {
+    if (generation === computeSourceRefresh && sid === state.SID) toast(requestErrorMessage(error));
+  }
+}
+eventBus.on("compute:dataset-activated", refreshComputeSources);
+eventBus.on("compute:source-activated", refreshComputeSources);
 
 // ── Type icon map ──────────────────────────────────────────────────────────
 const TYPE_ICON = {

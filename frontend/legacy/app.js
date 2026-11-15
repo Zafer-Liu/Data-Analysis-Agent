@@ -179,6 +179,7 @@ if (globalThis.__baaAppDelegationRegistered) {
     // Workspace (workdir mount)
     openWorkspace:   () => window.BAA.workspace.openModal(),
     openTeams:       () => window.BAA.teams.openPanel(),
+    openComputeData: (_el, tab) => window.BAA.computeData.openComputeDataPanel(tab || "datasets"),
     mountWorkspace:  () => window.BAA.workspace.doMount(),
     pickWorkdir:     () => window.BAA.workspace.pickWorkdir(),
 

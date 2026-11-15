@@ -1,4 +1,5 @@
 import { registerUiIsland } from "../../core/ui-registry.js";
+import { requestMessage } from "../../core/api-client.js";
 
 // Progressive Vue island #5: Knowledge base modal (tabs + 3 list panels + form body).
 // Mount points: #kb-tabs, #kb-panel-metrics, #kb-panel-rules, #kb-panel-notes, #kb-form-body.
@@ -43,6 +44,7 @@ export function mountKnowledgeUi() {
     activeCategoryId: 1,
     categoryDraft: "",
     categoryErr: "",
+    categoryBusy: false,
     categoryMenuOpen: false,
     lists: {
       metrics: { items: [], count: "—", loading: false, err: "" },
@@ -103,6 +105,8 @@ export function mountKnowledgeUi() {
             h("button", {
               class: ["kb-category-select", state.categoryMenuOpen ? "open" : ""],
               title: "选择业务分类",
+              type: "button",
+              "aria-expanded": state.categoryMenuOpen,
               onClick: e => {
                 e.stopPropagation();
                 state.categoryMenuOpen = !state.categoryMenuOpen;
@@ -121,7 +125,8 @@ export function mountKnowledgeUi() {
           }, "上传文档解析"),
         ]),
       ]),
-      state.categoryErr ? h("div", { class: "kb-category-err" }, state.categoryErr) : null,
+      state.categoryErr ? h("div", { class: "kb-category-err", role: "alert" }, [state.categoryErr,
+        h("button", { class: "kb-act-btn", type: "button", onClick: () => callbacks.onSwitchTab?.(state.tab) }, requestMessage("retry"))]) : null,
     ]);
 
     const tabs = h("div", { class: "kb-tabs" }, TABS.filter(tb => !tb.importTab).map(tb => {
@@ -145,21 +150,35 @@ export function mountKnowledgeUi() {
     return h("div", {
       class: "kb-category-menu",
       onClick: e => e.stopPropagation(),
+      onKeydown: e => {
+        if (e.key === "Escape") {
+          e.stopPropagation();
+          closeCategoryMenu();
+          root1.querySelector?.(".kb-category-select")?.focus();
+        }
+      },
     }, [
       h("div", { class: "kb-category-menu-list" }, state.categories.map(cat => {
         const active = Number(cat.id) === Number(state.activeCategoryId);
         const enabled = !!cat.enabled;
         return h("div", {
           class: ["kb-category-option", active ? "active" : "", enabled ? "" : "disabled"],
-          onClick: () => {
-            state.categoryMenuOpen = false;
-            callbacks.onSelectCategory && callbacks.onSelectCategory(cat.id);
-          },
         }, [
-          h("span", { class: "kb-category-check" }, active ? "✓" : ""),
-          h("span", { class: "kb-category-option-name" }, cat.name),
+          h("button", {
+            class: "kb-category-option-select", type: "button", "aria-pressed": active,
+            onClick: () => {
+              state.categoryMenuOpen = false;
+              callbacks.onSelectCategory?.(cat.id);
+              root1.querySelector?.(".kb-category-select")?.focus();
+            },
+          }, [
+            h("span", { class: "kb-category-check", "aria-hidden": "true" }, active ? "✓" : ""),
+            h("span", { class: "kb-category-option-name" }, cat.name),
+          ]),
           h("button", {
             class: ["kb-category-toggle", enabled ? "on" : "off"],
+            type: "button", disabled: !!cat.pending,
+            "aria-pressed": enabled,
             title: enabled ? "停用该业务知识库" : "启用该业务知识库",
             onClick: e => {
               e.stopPropagation();
@@ -167,7 +186,7 @@ export function mountKnowledgeUi() {
             },
           }, enabled ? "启用" : "停用"),
           h("button", {
-            class: "kb-category-delete",
+            class: "kb-category-delete", type: "button", disabled: !!cat.pending,
             title: `删除业务分类“${cat.name}”`,
             "aria-label": `删除业务分类“${cat.name}”`,
             onClick: e => {
@@ -187,11 +206,12 @@ export function mountKnowledgeUi() {
           },
         }),
         h("button", {
-          class: "kb-category-add-btn",
+          class: "kb-category-add-btn", type: "button", disabled: state.categoryBusy,
           onClick: submitCategory,
-        }, "新增分类"),
+        }, state.categoryBusy ? requestMessage("saving") : "新增分类"),
       ]),
-      state.categoryErr ? h("div", { class: "kb-category-err" }, state.categoryErr) : null,
+      state.categoryErr ? h("div", { class: "kb-category-err", role: "alert" }, [state.categoryErr,
+        h("button", { class: "kb-act-btn", type: "button", onClick: () => callbacks.onSwitchTab?.(state.tab) }, requestMessage("retry"))]) : null,
     ]);
   }
 
@@ -207,9 +227,9 @@ export function mountKnowledgeUi() {
       h("div", { class: "kb-toolbar-actions" }, [
         h("button", {
           class: "btn-sm btn-sm-ghost",
-          title: "刷新列表",
-          onClick: () => callbacks.onSwitchTab && callbacks.onSwitchTab(type),
-        }, "↻ 刷新"),
+          type: "button", title: requestMessage(L.loading ? "cancel" : "refresh"),
+          onClick: () => L.loading ? callbacks.onCancelList?.(type) : callbacks.onSwitchTab?.(type),
+        }, requestMessage(L.loading ? "cancel" : "refresh")),
         h("button", {
           class: "btn-sm btn-sm-primary",
           onClick: () => callbacks.onOpenForm && callbacks.onOpenForm(type, null),
@@ -219,17 +239,18 @@ export function mountKnowledgeUi() {
 
     let listContent;
     if (L.loading) {
-      listContent = h("div", { class: "kb-empty" }, "加载中…");
+      listContent = h("div", { class: "kb-empty", role: "status" }, requestMessage("loading"));
     } else if (L.err) {
-      listContent = h("div", { class: "kb-empty", style: "color:#ef4444" }, `加载失败: ${L.err}`);
+      listContent = h("div", { class: "kb-empty kb-request-error", role: "alert" }, [L.err,
+        h("button", { type: "button", class: "kb-act-btn", onClick: () => callbacks.onSwitchTab?.(type) }, requestMessage("retry")),
+      ]);
     } else if (!L.items.length) {
-      const emptyText = `暂无${TYPE_LABELS[type]}${type === "metrics" ? "定义" : ""}`;
-      listContent = h("div", { class: "kb-empty" }, emptyText);
+      listContent = h("div", { class: "kb-empty", role: "status" }, requestMessage(`${type}Empty`));
     } else {
       listContent = h(Fragment, null, L.items.map(item => _renderCard(type, item)));
     }
 
-    const list = h("div", { class: "kb-list", id: `kb-list-${type}` }, listContent);
+    const list = h("div", { class: "kb-list", id: `kb-list-${type}`, "aria-busy": L.loading }, listContent);
     render(h(Fragment, null, [toolbar, list]), root);
   }
 
@@ -239,13 +260,13 @@ export function mountKnowledgeUi() {
     const cardStyle = effectiveEnabled ? {} : { style: "opacity:.45" };
     // Actions row: placed at the bottom so the name row has full width (no squeeze)
     const actions = h("div", { class: "kb-card-actions" }, [
-      _renderToggle(effectiveEnabled, () => callbacks.onToggle && callbacks.onToggle(type, item.id), { disabled: !categoryEnabled }),
+      _renderToggle(effectiveEnabled, () => callbacks.onToggle && callbacks.onToggle(type, item.id), { disabled: !categoryEnabled || item.pending }),
       h("button", {
-        class: "kb-act-btn",
+        class: "kb-act-btn", type: "button", disabled: !!item.pending,
         onClick: () => callbacks.onOpenForm && callbacks.onOpenForm(type, item.id),
       }, "编辑"),
       h("button", {
-        class: "kb-act-btn danger",
+        class: "kb-act-btn danger", type: "button", disabled: !!item.pending,
         onClick: () => callbacks.onDelete && callbacks.onDelete(type, item.id),
       }, "删除"),
     ]);
@@ -292,7 +313,9 @@ export function mountKnowledgeUi() {
 
   function _renderToggle(enabled, onClick, opts = {}) {
     const disabled = !!opts.disabled;
-    return h("div", {
+    return h("button", {
+      type: "button", role: "switch", disabled, "aria-checked": enabled,
+      "aria-label": requestMessage("toggleLabel"),
       class: ["kb-toggle", enabled ? "on" : "", disabled ? "disabled" : ""],
       title: disabled ? "当前业务分类已停用，启用业务后此条才生效" : (enabled ? "已启用，点击禁用" : "已禁用，点击启用"),
       onClick: disabled ? undefined : onClick,
@@ -332,24 +355,27 @@ export function mountKnowledgeUi() {
       ];
     }
 
-    const errNode = f.err ? h("div", { class: "msg-err" }, f.err) : null;
+    const errNode = f.err ? h("div", { class: "msg-err", id: "kb-form-error", role: "alert" }, f.err) : null;
     render(h(Fragment, null, [...fieldNodes, errNode]), root5);
   }
 
   function _renderField(label, required, inputType, value, onInput, placeholder, rows) {
-    const labelNode = required
-      ? h("label", null, [label, " ", h("span", { style: "color:#ef4444" }, "*")])
-      : h("label", null, label);
+    const id = `kb-field-${encodeURIComponent(label)}`;
+    const labelNode = h("label", { for: id }, required ? [label, " ", h("span", { "aria-hidden": "true" }, "*")] : label);
+    const attrs = { id, required, disabled: state.form.busy, placeholder,
+      "aria-invalid": required && !!state.form.err, "aria-describedby": state.form.err ? "kb-form-error" : undefined,
+      onInput: e => onInput(e.target.value) };
     const inputNode = inputType === "textarea"
-      ? h("textarea", { rows: rows || 2, placeholder, onInput: e => onInput(e.target.value) }, value)
-      : h("input", { type: inputType, value, placeholder, onInput: e => onInput(e.target.value) });
+      ? h("textarea", { ...attrs, rows: rows || 2, value })
+      : h("input", { ...attrs, type: inputType, value });
     return h("div", { class: "f-row" }, [labelNode, inputNode]);
   }
 
   function _renderSelect(label, value, onChange, options) {
+    const id = `kb-field-${encodeURIComponent(label)}`;
     return h("div", { class: "f-row" }, [
-      h("label", null, label),
-      h("select", { value, onChange: e => onChange(e.target.value) },
+      h("label", { for: id }, label),
+      h("select", { id, value, disabled: state.form.busy, onChange: e => onChange(e.target.value) },
         options.map(o => h("option", { value: o.value }, o.label))),
     ]);
   }
@@ -378,6 +404,11 @@ export function mountKnowledgeUi() {
 
   function getActiveCategoryId() {
     return state.activeCategoryId || 1;
+  }
+
+  function setCategoryBusy(busy) {
+    state.categoryBusy = !!busy;
+    _renderTabs();
   }
 
   function setCategoryErr(msg) {
@@ -497,12 +528,12 @@ export function mountKnowledgeUi() {
     if (titleEl) {
       titleEl.textContent = (mode === "edit" ? "编辑" : "新增") + TYPE_LABELS[type];
     }
-    _renderForm();
+    setFormBusy(false);
   }
 
   function closeForm() {
     state.form.err = "";
-    state.form.busy = false;
+    setFormBusy(false);
   }
 
   function setFormField(key, val) {
@@ -516,6 +547,10 @@ export function mountKnowledgeUi() {
 
   function setFormBusy(b) {
     state.form.busy = !!b;
+    root5.setAttribute("aria-busy", String(!!b));
+    const button = document.getElementById("kb-submit-btn");
+    if (button) { button.disabled = !!b; button.textContent = requestMessage(b ? "saving" : "save"); }
+    _renderForm();
   }
 
   function getFormValues() {
@@ -554,6 +589,7 @@ export function mountKnowledgeUi() {
     };
   }
 
+  document.addEventListener("langchange", renderAll);
   // 初始化渲染
   renderAll();
 
@@ -567,6 +603,7 @@ export function mountKnowledgeUi() {
     setActiveCategory,
     getActiveCategoryId,
     setCategoryErr,
+    setCategoryBusy,
     setItems,
     setListStatus,
     getItem,
