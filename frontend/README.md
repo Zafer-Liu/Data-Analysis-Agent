@@ -1,9 +1,7 @@
 # Frontend (智析 Agent / BAA)
 
-> 前端源码目录与开发入口说明。本文是 `docs/05-architecture-improve.md`
-> 中「前端路径说明」引用的权威文件：旧任务表里的 `static/js/modules/*.js`
-> 与 `static/js/*` 是历史路径，**不代表当前开发入口**。新改动以本文与
-> [`docs/03-conventions.md`](../docs/03-conventions.md) 为准。
+> 前端源码目录与开发入口说明。旧任务表里的 `static/js/modules/*.js`
+> 与 `static/js/*` 是历史路径，**不代表当前开发入口**。新改动以本文与当前源码为准。
 
 本目录是「ES Module + Vue render-function island + Legacy IIFE 全局模块」
 的混合架构，处于渐进式迁移的**收官**阶段：Vue 已接管核心渲染路径
@@ -169,7 +167,7 @@ getUiIsland("settings").setProviders(data);        // → island 更新 reactive
 7. **不新增裸 `fetch()`**（见下「已知技术债」）；显隐用 `classList.toggle('hidden')` 而非 `style.display`；颜色/间距/阴影只用 `tokens.css` 的 CSS 变量。
 8. 验证浅色/深色、窄窗口、长文本、恢复会话场景；跑 `npm run quality`。
 
-> 完整约束见 [`docs/03-conventions.md`](../docs/03-conventions.md) 的「添加前端功能」「Vue 渐进式接入路线」「禁止事项」三节。
+> 新代码需遵守现有模块接口、Vue island 与事件委托约定；公开构建检查不依赖内部资料。
 
 ---
 

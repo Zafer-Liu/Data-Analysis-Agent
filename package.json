@@ -11,14 +11,13 @@
     "build": "vite build --config frontend/config/vite.config.js && node scripts/build-chat.mjs",
     "build:chat": "node scripts/build-chat.mjs",
     "build:check": "node scripts/build-chat.mjs",
-    "check:regressions": "python scripts/run_required_regressions.py --check-only",
-    "test:contracts": "python scripts/run_required_regressions.py --suite python",
-    "test:frontend": "python scripts/run_required_regressions.py --suite frontend",
+    "check:publication": "python scripts/check_public_boundary.py",
+    "check:tools": "python scripts/check_tool_contracts.py",
     "test:charts": "python -m pytest Function/Charts_generation/tests -q",
     "format": "prettier --write \"frontend/core/**/*.js\" \"frontend/entries/**/*.js\" \"frontend/config/*.js\" \"eslint.config.js\" \"package.json\"",
     "format:check": "prettier --check \"frontend/core/**/*.js\" \"frontend/entries/**/*.js\" \"frontend/config/*.js\" \"eslint.config.js\" \"package.json\"",
     "lint": "eslint \"frontend/**/*.js\" \"static/js/**/*.js\"",
-    "quality": "npm run format:check && npm run lint && npm run build:check && npm run test:frontend && python scripts/generate_tool_inventory.py --check && npm run test:charts && npm run test:contracts"
+    "quality": "npm run check:publication && npm run format:check && npm run lint && npm run build:check && npm run check:tools && npm run test:charts"
   },
   "prettier": {
     "printWidth": 100,

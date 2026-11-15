@@ -1,8 +1,6 @@
-# ============================================================
-#  Business Analytics Agent — .gitignore
-# ============================================================
+# Business Analytics Agent — local data and publication boundaries
 
-# ---- Python ----
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -14,13 +12,12 @@ env/
 ENV/
 .python-version
 
-# ---- Build / dist ----
+# Build tools and generated files
 node_modules/
 build/
 dist/
 frontend/dist/
-# The Flask app serves Vite output directly from static/dist in source builds.
-# Keep generated runtime assets trackable so GitHub users do not load a 404 shell.
+# Flask serves these reviewed runtime assets from source checkouts.
 static/dist/*
 !static/dist/
 !static/dist/*.js
@@ -36,7 +33,7 @@ static/dist/*
 *.egg-info/
 .eggs/
 
-# ---- Runtime / cache ----
+# Runtime data and caches
 .deps_installed
 .session_tmps/
 outputs/
@@ -50,66 +47,32 @@ uploads/
 auth.db
 auth.db-wal
 auth.db-shm
+.pnpm-store/
+secret_key
+business_canvas/*.sqlite
+business_canvas/*.sqlite-journal
+*.sqlite-shm
+*.sqlite-wal
 
-# ---- Regression tests ----
-# Version the shared runtime regressions; keep unrelated local experiments ignored.
-/tests/*
-!/tests/test_chart_selector.py
-!/tests/chat-bundle.test.mjs
-!/tests/markdown-stream.test.mjs
-!/tests/sse-retry.test.mjs
-!/tests/ui-registry.test.mjs
-!/tests/test_account_menu.py
-!/tests/test_admin_console.py
-!/tests/test_desktop_launcher.py
-!/tests/test_diagram_theme.py
-!/tests/test_feishu_bot.py
-!/tests/test_gpu_analysis_fallback.py
-!/tests/test_heatmap_generation.py
-!/tests/test_hosted_models.py
-!/tests/test_model_api_security.py
-!/tests/test_privacy_boundaries.py
-!/tests/test_developer_api_removed.py
-!/tests/test_quota_model_ledger.py
-!/tests/test_report_export_regressions.py
-!/tests/test_sql_shadow.py
-!/tests/test_table_ingest.py
-!/tests/test_tool_governance.py
-!/tests/test_workspace_artifact_cleanup.py
+# Private project material. Never add publication exceptions for these roots.
+/docs/
+/tests/
+/Test/
+/memory/
+/01-notes-for-development.md
+/test.bat
 
-# Keep the tests already tracked by Git for GitHub Actions, but do not add
-# newly created local tests to the repository.
-Test/*
-!Test/test_workflow_contracts.py
-!Test/test_workflows.py
-!Test/test_workflow_scheduler.py
-!Test/test_job_terminal_listeners.py
-!Test/test_workflow_runtime.py
-!Test/test_workspace_storage_workflow_refs.py
-!Test/test_workflow_frontend_panel.py
-!Test/test_workflow_sqlite_locking.py
-!Test/fixtures/
-!Test/fixtures/workflows/
-!Test/fixtures/workflows/operating_analysis_v1.json
-Test/local_*.py
-Test/test_workspace_storage_cleanup.py
-
-# Keep all development tests local.
-Test/
-
-# ---- IDE / editor ----
+# Editors and operating systems
 .idea/
 .vscode/
 *.swp
 *.swo
 .DS_Store
 Thumbs.db
+desktop.ini
 .workbuddy
 
-# ---- OS ----
-desktop.ini
-
-# ---- Local secrets / config ----
+# Local secrets and configuration
 .env
 .env.local
 *.local
@@ -118,29 +81,12 @@ LLM/mcp_config.json
 LLM/embedding_config.json
 data/datasource_config.json
 .playwright-mcp
-docs/*
-!docs/14-local-duckdb-concurrency-import-plan.md
-!docs/10-ai-team-workflow-optimization-plan.md
-!docs/11-ai-team-workflow-wf0-decisions.md
-!docs/21-edition-boundaries.md
-!docs/02-architecture.md
-!docs/03-conventions.md
-!docs/04-api-reference.md
-!docs/06-analysis-skills.md
-!docs/07-rag-rule.md
-!docs/12-d6-tool-discovery.md
-!docs/23-desktop-packaging.md
-!docs/feature-sync-1.4.md
-!docs/hosted-configuration.md
-test.bat
-01-notes-for-development.md
+.claude
+.agents/
+.uploads/
+/.zvec-grep
 
-
-# ---- Large assets that should not be tracked ----
-*.psd
-!Banner.psd
-
-# ---- Ongoing work / WIP (next-version, not ready to push) ----
+# Private development and integration material
 MCP/Flowchart
 MCP/mindmap
 MCP/playwright
@@ -150,123 +96,18 @@ config/hooks.json
 config/hooks-history.json
 config/feishu-bot.json
 package-lock.json
-.claude
-.agents/
-.uploads/
-memory/
-# Keep local maintenance scripts private, but version the three scripts required by
-# `pnpm run build` so release runners can build the chat bundle.
+
+# Only public build and publication checks belong in the repository.
 scripts/*
 !scripts/build-chat.mjs
 !scripts/clean-chat-chunks.mjs
 !scripts/verify-chat-bundle.mjs
-!scripts/generate_tool_inventory.py
-# Public version updater used by the root double-click launcher.
+!scripts/check_public_boundary.py
+!scripts/check_tool_contracts.py
 !scripts/update-frontend-version.ps1
-# Untracked assets
+
+# Local assets and launchers
+*.psd
+!Banner.psd
 Information/assets/LOGO.png
-
-# Local package cache, runtime secrets, and business-canvas state
-.pnpm-store/
-secret_key
-business_canvas/*.sqlite
-business_canvas/*.sqlite-journal
-*.sqlite-shm
-*.sqlite-wal
-
-# TimesFM optional-service regression tests and implementation plan
-!tests/test_timesfm_integration.py
-!tests/forecast-settings.test.mjs
-!tests/test_local_services.py
-!tests/local-services-settings.test.mjs
-!docs/24-specialist-model-compute-plan.md
-/.zvec-grep
-/docs
-/tests
-# Version shared contracts and required regressions; keep other local experiments ignored.
-!/docs/
-/docs/*
-!/docs/team-tools-a2a.md
-!/tests/
-/tests/*
-!/tests/test_agent_team_tools.py
-!/tests/test_team_a2a.py
-!/tests/test_team_a2a_api.py
-!/tests/test_data_source_routing.py
-!/tests/test_knowledge_retrieval.py
-!/tests/test_required_regressions.py
-!/tests/test_ontology_import.py
-!/tests/test_tool_governance.py
-!/tests/test_privacy_boundaries.py
-!/tests/test_sql_shadow.py
-!/tests/required-regressions.json
-!/tests/chat-bundle.test.mjs
-!/tests/bundle-verifier.test.mjs
-!/tests/markdown-stream.test.mjs
-!/tests/sse-retry.test.mjs
-!/tests/ui-registry.test.mjs
-!/scripts/run_required_regressions.py
-!/docs/quality-gates.md
-!/docs/12-d6-tool-discovery.md
-!/docs/optimization-cost.md
-!/docs/optimization-engine.md
-!/docs/optimization-semantics.md
-!/docs/optimization-execution.md
-!/docs/optimization-frontend.md
-!/docs/optimization-validation.md
-!/tests/test_ontology_schema.py
-!/tests/test_ontology_semantics.py
-!/tests/test_ontology_api.py
-!/tests/test_semantic_lineage.py
-!/tests/test_semantic_history_api.py
-!/tests/test_semantic_tool_integration.py
-!/tests/test_goal_delivery.py
-!/tests/test_evidence_lineage.py
-!/tests/test_execution_lifecycle.py
-!/tests/test_execution_policy_review.py
-!/tests/test_execution_api_workflow.py
-!/tests/test_optimization_cost.py
-!/tests/test_agent_optimization_integration.py
-!/tests/test_number_audit_goals.py
-!/tests/api-client.test.mjs
-!/tests/request-state.test.mjs
-!/tests/ontology-ui.test.mjs
-!/tests/frontend-teams.test.mjs
-!/tests/frontend-knowledge.test.mjs
-!/tests/frontend-knowledge-ui.test.mjs
-!/tests/fixtures/
-/tests/fixtures/*
-!/tests/fixtures/ontology_school_score/
-/tests/fixtures/ontology_school_score/*
-!/tests/fixtures/ontology_school_score/school_score.yaml
-!/tests/fixtures/optimization_cost/
-/tests/fixtures/optimization_cost/*
-!/tests/fixtures/optimization_cost/manifest.json
-!/tests/fixtures/optimization_cost/snapshot.json
-!/scripts/run_optimization_baseline.py
-!/scripts/verify_bigdata_scale.py
-!/tests/test_data_streaming_integration.py
-!/tests/test_compute_tool_integration.py
-!/tests/test_dataset_api.py
-!/tests/test_dataset_tool_consumption.py
-!/tests/test_dataset_commit_jobs.py
-!/tests/test_dataset_packaging.py
-!/tests/test_dataset_foundation.py
-!/tests/test_dataset_import.py
-!/tests/test_cluster_app_integration.py
-!/tests/test_cluster_sources.py
-!/tests/test_cluster_hs2_transport.py
-!/tests/test_remote_m3_owned.py
-!/tests/test_torch_rnn.py
-!/tests/compute-data.test.mjs
-!/tests/compute-data-ui-20261114.test.mjs
-!/docs/m3-bda-foundation.md
-!/docs/m3-bda-import.md
-!/docs/m3-bda-frontend.md
-!/docs/m3-runner.md
-!/docs/m3-client.md
-!/docs/bda-cluster.md
-!/docs/m3-bda-validation.md
-!/docs/28-remote-training-big-data-plan.md
-!/docs/29-training-bigdata-integration-contract.md
 更新前端版本号.bat

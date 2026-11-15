@@ -1,0 +1,4 @@
+#!/bin/sh
+# Inspect outgoing trees before Git can transmit private project material.
+hook_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 1
+exec python -B "$hook_dir/../scripts/check_public_boundary.py" --push "$@"

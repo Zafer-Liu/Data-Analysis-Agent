@@ -106,7 +106,7 @@
 | **可视化与导出** | 使用 41 种图表，导出 Excel、Word 或 PowerPoint 成果。 |
 | **自由选择模型** | 接入 OpenAI 兼容 API，或发现兼容的本地模型服务。 |
 | **扩展分析流程** | 添加业务知识、分析 Skills、MCP 工具或飞书多维表格集成。 |
-| **调用分析团队** | 主 Agent 可构建并调用受限子 Agent；提供 A2A 1.0 的发送、查询和取消接口。[使用说明](./docs/team-tools-a2a.md) |
+| **调用分析团队** | 主 Agent 可构建并调用受限子 Agent；提供 A2A 1.0 的发送、查询和取消接口。 |
 
 ---
 
@@ -524,8 +524,7 @@ Model
 
 本次将私有版现有功能同步至公版：包括只读运营后台、桌面云账号与模型网关、邀请与额度流水、浏览器和网页表格采集、网页版本地数据保存、PyTorch GRU/LSTM、图表主题与 PNG 导出、SQL 内存副本及数字溯源、画布保存重试、Skills 标签和 SSE 稳定性改进。
 
-直接运行 `python app.py` 和默认桌面版均无需云登录，使用自己的模型配置。托管服务仍保留账户认证；桌面云认证仅在显式设置 `BAA_CLOUD_AUTH_URL` 时启用。参见 [完整同步清单](./docs/feature-sync-1.4.md) 和 [托管配置说明](./docs/hosted-configuration.md)。
-
+直接运行 `python app.py` 和默认桌面版均无需云登录，使用自己的模型配置。托管服务仍保留账户认证；桌面云认证仅在显式设置 `BAA_CLOUD_AUTH_URL` 时启用。
 ### 本地模型与服务（源码新增）
 
 在设置 → 本地服务中，统一管理多个 HTTP / Docker 连接。自定义 HTTP 支持健康检查与手动 JSON 请求；OpenAI 兼容服务可发现模型并加入 LLM 列表；TimesFM 作为预测适配器，支持 `run_analysis`、回测、结果表及图表导出。连接、配置与能力边界见 [本地服务说明](deploy/local-services/README.md)。默认不下载模型、不安装模型依赖、不拉取镜像。

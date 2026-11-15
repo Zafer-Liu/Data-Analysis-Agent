@@ -106,7 +106,7 @@ Thank you to Infistar.cc for sponsoring Data-Analysis-Agent! It provides stable 
 | **Visualize and export** | Choose from 41 chart types and export Excel, Word, or PowerPoint deliverables. |
 | **Choose your model** | Connect OpenAI-compatible APIs or discover compatible local services. |
 | **Extend the workflow** | Add business knowledge, analysis Skills, MCP tools, or Feishu Bitable integration. |
-| **Delegate to a team** | Let the main Agent construct and call bounded subagents, with A2A 1.0 send, get, and cancel endpoints. [Protocol and usage](./docs/team-tools-a2a.md) |
+| **Delegate to a team** | Let the main Agent construct and call bounded subagents, with A2A 1.0 send, get, and cancel endpoints. |
 
 ---
 
@@ -507,8 +507,7 @@ This is especially useful when you frequently demonstrate, debug, or run multipl
 
 The public source now includes the existing private-edition features: the read-only administration console, desktop cloud authentication and model gateways, referral and quota ledgers, browser/table ingestion, browser-local persistence, PyTorch GRU/LSTM, chart themes and PNG export, in-memory SQL transformations and numeric provenance checks, canvas save recovery, Skill tags, and SSE reliability improvements.
 
-Direct `python app.py` launches and default desktop packages require no cloud login and use your own model configuration. Hosted services retain account authentication; desktop cloud authentication is enabled only by an explicitly configured `BAA_CLOUD_AUTH_URL`. See the [sync inventory](./docs/feature-sync-1.4.md) and [hosted configuration](./docs/hosted-configuration.md).
-
+Direct `python app.py` launches and default desktop packages require no cloud login and use your own model configuration. Hosted services retain account authentication; desktop cloud authentication is enabled only by an explicitly configured `BAA_CLOUD_AUTH_URL`.
 ### Local models and services (source update)
 
 Manage HTTP and Docker connections in **Settings → Local services**. Custom HTTP connections support health checks and manual JSON requests; OpenAI-compatible services can discover models and add them to the LLM list. TimesFM is a forecasting adapter with `run_analysis`, backtesting, result tables, and chart export. See the [local services guide](./deploy/local-services/README.md) for configuration and capability boundaries. No models, model dependencies, or container images are downloaded automatically.
