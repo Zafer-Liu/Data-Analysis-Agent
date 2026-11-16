@@ -148,6 +148,8 @@ def unnecessary_dependency_data(item) -> bool:
             and relative.endswith(".pdf")
         )
         or "/sklearn/datasets/data/" in f"/{relative}"
+        # PyArrow's hook collects Parquet test fixtures alongside runtime data.
+        or "/pyarrow/tests/" in f"/{relative}"
     )
 
 
